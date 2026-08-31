@@ -599,8 +599,7 @@ class TestMcpTools:
 class TestCli:
     def _run(self, monkeypatch, tmp_repo, *args):
         monkeypatch.setattr(cli, "_cli_repo", lambda: tmp_repo)
-        monkeypatch.setattr(sys, "argv", ["contexer", *args])
-        cli.main()
+        cli.dispatch(list(args))
 
     def test_retire_then_restore_round_trip(self, tmp_repo, monkeypatch, capsys):
         eid = _approved(tmp_repo)

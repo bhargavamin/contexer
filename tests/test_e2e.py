@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from contexer import store
+from tests.seams import redirect_store_dir
 from contexer import cli
 
 
@@ -35,14 +36,14 @@ def tmp_home(tmp_path, monkeypatch):
 @pytest.fixture
 def tmp_repo(tmp_path, monkeypatch):
     """Redirects STORE_DIR to a temp path and returns a fake repo path."""
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     return str(tmp_path / "myrepo")
 
 
 @pytest.fixture
 def git_repo(tmp_path, monkeypatch):
     """Real git repo with global/system git config isolated; returns its path."""
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
     repo = tmp_path / "gitrepo"
@@ -127,7 +128,7 @@ class TestInstall:
         # when the repo actually has pending decisions, and fires once (flag consumed).
         from contexer import store
         from contexer.adapters import claude
-        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        redirect_store_dir(monkeypatch, tmp_path / ".contexer")
         repo = str(tmp_path / "repo")
         store.update_decision(repo, "Never deploy on Fridays", "s", "constraint")
         out = json.loads(claude.review_nudge(repo, "{}"))
@@ -923,7 +924,7 @@ class TestReactionMatrix:
         return [str(bare), str(simple), str(rich), str(missing)]
 
     def test_gap_invariants_hold_for_all_combinations(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        redirect_store_dir(monkeypatch, tmp_path / ".contexer")
         for repo in self._repo_states(tmp_path):
             for insight in ["low", "medium", "high", "", "banana"]:
                 result = store.bootstrap_scan(repo, insight=insight)
@@ -941,7 +942,7 @@ class TestReactionMatrix:
                     assert g.get("assumption", "x"), label
 
     def test_every_advertised_option_has_a_handler(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        redirect_store_dir(monkeypatch, tmp_path / ".contexer")
         for repo in self._repo_states(tmp_path):
             text = "\n".join(store._build_bootstrap_context(repo))
             rows = re.findall(r"^\s+(\d)\. (\w+) -", text, re.MULTILINE)
@@ -1582,23 +1583,19 @@ class TestUninstall:
 # ── 12. main() dispatch ───────────────────────────────────────────────────────
 
 class TestMainDispatch:
-    def test_unknown_command_exits_nonzero(self, tmp_home, monkeypatch, capsys):
-        monkeypatch.setattr(sys, "argv", ["contexer", "badcmd"])
+    def test_unknown_command_exits_nonzero(self, tmp_home, capsys):
         with pytest.raises(SystemExit) as exc:
-            cli.main()
+            cli.dispatch(["badcmd"])
         assert exc.value.code == 1
         assert "Unknown command" in capsys.readouterr().err
 
-    def test_install_command_dispatches(self, tmp_home, monkeypatch):
-        monkeypatch.setattr(sys, "argv", ["contexer", "install"])
-        cli.main()  # should not raise
+    def test_install_command_dispatches(self, tmp_home):
+        cli.dispatch(["install"])  # should not raise
         assert (tmp_home / ".claude.json").exists()
 
-    def test_uninstall_command_dispatches(self, tmp_home, monkeypatch):
-        monkeypatch.setattr(sys, "argv", ["contexer", "install"])
-        cli.main()
-        monkeypatch.setattr(sys, "argv", ["contexer", "uninstall"])
-        cli.main()  # should not raise
+    def test_uninstall_command_dispatches(self, tmp_home):
+        cli.dispatch(["install"])
+        cli.dispatch(["uninstall"])  # should not raise
 
 
 # ── 13. Upgrade from a legacy (pre-CLI) install ───────────────────────────────
@@ -1929,7 +1926,7 @@ class TestNonGitProjectDir:
 
     @pytest.fixture
     def non_git_project(self, tmp_home, monkeypatch):
-        monkeypatch.setattr(store, "STORE_DIR", tmp_home / ".contexer")
+        redirect_store_dir(monkeypatch, tmp_home / ".contexer")
         proj = tmp_home / "work" / "dashboards"
         proj.mkdir(parents=True)   # deliberately NOT a git repo
         store.update_decision(str(proj), "use terraform for dashboard provisioning",
@@ -1992,7 +1989,7 @@ class TestNonGitProjectDir:
     def test_home_dir_cwd_never_selected(self, tmp_home, monkeypatch):
         # A session opened in the home directory must NOT select a home-dir store -
         # the fallback refuses insane dirs and the normal no-context path applies.
-        monkeypatch.setattr(store, "STORE_DIR", tmp_home / ".contexer")
+        redirect_store_dir(monkeypatch, tmp_home / ".contexer")
         monkeypatch.chdir(tmp_home)
         payload = store.session_start_payload("")
         assert "no context stored" in payload["status"]
@@ -2001,7 +1998,7 @@ class TestNonGitProjectDir:
     def test_deleted_cwd_never_crashes_the_hook(self, tmp_home, monkeypatch):
         # os.getcwd() raises OSError when the cwd was unlinked; the payload builders
         # have no outer guard, so the fallback must swallow it (review finding, PR #99).
-        monkeypatch.setattr(store, "STORE_DIR", tmp_home / ".contexer")
+        redirect_store_dir(monkeypatch, tmp_home / ".contexer")
         monkeypatch.setattr(store.os, "getcwd", lambda: (_ for _ in ()).throw(OSError()))
         payload = store.session_start_payload("")
         assert "no context stored" in payload["status"]
