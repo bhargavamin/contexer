@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from contexer import evidence, spool, store
+from contexer import evidence, share_policy, spool, store
 from contexer.adapters import claude, codex, cursor, gemini
 
 # The keys that legitimately differ between two hosts observing the same edit.
@@ -101,6 +101,28 @@ class TestUserDirectiveEmission:
         assert event["source"] == "claude_prompt"
         assert "conventional commits" in event["summary"]
         assert event["files"] == [] and event["attributes"] == {}
+
+    def test_verified_host_prompt_enqueues_after_capture_returns(self, tmp_repo, monkeypatch):
+        policy = share_policy.build_policy(
+            repo_path=tmp_repo,
+            repo_key="github.com/org/repo",
+            endpoint="https://mcp.contexer.ai/mcp",
+            account_fingerprint="acctfp_v1_7M4Q2PX9C6N8",
+            team_id="40000000-0000-4000-8000-000000000001",
+            team_name="Platform",
+            entries=[],
+            include_existing=True,
+        )
+        share_policy.save_policy(tmp_repo, policy)
+        monkeypatch.setattr(store, "run_git", lambda *_args: "https://github.com/org/repo.git")
+        raw = _json.dumps({"prompt": "always use conventional commits", "session_id": "s1"})
+
+        out = _json.loads(claude.capture_constraint(tmp_repo, raw))
+
+        assert "additionalContext" in out["hookSpecificOutput"]
+        (intent,) = share_policy.read_outbox()
+        assert intent["decision_id"] == store.load(tmp_repo)["entries"][0]["id"]
+        assert share_policy.read_receipts()[0]["state"] == "queued"
 
     def test_plain_prompt_emits_nothing(self, tmp_repo):
         raw = _json.dumps({"prompt": "please add a button", "session_id": "s1"})
