@@ -1,5 +1,6 @@
 """Closed-vocabulary, fail-soft diagnostics for decision proposal operations."""
 import json
+import re
 
 from contexer import decision_observability
 
@@ -41,6 +42,7 @@ def test_capability_read_emits_correlated_span_and_terminal_log(monkeypatch):
     }
     assert log["traceId"] == span["traceId"]
     assert log["spanId"] == span["spanId"]
+    assert re.fullmatch(r"diag_[A-Z0-9]{16}", log["fields"]["diagnosticId"])
 
 
 def test_invalid_diagnostic_vocabulary_is_not_copied(monkeypatch):
@@ -57,6 +59,7 @@ def test_invalid_diagnostic_vocabulary_is_not_copied(monkeypatch):
         result=sentinel,
         reason_code=sentinel,
         error_class=sentinel,
+        diagnostic_id=sentinel,
     )
 
     serialized = json.dumps(records)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import queue
+import re
 import secrets
 import sys
 import threading
@@ -18,18 +19,44 @@ from collections.abc import Iterable
 
 _FIXED_MESSAGE = "decision operation completed"
 _MAX_PENDING_RECORD_SETS = 1024
+_DIAGNOSTIC_RE = re.compile(r"diag_[A-Z0-9]{16}\Z")
 
 _OPERATIONS = {
     "capabilityRead": (
         "decision_proposal.capability_read",
         "decisionProposalCapabilityRead",
     ),
+    "policyChange": (
+        "decision_proposal.policy_change",
+        "decisionProposalPolicyChange",
+    ),
+    "scan": (
+        "decision_proposal.scan",
+        "decisionProposalScan",
+    ),
+    "enqueue": (
+        "decision_proposal.enqueue",
+        "decisionProposalEnqueue",
+    ),
 }
-_RESULTS = {"success", "refused", "failure"}
+_RESULTS = {"success", "queued", "skipped", "no_op", "refused", "failure"}
 _REASON_CODES = {
     "none",
     "unsupported_protocol",
+    "account_mismatch",
+    "policy_mismatch",
+    "repo_mismatch",
+    "team_mismatch",
+    "not_member",
     "not_authorized",
+    "ineligible_revision",
+    "global_decision",
+    "baseline_revision",
+    "duplicate_receipt",
+    "corrupt_queue",
+    "lock_busy",
+    "policy_disabled",
+    "cancelled",
     "rate_limited",
     "transport_error",
     "validation_error",
@@ -38,6 +65,8 @@ _ERROR_CLASSES = {
     "none",
     "authorization",
     "capability",
+    "conflict",
+    "lock",
     "rate_limit",
     "transport",
     "validation",
@@ -93,6 +122,7 @@ def emit_decision_operation(
     reason_code: str,
     error_class: str,
     started_ns: int | None = None,
+    diagnostic_id: str | None = None,
 ) -> None:
     """Best-effort enqueue of one correlated span and terminal structured-log event.
 
@@ -110,7 +140,10 @@ def emit_decision_operation(
 
         trace_id = secrets.token_hex(16)
         span_id = secrets.token_hex(8)
-        diagnostic_id = f"diag_{secrets.token_hex(8)}" if result == "failure" else None
+        if diagnostic_id is not None and not _DIAGNOSTIC_RE.fullmatch(diagnostic_id):
+            diagnostic_id = None
+        if result == "failure" and diagnostic_id is None:
+            diagnostic_id = f"diag_{secrets.token_hex(8).upper()}"
         ended_ns = time.monotonic_ns()
         duration_ms = (
             max(0, ended_ns - started_ns) / 1_000_000
