@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.45.1](https://github.com/bhargavamin/contexer/compare/v0.45.0...v0.45.1) (2026-08-31)
+
+
+### Bug Fixes
+
+* harden automatic decision proposal delivery ([36d0f3f](https://github.com/bhargavamin/contexer/commit/36d0f3f4263284956147121194604d2a6c417643))
+* harden automatic proposal delivery ([9457f98](https://github.com/bhargavamin/contexer/commit/9457f98e49f442b41eabba7b766e691691a24fa5))
+
 ## [0.45.0](https://github.com/bhargavamin/contexer/compare/v0.44.0...v0.45.0) (2026-08-31)
 
 
