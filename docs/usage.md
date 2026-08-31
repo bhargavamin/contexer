@@ -118,6 +118,12 @@ The store is plain JSON at `~/.contexer/`. Edit it directly if you prefer.
 | `contexer share` | Show a numbered list of shareable decisions and multi-select which to push (e.g. `1,3` or `all`) |
 | `contexer share <id[,id2…]> [--yes]` | Push the given decision(s) to your personal cloud. Previews what would leave your machine and confirms first; `--yes` skips the prompt. Set `skip_confirm = true` in `~/.contexer/config.toml` to always skip it |
 | `contexer reconcile <id> [--team NAME_OR_ID] [--yes]` | Preview a corrected local decision and submit it to the selected team for lead review |
+| `contexer share-policy show` | Show this repository's automatic proposal policy and queued work |
+| `contexer share-policy enable --team NAME_OR_ID [--include-existing]` | Preview and explicitly enable automatic proposals to one team; new decisions only unless `--include-existing` is supplied |
+| `contexer share-policy disable` | Stop creating automatic proposals for this repository without discarding queued work |
+| `contexer share-policy flush` | Try queued proposals now |
+| `contexer share-policy attention` | List proposals that need a human decision before they can continue |
+| `contexer share-policy retry <intent-id>` | Retry one proposal after resolving the reported issue |
 | `contexer share --all [--yes]` | Push every non-ignored decision in this repo (previews the list and confirms first). Global rules are *not* included - use `--global` |
 | `contexer share --global [--yes]` | Push your global rules (`~/.contexer/_global.json`) - the ones that apply to every repo. They go up unbound to any repo, so this is the one `share` that works outside a git repository |
 | `contexer guard [path…] [--explain]` | Check staged files against approved decisions at commit time — see [commit-time guard](#commit-time-guard) |
@@ -231,6 +237,29 @@ If an outage interrupts a confirmed submission, Contexer retries with the same i
 Changed server heads stop for a fresh preview instead of being blindly retried.
 The currently approved team version remains active until the lead approves the candidate.
 Older Teams servers fall back to the compatible personal-sync-then-share flow.
+
+### Automatic team proposals
+
+Automatic proposals are off until you explicitly enable them for a repository:
+
+```bash
+contexer share-policy enable --team NAME_OR_ID
+```
+
+Before anything is enabled, Contexer shows the signed-in account, exact repository, destination
+team, and sharing scope, then requires a confirmation. The general `skip_confirm` setting does
+not bypass this approval. The default is future-only; add `--include-existing` if you also want
+currently approved local decisions to be proposed.
+
+The policy is bound to one account, one exact canonical repository, and one target team. It
+proposes only approved repository-local revisions; global rules are excluded. Every proposal
+still needs normal team review — enabling the policy never approves a team decision. If the
+account, repository, destination, or server capability no longer matches, Contexer stops that
+work and surfaces it through `contexer share-policy attention` instead of weakening the checks.
+
+Use `contexer share-policy show` to inspect the policy and queue, `disable` to stop creating new
+proposals, `flush` to try queued work immediately, and `retry <intent-id>` after resolving an
+attention item.
 
 When a future enriched team pull reports that a lead changed your linked decision in the web app,
 Contexer stores that wording as a local Suggested Update for review.
