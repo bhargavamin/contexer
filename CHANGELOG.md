@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.45.0](https://github.com/bhargavamin/contexer/compare/v0.44.0...v0.45.0) (2026-08-31)
+
+
+### Features
+
+* add automatic decision proposal workflow ([b3e6a1d](https://github.com/bhargavamin/contexer/commit/b3e6a1df7b2c9d433111fe5dbfd196c1dc2d23fa))
+* add automatic decision proposal workflow ([4ef8a16](https://github.com/bhargavamin/contexer/commit/4ef8a16e74b0b9d17546a705c1784e8339b6762a))
+* add explicit automatic decision proposal policies ([b2417a4](https://github.com/bhargavamin/contexer/commit/b2417a42ab79edeacc9823b4f309eba4f912e280))
+
+
+### Reverts
+
+* remove automatic decision proposal workflow ([c650844](https://github.com/bhargavamin/contexer/commit/c650844060856b9cc9049e9ec058772296641abb))
+
 ## [0.44.0](https://github.com/bhargavamin/contexer/compare/v0.43.0...v0.44.0) (2026-08-30)
 
 
