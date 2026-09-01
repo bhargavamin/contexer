@@ -54,7 +54,6 @@ from importlib.metadata import PackageNotFoundError, distribution, version as _d
 from pathlib import Path
 from typing import NamedTuple
 
-from contexer import sidecars
 
 PYPI_JSON_URL = "https://pypi.org/pypi/contexer/json"
 
@@ -193,7 +192,7 @@ def state_path() -> Path:
     visible at the call site through the module-object form.
     """
     from contexer import store
-    return store.STORE_DIR / sidecars.filename("update_check")
+    return store.sidecar_path("update_check")
 
 
 def read_state() -> dict:
@@ -220,7 +219,7 @@ def write_state(state: dict) -> bool:
     """
     from contexer import store
     try:
-        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        store.ensure_store_dir()
         store.atomic_write(state_path(), json.dumps(state))
         return True
     except (OSError, TypeError, ValueError):

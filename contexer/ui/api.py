@@ -477,7 +477,7 @@ def _config() -> dict:
         # console would have to arbitrate. Still no token here - auth_state carries no secret.
         "login": {**login, "logged_in": login["state"] == "logged_in"},
         "version": daemon.current_version(),
-        "store_dir": str(store.STORE_DIR),
+        "store_dir": str(store.store_dir()),
         "config_path": str(config.CONFIG_PATH),
         "stores": len(console_api.list_stores()),
     }

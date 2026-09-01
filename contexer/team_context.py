@@ -48,7 +48,7 @@ _STALE_AFTER = 24 * 3600
 
 
 def _cache_path(repo_path: str):
-    return store.STORE_DIR / sidecars.filename("team_cache", slug=store.repo_slug(repo_path))
+    return store.sidecar_path("team_cache", slug=store.repo_slug(repo_path))
 
 
 def _empty_cache() -> dict:
@@ -68,7 +68,7 @@ def _load_cache(repo_path: str) -> dict:
 
 
 def _save_cache(repo_path: str, data: dict) -> None:
-    store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+    store.ensure_store_dir()
     store.atomic_write(_cache_path(repo_path), json.dumps(data, indent=2, ensure_ascii=False))
 
 
@@ -102,7 +102,7 @@ def clear_caches() -> int:
     Fail-soft per file: a cache that will not delete is left behind rather than raising into a
     login that has already succeeded."""
     try:
-        paths = sorted(store.STORE_DIR.glob(".team_*.json"))
+        paths = sorted(store.store_dir().glob(sidecars.glob_for("team_cache")))
     except OSError:
         return 0
     removed = 0
@@ -350,7 +350,7 @@ def poll(repo_path: str, *, profile: config.Profile | None = None) -> list[dict]
 
 
 def _seen_path(repo_path: str, consumer: str):
-    return store.STORE_DIR / sidecars.filename("team_seen", slug=store.repo_slug(repo_path),
+    return store.sidecar_path("team_seen", slug=store.repo_slug(repo_path),
                                                consumer=consumer)
 
 
@@ -375,7 +375,7 @@ def _read_seen(repo_path: str, consumer: str) -> int | None:
 
 
 def _write_seen(repo_path: str, consumer: str, seq: int) -> None:
-    store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+    store.ensure_store_dir()
     store.atomic_write(_seen_path(repo_path, consumer), json.dumps({"seq": seq}, ensure_ascii=False))
 
 
@@ -442,7 +442,7 @@ def _drop_legacy_pending(repo_path: str) -> None:
     common case — an existence check up front avoids an unlink()-then-catch syscall on every
     single prompt. Still best-effort — a file that vanishes between the check and the unlink
     is silently ignored."""
-    path = store.STORE_DIR / sidecars.filename("team_pending", slug=store.repo_slug(repo_path))
+    path = store.sidecar_path("team_pending", slug=store.repo_slug(repo_path))
     if path.exists():
         try:
             path.unlink()

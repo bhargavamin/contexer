@@ -6,13 +6,14 @@ from pathlib import Path
 import pytest
 
 from contexer import spool, store
+from tests.conftest import redirect_store_dir
 from contexer.adapters import gemini
 
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     return tmp_path
 
 

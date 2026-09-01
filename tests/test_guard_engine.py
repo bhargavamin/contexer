@@ -14,6 +14,7 @@ import time
 import pytest
 
 from contexer import guard_engine, revisions, store
+from tests.conftest import redirect_store_dir
 from tests.conftest import _git, _seed_entry, _write
 
 
@@ -453,7 +454,7 @@ class TestDismissGuard:
         # not a dir, in its place) and confirm the error propagates.
         blocker = repo.parent / "not_a_dir"
         blocker.write_text("blocked")
-        monkeypatch.setattr(store, "STORE_DIR", blocker / "sub")
+        redirect_store_dir(monkeypatch, blocker / "sub")
         with pytest.raises(OSError):
             guard_engine.dismiss_guard(str(repo), "dec-1", "a/b.py")
 

@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from contexer import store
+from tests.conftest import redirect_store_dir
 
 
 def _git(*args, cwd):
@@ -41,7 +42,7 @@ def _fresh_canon_cache():
 
 @pytest.fixture
 def store_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     return tmp_path / ".contexer"
 
 

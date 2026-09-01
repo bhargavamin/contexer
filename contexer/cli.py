@@ -7,8 +7,10 @@ import subprocess
 import sys
 import textwrap
 import time
+from collections.abc import Callable
 from importlib.metadata import PackageNotFoundError, version as _dist_version
 from pathlib import Path
+from typing import NamedTuple
 
 from contexer import adapters, updates
 from contexer.adapters.base import _is_corrupt, _load_safe
@@ -31,6 +33,8 @@ Commands:
   restore       Bring one retired decision back: restore <id> [--reason <text>].
   ui            Local web console over the stored decisions: ui [--open] [--stop]
                 [--status] [--port N] [--foreground] [--reset-token].
+  pull          Fetch your team's decisions for this repo into the local team cache.
+                Local-first: quiet no-op outside team mode or when the cloud is unreachable.
   share         Push local decisions to your team cloud context: share [id | --all | --global]
                 (default: latest). --global pushes the cross-repo rules in _global.json.
   reconcile     Submit a corrected local decision for team review:
@@ -138,7 +142,7 @@ def _read_team_cache(store_dir: Path, repo_path: str) -> dict:
     a module constant frozen at import time. Tolerant of missing/corrupt files, like
     team_context._load_cache - a diagnostic must never raise on bad state, ZERO network."""
     from contexer import store as _store
-    path = store_dir / f".team_{_store.repo_slug(repo_path)}.json"
+    path = store_dir / sidecars.filename("team_cache", slug=_store.repo_slug(repo_path))
     if not path.exists():
         return {}
     try:
@@ -2886,64 +2890,101 @@ def guard(rest: list | None = None) -> None:
         _guard_run(rest)
 
 
-def main() -> None:
-    args = sys.argv[1:]
+class Command(NamedTuple):
+    """One `contexer` subcommand: every spelling that reaches it, and what runs.
 
-    if not args:
+    `names[0]` is the primary spelling, the one `USAGE` documents; the rest are aliases
+    (`--version`, `-h`), which is why the version and help FLAGS are one row each here
+    rather than the two extra branches they used to be.
+
+    `run` always takes the remaining argv, even where the handler ignores it, because a
+    uniform signature is what lets `dispatch` call any row without knowing which it holds.
+
+    Every row wraps its handler in a lambda rather than naming the function directly. That
+    is load-bearing: a lambda body resolves the handler as a module global when it RUNS, so
+    `monkeypatch.setattr(cli, "ui_cmd", ...)` still substitutes the command, while a table
+    holding the function object captured at import would silently ignore that patch.
+    """
+    names: tuple[str, ...]
+    run: Callable[[list], None]
+    guarded: bool = True        # wrap in _run_guarded (a mutating command)
+    backstop: bool = True       # the new-release aside may print after this command
+
+
+# The dispatch table. Data, not a chain of `elif cmd ==` branches: every fact about a
+# command (its aliases, whether it is guarded, whether the update aside follows it) is
+# readable in one row, and the set of commands is a value a test can iterate.
+#
+# `TestCommandTable` asserts this table and `USAGE` name the same commands, in both
+# directions. That is not tidiness: they were two hand-kept lists with nothing tying them
+# together, and `pull` was dispatchable but undocumented for releases as a result.
+COMMANDS: tuple[Command, ...] = (
+    Command(("version", "--version", "-V"), lambda rest: version(), guarded=False),
+    Command(("help", "--help", "-h"), lambda rest: _usage(), guarded=False),
+    Command(("install",), lambda rest: install(rest)),
+    Command(("uninstall",), lambda rest: uninstall(rest)),
+    Command(("reinstall",), lambda rest: reinstall()),
+    # `upgrade` IS the remedy the aside would recommend.
+    Command(("upgrade",), lambda rest: upgrade(rest), backstop=False),
+    Command(("review",), lambda rest: review(), guarded=False),
+    Command(("retire",), lambda rest: _lifecycle_cmd(rest, retiring=True)),
+    Command(("restore",), lambda rest: _lifecycle_cmd(rest, retiring=False)),
+    Command(("ui",), lambda rest: ui_cmd(rest)),
+    # `status` already reports the available version on its own line; the aside would
+    # say it twice, and from a cache rather than the live fetch status just made.
+    Command(("status",), lambda rest: status(rest), guarded=False, backstop=False),
+    Command(("pull",), lambda rest: pull(rest)),
+    Command(("share",), lambda rest: share_cmd(rest)),
+    Command(("share-policy",), lambda rest: share_policy_cmd(rest)),
+    Command(("reconcile",), lambda rest: reconcile_cmd(rest)),
+    Command(("reconcile-session",), lambda rest: reconcile_session_cmd(rest)),
+    Command(("login",), lambda rest: login_cmd(rest)),
+    Command(("logout",), lambda rest: logout_cmd(rest)),
+    # `guard` runs on the commit path: it owns its own guarding and its own quiet output,
+    # and a commit hook is the last place to print an unrelated aside.
+    Command(("guard",), lambda rest: guard(rest), guarded=False, backstop=False),
+    Command(("policy",), lambda rest: policy_cmd(rest)),
+    Command(("scope-audit",), lambda rest: scope_audit_cmd(rest)),
+)
+
+_BY_NAME: dict = {name: command for command in COMMANDS for name in command.names}
+
+
+def dispatch(argv: list) -> None:
+    """Run one `contexer` command line. `argv` excludes the program name.
+
+    The whole CLI behind one call, which is the point: `dispatch(["guard", "--explain"])`
+    is that command line, typed, so a test reaches any command without assigning
+    `sys.argv` - a process-global that a test must remember to restore and that says
+    nothing about which command it is exercising.
+
+    Exits the process on an unknown command, as a CLI must; every other exit belongs to
+    the handler that made it.
+    """
+    if not argv:
+        # No subcommand means the assistant launched us as its MCP server over stdio.
+        # It returns when the transport closes, and no aside may be printed: stdout is
+        # the protocol.
         from contexer.server import main as _server
         _server()
         return
 
-    cmd, rest = args[0], args[1:]
-    if cmd in ("version", "--version", "-V"):
-        version()
-    elif cmd in ("help", "--help", "-h"):
-        _usage()
-    elif cmd == "install":
-        _run_guarded(lambda: install(rest))
-    elif cmd == "uninstall":
-        _run_guarded(lambda: uninstall(rest))
-    elif cmd == "reinstall":
-        _run_guarded(reinstall)
-    elif cmd == "upgrade":
-        _run_guarded(lambda: upgrade(rest))
-    elif cmd == "review":
-        review()
-    elif cmd == "retire":
-        _run_guarded(lambda: _lifecycle_cmd(rest, retiring=True))
-    elif cmd == "restore":
-        _run_guarded(lambda: _lifecycle_cmd(rest, retiring=False))
-    elif cmd == "ui":
-        _run_guarded(lambda: ui_cmd(rest))
-    elif cmd == "status":
-        status(rest)
-    elif cmd == "pull":
-        _run_guarded(lambda: pull(rest))
-    elif cmd == "share":
-        _run_guarded(lambda: share_cmd(rest))
-    elif cmd == "share-policy":
-        _run_guarded(lambda: share_policy_cmd(rest))
-    elif cmd == "reconcile":
-        _run_guarded(lambda: reconcile_cmd(rest))
-    elif cmd == "login":
-        _run_guarded(lambda: login_cmd(rest))
-    elif cmd == "logout":
-        _run_guarded(lambda: logout_cmd(rest))
-    elif cmd == "guard":
-        guard(rest)
-    elif cmd == "policy":
-        _run_guarded(lambda: policy_cmd(rest))
-    elif cmd == "scope-audit":
-        _run_guarded(lambda: scope_audit_cmd(rest))
-    elif cmd == "reconcile-session":
-        _run_guarded(lambda: reconcile_session_cmd(rest))
-    else:
-        print(f"Unknown command: {cmd}\n", file=sys.stderr)
+    name, rest = argv[0], argv[1:]
+    command = _BY_NAME.get(name)
+    if command is None:
+        print(f"Unknown command: {name}\n", file=sys.stderr)
         _usage(sys.stderr)
         sys.exit(1)
 
-    # Reached only by a subcommand that completed without exiting. Three commands opt out:
-    # `guard` prints its own on its quiet path, `upgrade` IS the remedy, and `status` already
-    # reports the available version on its own line, so adding the aside would say it twice.
-    if cmd not in ("guard", "upgrade", "status"):
+    if command.guarded:
+        _run_guarded(lambda: command.run(rest))
+    else:
+        command.run(rest)
+
+    # Reached only by a command that completed without exiting.
+    if command.backstop:
         _print_update_backstop()
+
+
+def main() -> None:
+    dispatch(sys.argv[1:])

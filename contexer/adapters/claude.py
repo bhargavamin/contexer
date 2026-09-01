@@ -6,7 +6,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from contexer import evidence, memory_sync, sidecars, store, updates
+from contexer import evidence, memory_sync, store, updates
 from contexer.adapters.base import (
     _BOOTSTRAP_CMD_MARKER,
     _bootstrap_command_text,
@@ -292,10 +292,10 @@ def post_write(repo_path: str, raw: str) -> str:
     through store.hook_repo_from_stdin. That keeps subdirectory, linked-worktree, and non-Git
     projects aligned without putting Git on an editor/prompt hook path.
 
-    Touching ~/.contexer/.pending_capture (via store.STORE_DIR, not a hardcoded home path,
-    so tests that redirect STORE_DIR never touch the real store — #152's best-effort
-    invariant) preserves the capture-reminder signal the shell hook this replaces used to
-    set (consumed by the next UserPromptSubmit anchor)."""
+    Touching ~/.contexer/.pending_capture (via store.sidecar_path, not a hardcoded home
+    path, so tests that redirect the store directory never touch the real store — #152's
+    best-effort invariant) preserves the capture-reminder signal the shell hook this
+    replaces used to set (consumed by the next UserPromptSubmit anchor)."""
     try:
         repo = store.hook_repo_from_stdin(raw, repo_path)
         try:
@@ -314,8 +314,8 @@ def post_write(repo_path: str, raw: str) -> str:
             except Exception:
                 pass
         try:
-            store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-            (store.STORE_DIR / sidecars.filename("pending_capture")).touch()
+            store.ensure_store_dir()
+            store.sidecar_path("pending_capture").touch()
         except OSError:
             pass
         # Shadow-mode evidence, emitted LAST so neither existing signal above can be
@@ -551,8 +551,8 @@ def _import_memory_facts(repo_path: str) -> int:
         if mem is None:
             return 0
         fingerprint = memory_sync.dir_fingerprint(mem)
-        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-        marker = store.STORE_DIR / sidecars.filename("memory_synced", slug=store.repo_slug(repo))
+        store.ensure_store_dir()
+        marker = store.sidecar_path("memory_synced", slug=store.repo_slug(repo))
         if marker.exists() and marker.read_text(encoding="utf-8").strip() == fingerprint:
             return 0
         stored = memory_sync.import_dir(mem, repo)

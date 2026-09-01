@@ -9,6 +9,31 @@ import pytest
 from contexer import remote, store, updates
 
 
+def redirect_store_dir(patcher, path) -> Path:
+    """Point Contexer's store directory at `path` for `patcher`'s lifetime. Returns it.
+
+    The one place the suite chooses which name to write. 66 call sites across 24 files each
+    spelled `monkeypatch.setattr(store, "STORE_DIR", ...)` out by hand, and 4 more assigned
+    the attribute directly and restored it themselves. That count is what has to change if the
+    mechanism ever does. Monkeypatch is not the smell: its automatic restore is why a test may
+    write a module attribute at all, and it is what the 4 hand-written restores lacked.
+
+    `patcher` is any object with pytest's `setattr(obj, name, value)` restore semantics, and it
+    is a parameter rather than a fixture because the call sites are not uniform: most hold the
+    function-scoped `monkeypatch`, test_benchmark_extended.py holds a `pytest.MonkeyPatch()`
+    inside a module-scoped fixture, and either may sit in a `monkeypatch.context()` block. A
+    fixture bound to one would not restore at the right moment for the others.
+
+    The CONSTANT is written, not `store.store_dir` itself, because production resolves the
+    directory through that function on every call: writing the value redirects every builder,
+    and a test that separately reads `store.STORE_DIR` still agrees with it. Substitute
+    `store.store_dir` directly only where the directory must VARY during a single call.
+    """
+    target = Path(path)
+    patcher.setattr(store, "STORE_DIR", target)
+    return target
+
+
 def pytest_collection_modifyitems(config, items):
     """Mark the benchmark-harness tests so CI can deselect them (`-m "not slow"`), and skip
     `perf` tests whenever coverage is measuring, because a wall-clock number taken under a
@@ -67,7 +92,7 @@ def _quiet_update_check(tmp_path, monkeypatch):
 @pytest.fixture
 def tmp_repo(tmp_path, monkeypatch):
     """Redirects STORE_DIR to a temp path and returns a fake repo path."""
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     return str(tmp_path / "repo")
 
 
@@ -331,7 +356,7 @@ def _fake_transport(server: FakeTeamsServer):
 def team_stack(tmp_path, monkeypatch):
     """Hermetic Teams backend: isolates STORE_DIR, pins a git origin, and routes
     RemoteStore's transport to an in-memory FakeTeamsServer. Returns the server."""
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     monkeypatch.setattr(store, "run_git", lambda repo, *a: FakeTeamsServer.ORIGIN)
     server = FakeTeamsServer()
     monkeypatch.setattr(remote, "_acall_tool", _fake_transport(server))
@@ -378,7 +403,7 @@ def repo(git_repo, monkeypatch):
     """`git_repo` with STORE_DIR redirected to a sibling temp dir - for tests
     that read/write the store or the guard's sidecar files, not just git plumbing.
     Same pattern as test_store.py's tmp_repo / session_repo_preferred_over_pointer."""
-    monkeypatch.setattr(store, "STORE_DIR", git_repo.parent / ".contexer")
+    redirect_store_dir(monkeypatch, git_repo.parent / ".contexer")
     return git_repo
 
 

@@ -25,7 +25,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from contexer import config, sidecars, store
+from contexer import config, store
 from contexer.config import Profile, default_endpoint
 
 # Refresh a little before the token actually expires, to avoid a race at the boundary.
@@ -38,7 +38,7 @@ _REFRESH_FAILED_AT = "refresh_failed_at"
 
 
 def _creds_path():
-    return store.STORE_DIR / sidecars.filename("team_creds")
+    return store.sidecar_path("team_creds")
 
 
 def _load_creds() -> dict | None:
@@ -54,7 +54,7 @@ def _load_creds() -> dict | None:
 
 
 def _save_creds(creds: dict) -> None:
-    store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+    store.ensure_store_dir()
     # Atomic write (unique temp + os.replace); mkstemp yields 0o600, so the creds file
     # is never torn or world-readable even mid-write — critical when a refresher process
     # and the foreground process persist rotated tokens concurrently.
@@ -708,7 +708,7 @@ def login(endpoint: str | None = None) -> bool:
         # say "some" rather than printing "-1 queued share(s)".
         count = str(stranded) if stranded > 0 else "some"
         print(f"WARNING: could not clear {count} queued share(s) at "
-              f"{store.STORE_DIR / sidecars.filename('outbox')} - they were queued before this "
+              f"{store.sidecar_path('outbox')} - they were queued before this "
               "login and "
               "would be pushed to this account by the next sync. Team sync was skipped for "
               "safety; delete that file, then run `contexer pull`.", file=sys.stderr)

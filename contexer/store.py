@@ -35,6 +35,48 @@ _FILTERED_DISPLAY = 25            # entries shown when a filter is active
 _BACKLOG_ESCALATE = 10            # pending-review count at which surfacing tone firms up
 
 
+# ── the store directory: one reader, one builder ───────────────────────────────────────
+# `STORE_DIR` is the VALUE; `store_dir()` is the only thing that reads it. That matters for
+# one reason: 35 sites used to create this directory themselves, 34 of them spelling
+# `mode=0o700` while spool.py spelled its own `_DIR_MODE` alias. A private-file guarantee
+# repeated 35 times is a permissions bug the first time one copy forgets, and nothing would
+# report it. (Counts measured against the merge-base of the change that introduced this.)
+#
+# The constant stays public: it is what a test substitutes, and monkeypatch's automatic
+# restore is why that idiom is right rather than a smell. A test needing the directory to
+# vary DURING a call substitutes `store_dir` instead, which the constant cannot offer.
+# Production reads neither directly, and tests/test_sidecars.py fails on any module outside
+# this one that touches `STORE_DIR` - a seam nothing enforces is a seam that erodes.
+
+
+def store_dir() -> Path:
+    """The directory holding every Contexer file. The one place it is read."""
+    return STORE_DIR
+
+
+def ensure_store_dir() -> Path:
+    """`store_dir()`, created with mode 0o700 if it is missing.
+
+    Raises whatever `mkdir` raises. Every caller already sat inside its own try or on a
+    path that must fail loudly, so swallowing here would hide an unwritable home from the
+    one layer that knows whether that is fatal.
+    """
+    target = store_dir()
+    target.mkdir(mode=0o700, exist_ok=True)
+    return target
+
+
+def sidecar_path(kind: str, **fields: str) -> Path:
+    """Full path of one declared sidecar file, e.g. `sidecar_path("insight", slug=s)`.
+
+    This is the builder `sidecars.py` was written as the target for: the declaration owns
+    what a file is CALLED, this owns where it LIVES, and neither knows the other's half.
+    An unknown kind raises KeyError from `sidecars.filename` rather than rendering a
+    plausible name for a file nothing declared.
+    """
+    return store_dir() / sidecars.filename(kind, **fields)
+
+
 # Directories that must never be treated as a repo. A poisoned .current_repo pointing at
 # a tool's config dir (e.g. ~/.claude) would otherwise slug into its own store file and
 # silently swallow decisions made in the real project. Guarded on both read and write.
@@ -103,10 +145,10 @@ def anchor_repo(repo_path: str) -> bool:
     try:
         if not is_sane_repo(repo_path):
             return False
-        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        ensure_store_dir()
         # encoding pinned (never the locale default) so the pointer round-trips
         # identically to current_repo_path's read, on any host locale.
-        (STORE_DIR / sidecars.filename("repo_pointer")).write_text(repo_path, encoding="utf-8")
+        sidecar_path("repo_pointer").write_text(repo_path, encoding="utf-8")
         return True
     except Exception:
         # Deliberately broad, and the sanity check is inside it: this runs on every
@@ -120,7 +162,7 @@ def anchor_repo(repo_path: str) -> bool:
 
 
 def current_repo_path() -> str:
-    path = STORE_DIR / sidecars.filename("repo_pointer")
+    path = sidecar_path("repo_pointer")
     try:
         if path.exists():
             val = path.read_text(encoding="utf-8").strip()
@@ -299,15 +341,15 @@ def _store_path(repo_path: str) -> Path:
     # can be neither created nor written (#152) raising here would crash the hook that
     # merely wanted to LOAD context. Writers still surface the failure at their own write.
     try:
-        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        ensure_store_dir()
     except OSError:
         pass
-    path = STORE_DIR / sidecars.filename("store", slug=repo_slug(repo_path))
+    path = sidecar_path("store", slug=repo_slug(repo_path))
     # Back-compat: migrate a pre-hash store file to the new name on first access so an
     # upgrade never silently orphans existing context. os.replace is atomic; if a
     # colliding repo already claimed the legacy file, the loser just starts fresh.
     if not path.exists():
-        legacy = STORE_DIR / sidecars.filename("store", slug=_legacy_slug(repo_path))
+        legacy = sidecar_path("store", slug=_legacy_slug(repo_path))
         if legacy.exists():
             try:
                 os.replace(legacy, path)
@@ -398,8 +440,8 @@ def store_lock(slug: str, *, blocking: bool = True):
     if fcntl is None:                  # pragma: no cover - non-POSIX fallback
         yield
         return
-    STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-    lock_path = STORE_DIR / sidecars.filename("lock", slug=slug)
+    ensure_store_dir()
+    lock_path = sidecar_path("lock", slug=slug)
     # Binary, not text: only the fd is ever used (flock), nothing is written, so a text
     # wrapper would just be a locale-dependent codec attached to a file we never encode
     # into. "wb" says that outright - and keeps this call out of the text-IO invariant.
@@ -427,10 +469,10 @@ def _global_path() -> Path:
     # host where ~/.contexer can be neither created nor written (#152) raising here would
     # crash a hook that merely wanted to load global rules. Writers still surface it.
     try:
-        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        ensure_store_dir()
     except OSError:
         pass
-    return STORE_DIR / sidecars.filename("store", slug=GLOBAL_SLUG)
+    return sidecar_path("store", slug=GLOBAL_SLUG)
 
 
 def _read_global() -> tuple[dict, str | None]:
@@ -2385,18 +2427,18 @@ _PENDING_REVIEW_NUDGE = (
 
 def _pending_review_flag(repo_path: str) -> Path:
     """Per-repo flag path - a pending decision in repo A must never nudge a session in repo B."""
-    return STORE_DIR / sidecars.filename("pending_review", slug=repo_slug(repo_path))
+    return sidecar_path("pending_review", slug=repo_slug(repo_path))
 
 
 def _offer_flag(repo_path: str) -> Path:
-    return STORE_DIR / sidecars.filename("bootstrap_offered", slug=repo_slug(repo_path))
+    return sidecar_path("bootstrap_offered", slug=repo_slug(repo_path))
 
 
 def _arm_offer(repo_path: str) -> None:
     """Record that the setup offer has gone out for this repo in this session. Fail-soft:
     a flag-write error must degrade to the old always-offer behaviour, never raise."""
     try:
-        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        ensure_store_dir()
         _offer_flag(repo_path).touch()
     except OSError:
         pass
@@ -2426,7 +2468,7 @@ def touch_pending_review(repo_path: str) -> None:
     Public because it has TWO reader modules - `anchors.verify_anchors` and
     `lifecycle.propose_lifecycle` - and two readers are an undeclared interface, not coupling."""
     try:
-        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        ensure_store_dir()
         _pending_review_flag(repo_path).touch()
     except OSError:
         pass
@@ -3398,10 +3440,10 @@ def _deleted_path(repo_path: str) -> Path:
     # unwritable STORE_DIR then cost the session its whole context injection. Writers still
     # surface the failure at their own write (`_save_deleted` does its own).
     try:
-        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        ensure_store_dir()
     except OSError:
         pass
-    return STORE_DIR / sidecars.filename("deleted", slug=repo_slug(repo_path))
+    return sidecar_path("deleted", slug=repo_slug(repo_path))
 
 
 def read_deleted(repo_path: str) -> tuple[dict, str | None]:
@@ -3654,7 +3696,7 @@ def _is_repo_store_file(path: Path) -> bool:
 
 def store_files() -> list[Path]:
     try:
-        return sorted(p for p in STORE_DIR.glob("*.json") if _is_repo_store_file(p))
+        return sorted(p for p in store_dir().glob("*.json") if _is_repo_store_file(p))
     except OSError:
         return []
 
@@ -4285,7 +4327,7 @@ _INSIGHT_CACHE_TTL = 24 * 3600  # git signals drift slowly - a day-old read is s
 
 
 def _insight_cache_path(repo_path: str) -> Path:
-    return STORE_DIR / sidecars.filename("insight", slug=repo_slug(repo_path))
+    return sidecar_path("insight", slug=repo_slug(repo_path))
 
 
 def _insight_cache_key(repo_path: str) -> tuple:
@@ -4314,7 +4356,7 @@ def _cached_insight(repo_path: str) -> tuple[str, bool]:
     level, decisive = _detect_insight(repo_path)
     try:
         email, head = key if key is not None else _insight_cache_key(repo_path)
-        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        ensure_store_dir()
         path.write_text(json.dumps({"level": level, "decisive": decisive,
                                     "ts": time.time(), "email": email, "head": head}),
                         encoding="utf-8")
@@ -4729,7 +4771,7 @@ def _with_console_url(payload: dict, repo_path: str, enabled: bool = False) -> d
 
         # The config under the store's OWN home, not config.CONFIG_PATH (frozen at import) -
         # a relocated STORE_DIR has to resolve its own settings, as cli.status() already does.
-        if not config.load_ui_settings(STORE_DIR / "config.toml").autostart:
+        if not config.load_ui_settings(store_dir() / "config.toml").autostart:
             return payload
         from contexer.ui import daemon
 
@@ -4940,7 +4982,7 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     data = load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     global_rules = get_global_decisions()
-    resume_flag = STORE_DIR / sidecars.filename("resume_mining")
+    resume_flag = sidecar_path("resume_mining")
 
     if source == "resume":
         if decisions:
@@ -4956,7 +4998,7 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
         # escape, routine on Linux) makes write_text raise UnicodeEncodeError - a
         # ValueError that an OSError-only guard would let escape into the host.
         try:
-            STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+            ensure_store_dir()
             resume_flag.write_text(repo_path, encoding="utf-8")
         except Exception:
             pass
@@ -5251,7 +5293,7 @@ def bootstrap_prompt_payload(repo_path: str, prompt: str = "") -> dict:
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     if decisions:
         return {"status": "", "context": ""}
-    resume_flag = STORE_DIR / sidecars.filename("resume_mining")
+    resume_flag = sidecar_path("resume_mining")
     if resume_flag.exists():
         try:
             flagged = resume_flag.read_text(encoding="utf-8").strip()
@@ -5375,7 +5417,7 @@ _RETRIEVAL_LOG_CAP = 200    # pointer/usage log is tail-capped
 
 
 def _index_path(repo_path: str) -> Path:
-    return STORE_DIR / sidecars.filename("retrieval_index", slug=repo_slug(repo_path))
+    return sidecar_path("retrieval_index", slug=repo_slug(repo_path))
 
 
 def _build_retrieval_index(data: dict) -> dict:
@@ -5456,7 +5498,7 @@ def _write_retrieval_index(repo_path: str, data: dict) -> None:
     """Persist the index sidecar. Fail-soft - a missing index just triggers the legacy
     per-prompt path, never a crash."""
     try:
-        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        ensure_store_dir()
         atomic_write(_index_path(repo_path), json.dumps(_build_retrieval_index(data)))
     except OSError:
         pass
@@ -5552,7 +5594,7 @@ def _ws_path(repo_path: str, session_id: str) -> Path:
     # (no path escape) and collision-free where truncation wasn't (two ids sharing
     # a 32-char prefix must not share a working set).
     safe = hashlib.sha1(session_id.encode("utf-8", "replace")).hexdigest()[:16]
-    return STORE_DIR / sidecars.filename("working_set", slug=repo_slug(repo_path), session=safe)
+    return sidecar_path("working_set", slug=repo_slug(repo_path), session=safe)
 
 
 def working_set_ids(repo_path: str, session_id: str) -> list[str]:
@@ -5575,7 +5617,7 @@ def _ws_add(repo_path: str, session_id: str, ids: list[str]) -> None:
     existing = working_set_ids(repo_path, session_id)
     merged = existing + [i for i in ids if i not in existing]
     try:
-        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        ensure_store_dir()
         atomic_write(_ws_path(repo_path, session_id),
                       json.dumps({"injected": merged, "ts": time.time()}))
     except OSError:
@@ -5605,7 +5647,7 @@ _EDITED_FILES_WINDOW = 1800  # seconds: an edit older than this no longer correl
 
 def _edited_files_path(repo_path: str) -> Path:
     """Per-repo edited-files sidecar. Still matches the `.edited_*.json` GC pattern."""
-    return STORE_DIR / sidecars.filename("edited_files", slug=repo_slug(repo_path))
+    return sidecar_path("edited_files", slug=repo_slug(repo_path))
 
 
 def record_edited_file(repo_path: str, file_path: str) -> str:
@@ -5639,7 +5681,7 @@ def record_edited_file(repo_path: str, file_path: str) -> str:
         relpath = guard_engine._guard_relpath(repo_path, file_path)
         if guard_engine._escapes_repo(relpath):
             return ""
-        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        ensure_store_dir()
         entries = [e for e in _load_edited_entries(repo_path) if e["path"] != relpath]
         entries.append({"path": relpath, "mtime": time.time()})
         entries.sort(key=lambda e: e["mtime"])
@@ -5676,9 +5718,9 @@ def _read_edited_files(repo_path: str, window: float = _EDITED_FILES_WINDOW) -> 
 
 def _retrieval_log(repo_path: str, event: dict) -> None:
     """Append one JSON line to the pointer/usage log, tail-capped. Fail-soft."""
-    path = STORE_DIR / sidecars.filename("retrieval_log", slug=repo_slug(repo_path))
+    path = sidecar_path("retrieval_log", slug=repo_slug(repo_path))
     try:
-        STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        ensure_store_dir()
         lines: list[str] = []
         if path.exists():
             lines = path.read_text(encoding="utf-8").splitlines()
@@ -5785,7 +5827,7 @@ def migrate_worktree_strays(repo_path: str) -> int:
             return 0
         candidates: list[Path] = []
         if incoming_collapsed:
-            candidates.append(STORE_DIR / sidecars.filename("store", slug=_raw_slug(resolved)))
+            candidates.append(sidecar_path("store", slug=_raw_slug(resolved)))
         try:
             out = subprocess.run(
                 ["git", "-C", canonical, "worktree", "list", "--porcelain"],
@@ -5796,7 +5838,7 @@ def migrate_worktree_strays(repo_path: str) -> int:
                     if line.startswith("worktree "):
                         wt = line[len("worktree "):].strip()
                         if wt and wt != canonical:
-                            candidates.append(STORE_DIR / sidecars.filename("store", slug=_raw_slug(wt)))
+                            candidates.append(sidecar_path("store", slug=_raw_slug(wt)))
         except Exception:
             pass
         canonical_store = _store_path(canonical)
@@ -5863,7 +5905,7 @@ def _gc_stale_session_files() -> None:
     """
     try:
         now = time.time()
-        for path in STORE_DIR.iterdir():
+        for path in store_dir().iterdir():
             lifetime = sidecars.lifetime_for(path.name)
             if lifetime is None:
                 continue
@@ -5883,7 +5925,7 @@ def _gc_stale_session_files() -> None:
 def _recent_pointer_event(repo_path: str) -> dict | None:
     """Most recent 'pointer' log event for this repo within the follow-through window, or
     None. Read-only - never touches the log. Fail-soft."""
-    path = STORE_DIR / sidecars.filename("retrieval_log", slug=repo_slug(repo_path))
+    path = sidecar_path("retrieval_log", slug=repo_slug(repo_path))
     if not path.exists():
         return None
     try:
@@ -7298,7 +7340,7 @@ def _scan_rule_key(content: str) -> str | None:
 
 
 def _miner_verify_stamp_path(repo_path: str) -> Path:
-    return STORE_DIR / sidecars.filename("miner_verify", slug=repo_slug(repo_path))
+    return sidecar_path("miner_verify", slug=repo_slug(repo_path))
 
 
 def verify_scan_conventions(repo_path: str, force: bool = False) -> int:
@@ -7369,7 +7411,7 @@ def verify_scan_conventions(repo_path: str, force: bool = False) -> int:
             if mtime is not None and time.time() - mtime < _MINER_VERIFY_TTL:
                 return 0
         try:
-            STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+            ensure_store_dir()
             stamp.touch()
         except OSError:
             pass

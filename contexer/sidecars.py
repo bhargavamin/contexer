@@ -7,12 +7,22 @@ and nobody found out: measured on one real machine, ``~/.contexer`` held 115 fil
 distinct name shapes, and the per-repo caches for repos never reopened again (``.team_*``,
 ``.memory_synced_*``, ``.insight_*``, ``.anchor_verify_*``) accumulated indefinitely.
 
-What it owns, and what it does NOT. This module owns the LIFETIME question: which files may be
-deleted when they go cold, and which must never be touched. It deliberately does not yet own
-the path builders. Those are held by 194 test references and 26 production call sites, and the
-value here is the sweep becoming complete, which needs no rename at all. Collapsing the
-builders onto this declaration is a separate, mechanical follow-up; the declaration is the
-target it will aim at.
+What it owns, and what it does NOT. This module owns the LIFETIME question and the NAME: which
+files may be deleted when they go cold, which must never be touched, and what each one is
+called. It does not own WHERE they live, and it never will: staying a pure leaf with no imports
+from the package is what lets `store.py` import it.
+
+`store.sidecar_path(kind, **fields)` is the one function that joins a DECLARED name onto the
+store directory, `glob_for` renders the pattern for callers that sweep a whole family, and
+`store.store_dir()` is the one that reads the directory. `tests/test_store_dir_seam.py` holds
+all of it, because a module that builds the path by hand still works, so the erosion is
+invisible.
+
+Two things in the store directory are deliberately outside this declaration, and both are
+someone else's to own. `config.toml` is the developer's own hand-edited settings file, owned
+by `config.py`. The `evidence/` spool root is a directory whose tree `spool.py` owns; its name
+is also this package's own module name, so declaring it would make the literal scan below
+report seven false offenders and stop meaning anything.
 
 The safety direction is asymmetric and the default is chosen accordingly. Failing to sweep a
 cache costs disk. Sweeping a durable file costs the developer's data: a queued share, a
@@ -144,6 +154,8 @@ KINDS: tuple[Kind, ...] = (
     Kind("insight",          ".insight_{slug}",            COLD_REPO, "git-insight cache; ~6 git calls to rebuild"),
     Kind("anchor_verify",    ".anchor_verify_{slug}",      COLD_REPO, "anchor-verification TTL stamp"),
     Kind("miner_verify",     ".miner_verify_{slug}",       COLD_REPO, "scan-convention TTL stamp"),
+    Kind("spool_maintained", ".spool_maintained_{slug}",   COLD_REPO, "spool retention/orphan-sweep TTL "
+                                                                      "stamp; same shape as the two above"),
     Kind("guard_advised",    ".guard_advised_{slug}.json", COLD_REPO, "guard throttle stamps, content-keyed"),
     Kind("retrieval_index",  ".retrieval_index_{slug}.json", COLD_REPO, "BM25 index; disposable by design and "
                                                                       "rebuilt by ensure_retrieval_index at the "
@@ -166,14 +178,31 @@ _DURABLE_GLOBS = tuple(k.glob for k in KINDS if k.lifetime is DURABLE)
 def filename(kind: str, **fields: str) -> str:
     """The file name for `kind`, e.g. `filename("insight", slug="Users_me_proj")`.
 
-    Callers join it onto STORE_DIR themselves. This module stays a pure leaf with no imports
-    from the package: it knows what files are CALLED and how long they live, never where the
-    store directory is or how a repo path becomes a slug, which is store's job.
+    `store.sidecar_path` is the one caller that joins the result onto the store directory.
+    `cli.py` calls this directly at three sites, because `contexer status` is a diagnostic
+    that must resolve against the home it was asked to inspect rather than the process-wide
+    one; a test allowlist names them. This module stays a pure leaf with no imports from the
+    package: it knows what files are CALLED and how long they live, never where the store
+    directory is or how a repo path becomes a slug, which is store's job.
     """
     try:
         return _BY_NAME[kind].template.format(**fields)
     except KeyError as exc:
         raise KeyError(f"unknown sidecar kind or missing field: {kind} {fields}") from exc
+
+
+def glob_for(kind: str) -> str:
+    """The fnmatch pattern that matches every file of `kind`, e.g. `.team_*.json`.
+
+    The companion to `filename`, for the callers that sweep a family rather than address one
+    file. It exists because `team_context` spelled `.team_*.json` as a literal directly below
+    a comment reading "Ask the declaration, not a literal": renaming a kind would have left
+    that sweep matching the old shape, silently.
+    """
+    try:
+        return _BY_NAME[kind].glob
+    except KeyError as exc:
+        raise KeyError(f"unknown sidecar kind: {kind}") from exc
 
 
 def lifetime_for(name: str) -> int | None:

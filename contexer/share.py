@@ -35,7 +35,7 @@ import weakref
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
-from contexer import remote, share_status, sidecars, store
+from contexer import remote, share_status, store
 from contexer.config import Profile, load_profile
 from contexer.remote import (
     DecisionReconciliationPreview,
@@ -146,11 +146,11 @@ def _wire_source(source: str | None) -> str | None:
 def _outbox_path():
     # Computed at call time (not module import time) so tests that monkeypatch
     # store.STORE_DIR see the redirected path, like every other store-adjacent file.
-    return store.STORE_DIR / sidecars.filename("outbox")
+    return store.sidecar_path("outbox")
 
 
 def _reconcile_outbox_path():
-    return store.STORE_DIR / sidecars.filename("reconcile_outbox")
+    return store.sidecar_path("reconcile_outbox")
 
 
 def _read_reconcile_outbox() -> tuple[list[dict], str | None]:
@@ -175,7 +175,7 @@ def _load_reconcile_outbox() -> list[dict]:
 
 
 def _save_reconcile_outbox(entries: list[dict]) -> None:
-    store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+    store.ensure_store_dir()
     store.atomic_write(
         _reconcile_outbox_path(), json.dumps(entries, indent=2, ensure_ascii=False))
 
@@ -327,7 +327,7 @@ def _load_outbox() -> list[dict]:
 
 
 def _save_outbox(entries: list[dict]) -> None:
-    store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+    store.ensure_store_dir()
     store.atomic_write(_outbox_path(), json.dumps(entries, indent=2, ensure_ascii=False))
 
 
@@ -523,7 +523,7 @@ _SHARED_LOCK_SLUG = ".shared"
 def _shared_path():
     # Computed at call time (not module import time), same convention as _outbox_path -
     # tests that monkeypatch store.STORE_DIR see the redirected path.
-    return store.STORE_DIR / sidecars.filename("shared_markers")
+    return store.sidecar_path("shared_markers")
 
 
 def forget_shared_markers() -> bool:
@@ -579,7 +579,7 @@ def _append_shared(records: list[dict]) -> None:
     `_compact_shared` makes append and compaction mutually exclusive. Where locks are
     unavailable (non-POSIX) `store_lock` is a no-op and the append still can't clobber a
     peer append - only the rare compaction overlap stays exposed, which is cosmetic."""
-    store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+    store.ensure_store_dir()
     path = _shared_path()
     blob = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records)
     with store.store_lock(_SHARED_LOCK_SLUG):

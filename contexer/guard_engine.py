@@ -1,6 +1,6 @@
 """Commit-time guard engine: staged-file plumbing, Tier-1 advisory pairing, and
 Tier-2 armed (machine-checkable) blocking rules. Extracted out of store.py, whose
-`STORE_DIR`/`load`/`save`/... are read through the `store` module object (not
+`store_dir`/`load`/`save`/... are read through the `store` module object (not
 `from`-imported) so store-owned values tests monkeypatch on `contexer.store` are
 still seen here at call time. `contexer/store.py` stays the public facade: it
 re-exports this module's five public entrypoints at the BOTTOM of its file
@@ -22,7 +22,6 @@ from pathlib import Path
 from contexer import policy          # pure leaf (no cycle): THE deterministic evaluator
 from contexer import retrieval       # pure stdlib leaf (no cycle): path/module artifact shapes
 from contexer import revisions      # pure stdlib leaf (no cycle): revision lifecycle
-from contexer import sidecars
 from contexer import store           # module object, not `from`-imports: see docstring above
 
 
@@ -346,7 +345,7 @@ def _guard_content_hash(data: bytes) -> str:
 
 
 def _guard_dismissed_path(repo_path: str) -> Path:
-    return store.STORE_DIR / sidecars.filename("guard_dismissed", slug=store.repo_slug(repo_path))
+    return store.sidecar_path("guard_dismissed", slug=store.repo_slug(repo_path))
 
 
 def _dismissed_guard(repo_path: str) -> set[str]:
@@ -373,7 +372,7 @@ def dismiss_guard(repo_path: str, decision_id: str, source_ref: str) -> None:
     would let a "permanent" suppression silently not stick."""
     relpath = _guard_relpath(repo_path, source_ref)
     h = _guard_hash(decision_id, relpath)
-    store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+    store.ensure_store_dir()
     dismissed = _dismissed_guard(repo_path)
     if h in dismissed:
         return
@@ -382,7 +381,7 @@ def dismiss_guard(repo_path: str, decision_id: str, source_ref: str) -> None:
 
 
 def _guard_advised_path(repo_path: str) -> Path:
-    return store.STORE_DIR / sidecars.filename("guard_advised", slug=store.repo_slug(repo_path))
+    return store.sidecar_path("guard_advised", slug=store.repo_slug(repo_path))
 
 
 def _guard_advised(repo_path: str) -> dict:
@@ -411,7 +410,7 @@ def _guard_stamp_advised(repo_path: str, pairs: dict[str, str]) -> None:
     guard_staged's fail-open handler and convert real, computed advisories into
     a spurious "internal error"."""
     try:
-        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        store.ensure_store_dir()
         advised = _guard_advised(repo_path)
         for h, content_hash in pairs.items():
             advised.pop(h, None)

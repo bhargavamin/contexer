@@ -90,7 +90,7 @@ import json
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
-from contexer import candidates, evidence, lifecycle, repo_key, sidecars, spool, store
+from contexer import candidates, evidence, lifecycle, repo_key, spool, store
 
 # Kinds a candidate can be built out of. The rest of `evidence.EVENT_KINDS` is bookkeeping
 # ABOUT candidates (`policy_evaluation`, `session_reconcile`), which never groups into one, so
@@ -184,9 +184,9 @@ def _reconcile_lock(repo_path: str):
     the receipt is incomplete. The attention ceiling is a hard invariant, so running unlocked
     is worse than deferring work to a checkpoint whose filesystem can serialize it.
     """
-    path = store.STORE_DIR / sidecars.filename("reconcile_lock", slug=store.repo_slug(repo_path))
+    path = store.sidecar_path("reconcile_lock", slug=store.repo_slug(repo_path))
     try:
-        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        store.ensure_store_dir()
         # Binary, and it stays empty: nothing is ever written to or read from this file -
         # the flock on its descriptor is the whole content. (Also why the package-wide
         # pin-your-encoding invariant does not apply: there is no text here.)
@@ -1199,9 +1199,9 @@ def _log_receipt(repo_path: str, session_id: str, receipt: dict) -> None:
     precedent: never user-facing, tail-capped, and fail-soft including the read-back, since a
     log that picked up non-UTF-8 bytes must not break a session start over a bookkeeping file.
     """
-    path = store.STORE_DIR / sidecars.filename("reconcile_log", slug=store.repo_slug(repo_path))
+    path = store.sidecar_path("reconcile_log", slug=store.repo_slug(repo_path))
     try:
-        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+        store.ensure_store_dir()
         lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
         lines.append(json.dumps({**receipt, "session_id": session_id or _FALLBACK_SESSION,
                                  "at": datetime.now(timezone.utc).isoformat()}))

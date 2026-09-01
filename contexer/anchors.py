@@ -7,7 +7,7 @@ git-budgeted rename detection, and the review-gated retirement proposal shape.
 Extracted out of store.py (user directive: don't crowd store.py with a second
 verification family) but reads/writes the store through the `store` module OBJECT (not
 `from`-imported), the same load-order discipline `guard_engine.py` documents at its own
-top: `store.STORE_DIR`/`store.load`/`store.save`/`store.store_lock`/... are looked up
+top: `store.store_dir`/`store.load`/`store.save`/`store.store_lock`/... are looked up
 at call time, so anything a test monkeypatches on `contexer.store` is still seen here.
 
 Shape mirrors `store.verify_scan_conventions` deliberately:
@@ -95,7 +95,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from contexer import revisions              # pure stdlib leaf (no cycle): revision lifecycle
-from contexer import sidecars
 from contexer import lifecycle      # module object too, same reason: see docstring above
 from contexer import store          # module object, not `from`-imports: see docstring above
 
@@ -146,7 +145,7 @@ def _anchor_verify_stamp_path(repo_path: str) -> Path:
     here and the reader on the next session start agree on the file without either
     side re-resolving the repo (see store.verify_scan_conventions's identical
     `_miner_verify_stamp_path`)."""
-    return store.STORE_DIR / sidecars.filename("anchor_verify", slug=store.repo_slug(repo_path))
+    return store.sidecar_path("anchor_verify", slug=store.repo_slug(repo_path))
 
 
 def _run_git(repo_path: str, *args: str) -> str | None:
@@ -264,7 +263,7 @@ def verify_anchors(repo_path: str, force: bool = False) -> dict:
                 if mtime is not None and time.time() - mtime < _ANCHOR_VERIFY_TTL:
                     return {"reanchored": 0, "proposed": 0}
             try:
-                store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
+                store.ensure_store_dir()
                 stamp.touch()
             except OSError:
                 pass

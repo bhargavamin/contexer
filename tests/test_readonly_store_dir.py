@@ -115,7 +115,7 @@ class TestSessionStartUnderReadOnlyStoreDir:
         # reload branch's flag-consume actually runs. Losing this one costs the session
         # its rehydrated pre-compaction context, the review nudge, and the rationale.
         store.STORE_DIR.mkdir(parents=True, exist_ok=True)
-        arm = (store.STORE_DIR / gemini._PENDING_RELOAD).touch
+        arm = store.sidecar_path("gemini_reload").touch
 
         # First call drains the fire-once state (the pending-review nudge fires once per
         # armed flag) so both compared runs start from the same steady state.

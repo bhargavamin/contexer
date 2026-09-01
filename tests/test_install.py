@@ -1,6 +1,5 @@
 """Tests for contexer CLI install/uninstall commands."""
 import json
-import sys
 
 import pytest
 
@@ -350,48 +349,42 @@ class TestInstallDoesNotImplyAConsole:
 
 
 class TestTargetSelection:
-    def test_install_target_cursor_only(self, clean_home, monkeypatch):
+    def test_install_target_cursor_only(self, clean_home):
         import contexer.cli as cli
-        monkeypatch.setattr(sys, "argv", ["contexer", "install", "--target", "cursor"])
-        cli.main()
+        cli.dispatch(["install", "--target", "cursor"])
         assert (clean_home / ".cursor" / "mcp.json").exists()
         assert not (clean_home / ".claude.json").exists()
 
-    def test_install_target_gemini_only(self, clean_home, monkeypatch):
+    def test_install_target_gemini_only(self, clean_home):
         import contexer.cli as cli
-        monkeypatch.setattr(sys, "argv", ["contexer", "install", "--target", "gemini"])
-        cli.main()
+        cli.dispatch(["install", "--target", "gemini"])
         assert (clean_home / ".gemini" / "settings.json").exists()
         assert not (clean_home / ".claude.json").exists()
 
-    def test_install_target_all(self, clean_home, monkeypatch):
+    def test_install_target_all(self, clean_home):
         import contexer.cli as cli
-        monkeypatch.setattr(sys, "argv", ["contexer", "install", "--target", "all"])
-        cli.main()
+        cli.dispatch(["install", "--target", "all"])
         assert (clean_home / ".cursor" / "mcp.json").exists()
         assert (clean_home / ".gemini" / "settings.json").exists()
         assert (clean_home / ".claude.json").exists()
 
-    def test_install_autodetects_present_tools(self, clean_home, monkeypatch):
+    def test_install_autodetects_present_tools(self, clean_home):
         # Only ~/.cursor present -> only Cursor wired.
         (clean_home / ".cursor").mkdir()
         import contexer.cli as cli
-        monkeypatch.setattr(sys, "argv", ["contexer", "install"])
-        cli.main()
+        cli.dispatch(["install"])
         assert (clean_home / ".cursor" / "mcp.json").exists()
         assert not (clean_home / ".claude.json").exists()
 
-    def test_install_defaults_to_claude_when_none_detected(self, clean_home, monkeypatch):
+    def test_install_defaults_to_claude_when_none_detected(self, clean_home):
         import contexer.cli as cli
-        monkeypatch.setattr(sys, "argv", ["contexer", "install"])
-        cli.main()
+        cli.dispatch(["install"])
         assert (clean_home / ".claude.json").exists()
 
-    def test_install_unknown_target_exits_1(self, clean_home, monkeypatch, capsys):
+    def test_install_unknown_target_exits_1(self, clean_home, capsys):
         import contexer.cli as cli
-        monkeypatch.setattr(sys, "argv", ["contexer", "install", "--target", "emacs"])
         with pytest.raises(SystemExit) as e:
-            cli.main()
+            cli.dispatch(["install", "--target", "emacs"])
         assert e.value.code == 1
         assert "unknown target" in capsys.readouterr().err.lower()
 

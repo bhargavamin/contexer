@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from contexer import sidecars
+from tests.conftest import redirect_store_dir
 from contexer import miner as miner_mod
 from contexer import retrieval, review, revisions
 from contexer import store
@@ -40,20 +41,20 @@ class TestRepoResolution:
     def test_explicit_config_dir_never_honored(self, tmp_path, monkeypatch):
         # A caller passing ~/.claude must NOT resolve to it — falls back to safe sources.
         monkeypatch.setattr(store, "_SESSION_REPO", "")
-        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        redirect_store_dir(monkeypatch, tmp_path / ".contexer")
         assert store.resolve_repo(str(Path.home() / ".claude")) == ""
 
     def test_session_repo_preferred_over_pointer(self, tmp_path, monkeypatch):
         # The clobber scenario: pointer poisoned to ~/.claude, but the server is bound to
         # its own cwd repo — decisions must resolve to the real project, not the config dir.
-        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        redirect_store_dir(monkeypatch, tmp_path / ".contexer")
         store.STORE_DIR.mkdir()
         (store.STORE_DIR / ".current_repo").write_text(str(Path.home() / ".claude"))
         monkeypatch.setattr(store, "_SESSION_REPO", str(tmp_path / "realproject"))
         assert store.resolve_repo("") == str(tmp_path / "realproject")
 
     def test_poisoned_pointer_read_returns_empty(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        redirect_store_dir(monkeypatch, tmp_path / ".contexer")
         store.STORE_DIR.mkdir()
         (store.STORE_DIR / ".current_repo").write_text(str(Path.home() / ".cursor"))
         assert store.current_repo_path() == ""
@@ -367,17 +368,17 @@ class TestResolveRepo:
         assert store.resolve_repo(tmp_repo) == tmp_repo
 
     def test_empty_string_falls_back_to_current_repo_file(self, tmp_repo, monkeypatch):
-        monkeypatch.setattr(store, "STORE_DIR", Path(tmp_repo).parent / ".contexer")
+        redirect_store_dir(monkeypatch, Path(tmp_repo).parent / ".contexer")
         store.STORE_DIR.mkdir(exist_ok=True)
         (store.STORE_DIR / ".current_repo").write_text(tmp_repo)
         assert store.resolve_repo("") == tmp_repo
 
     def test_empty_string_with_no_file_returns_empty(self, tmp_repo, monkeypatch):
-        monkeypatch.setattr(store, "STORE_DIR", Path(tmp_repo).parent / ".contexer_empty")
+        redirect_store_dir(monkeypatch, Path(tmp_repo).parent / ".contexer_empty")
         assert store.resolve_repo("") == ""
 
     def test_nonempty_path_bypasses_file(self, tmp_repo, monkeypatch):
-        monkeypatch.setattr(store, "STORE_DIR", Path(tmp_repo).parent / ".contexer")
+        redirect_store_dir(monkeypatch, Path(tmp_repo).parent / ".contexer")
         store.STORE_DIR.mkdir(exist_ok=True)
         (store.STORE_DIR / ".current_repo").write_text("/some/other/repo")
         assert store.resolve_repo(tmp_repo) == tmp_repo
@@ -389,7 +390,7 @@ class TestResolveRepoProvenance:
     the wrong store is diagnosable rather than indistinguishable."""
 
     def _isolate(self, tmp_path, monkeypatch, pointer=None, session=""):
-        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        redirect_store_dir(monkeypatch, tmp_path / ".contexer")
         store.STORE_DIR.mkdir(exist_ok=True)
         monkeypatch.setattr(store, "_SESSION_REPO", session)
         if pointer is not None:
@@ -455,7 +456,7 @@ class TestRepoSourceStamp:
         # A hook ALWAYS supplies a path (its shell's git root, or cwd), so the plain resolver
         # could only ever say "argument" — the label the audit reads as a deliberate
         # cross-repo write. That would dismiss the exact misroute this exists to surface.
-        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        redirect_store_dir(monkeypatch, tmp_path / ".contexer")
         store.STORE_DIR.mkdir(exist_ok=True)
         monkeypatch.setattr(store, "_SESSION_REPO", "")
 
@@ -464,7 +465,7 @@ class TestRepoSourceStamp:
         assert store._hook_repo_verbose("") == (str(tmp_path), "hook-cwd")
 
     def test_hook_resolution_falls_through_for_an_unusable_path(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        redirect_store_dir(monkeypatch, tmp_path / ".contexer")
         store.STORE_DIR.mkdir(exist_ok=True)
         session = str(tmp_path / "realproject")
         monkeypatch.setattr(store, "_SESSION_REPO", session)
@@ -2050,7 +2051,7 @@ class TestNonDictStoreRecovery:
 
 @pytest.fixture
 def isolated_store_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     return tmp_path
 
 
@@ -2065,7 +2066,7 @@ class TestSlugInjectivity:
         assert store.repo_slug("/home/u/my repo") != store.repo_slug("/home/u/my_repo")
 
     def test_colliding_repos_keep_separate_stores(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        redirect_store_dir(monkeypatch, tmp_path / ".contexer")
         store.update_decision("/home/u/my.repo", "decision A for the dotted repo here", "s1")
         store.update_decision("/home/u/my_repo", "decision B for the underscore repo here", "s2")
         a = store.get_context("/home/u/my.repo")
@@ -4170,7 +4171,7 @@ class TestInsightCache:
     @pytest.fixture
     def git_repo(self, tmp_path, monkeypatch):
         """Real git repo with global/system git config isolated; returns its path."""
-        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        redirect_store_dir(monkeypatch, tmp_path / ".contexer")
         monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
         monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
         repo = tmp_path / "gitrepo"
@@ -4258,7 +4259,7 @@ class TestInsightCache:
         assert isinstance(decisive, bool)
 
     def test_cache_is_per_repo_slug(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        redirect_store_dir(monkeypatch, tmp_path / ".contexer")
         repo_a, repo_b = str(tmp_path / "repo_a"), str(tmp_path / "repo_b")
         store._cached_insight(repo_a)
         store._cached_insight(repo_b)

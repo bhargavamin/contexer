@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 
 from contexer import console_api, store
+from tests.conftest import redirect_store_dir
 
 
 # Every name that moved out of store.py, public and private. A name reappearing as a top-level
@@ -171,7 +172,7 @@ class TestCallTimeResolution:
         store_dir.mkdir()
         (store_dir / "some_repo-deadbeef.json").write_text(
             f'{{"repo_path": "{tmp_path / "repo"}", "entries": []}}', encoding="utf-8")
-        monkeypatch.setattr(store, "STORE_DIR", store_dir)
+        redirect_store_dir(monkeypatch, store_dir)
         resolved = console_api.resolve_store("some_repo-deadbeef")
         assert resolved is not None and resolved["ok"], resolved
         assert resolved["repo_path"] == str(tmp_path / "repo")

@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 
 from contexer import candidates, cli, evidence, lifecycle, reconcile, review_impact, spool, store
+from tests.conftest import redirect_store_dir
 from contexer.adapters import claude, codex, cursor, gemini
 
 SESSION = "sess-1"
@@ -401,7 +402,7 @@ class TestEvidenceRepoIdentity:
 
     def test_receipt_copied_from_another_spool_never_authorizes_raw_expiry(
             self, tmp_path, monkeypatch):
-        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        redirect_store_dir(monkeypatch, tmp_path / ".contexer")
         repo_a = str(tmp_path / "repo-a")
         repo_c = str(tmp_path / "repo-c")
         event = _identity_event("/foreign/source-repo", "cross-spool-receipt")
@@ -2589,8 +2590,7 @@ class TestCliCommand:
         from contexer import cli
 
         monkeypatch.setattr(cli, "_cli_repo", lambda: tmp_repo)
-        monkeypatch.setattr("sys.argv", ["contexer", "reconcile-session", *args])
-        cli.main()
+        cli.dispatch(["reconcile-session", *args])
 
     def test_prints_the_receipt(self, tmp_repo, monkeypatch, capsys):
         _emit(tmp_repo, "user_directive", UNRELATED)
@@ -2632,11 +2632,10 @@ class TestCliCommand:
         assert exc.value.code == 1
         assert "Unknown argument" in capsys.readouterr().err
 
-    def test_listed_in_help(self, monkeypatch, capsys):
+    def test_listed_in_help(self, capsys):
         from contexer import cli
 
-        monkeypatch.setattr("sys.argv", ["contexer", "help"])
-        cli.main()
+        cli.dispatch(["help"])
         assert "reconcile-session" in capsys.readouterr().out
 
 

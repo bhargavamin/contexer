@@ -13,6 +13,7 @@ import pytest
 
 import contexer.remote as remote
 from contexer import config, share, share_status, store
+from tests.conftest import redirect_store_dir
 from contexer.remote import (
     RemoteAuthError,
     RemoteRateLimitError,
@@ -2401,7 +2402,7 @@ def test_mark_shared_serializes_concurrent_writers(tmp_path, monkeypatch):
 
     Without the lock each writer reads the same base, adds its own id, and the second save
     clobbers the first - leaving a genuinely-pushed decision looking unshared."""
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     ep = "http://localhost:8080/mcp"
     barrier = threading.Barrier(2)
 
@@ -2419,7 +2420,7 @@ def test_mark_shared_serializes_concurrent_writers(tmp_path, monkeypatch):
 
 def test_mark_shared_still_fail_soft_when_locking_unavailable(tmp_path, monkeypatch):
     # A marker is cosmetic: even with no fcntl (non-POSIX) it must record, never raise.
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     monkeypatch.setattr(store, "fcntl", None)
     share._mark_shared(["abc"], "http://localhost:8080/mcp")
     assert "abc" in share.shared_map("http://localhost:8080/mcp")
@@ -2431,7 +2432,7 @@ def test_mark_shared_survives_concurrency_without_posix_locks(tmp_path, monkeypa
     `store.store_lock` yields WITHOUT serializing when fcntl is missing (non-POSIX), so a
     read-modify-write design would still drop a concurrent writer's marker there. Appending
     self-contained lines has no read to lose, so both writers survive on every platform."""
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     monkeypatch.setattr(store, "fcntl", None)  # simulate a runtime with no advisory locks
     ep = "http://localhost:8080/mcp"
     barrier = threading.Barrier(4)
@@ -2451,7 +2452,7 @@ def test_mark_shared_survives_concurrency_without_posix_locks(tmp_path, monkeypa
 def test_shared_log_compacts_once_past_the_threshold(tmp_path, monkeypatch):
     # Append-only would grow without bound on repeated re-shares; compaction folds it back
     # to one record per (endpoint, id) while preserving every marker.
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     monkeypatch.setattr(share, "_SHARED_LOG_MAX_LINES", 10)
     ep = "http://localhost:8080/mcp"
     for _ in range(12):  # re-share the same two ids repeatedly
@@ -2473,7 +2474,7 @@ def test_shared_log_append_is_excluded_during_compaction(tmp_path, monkeypatch):
     discard. Both sides take the same lock, so the append waits instead of vanishing. The
     replace is stalled here to hold that window wide open - without the lock the fresh marker
     lands on the doomed inode and is lost."""
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     monkeypatch.setattr(share, "_SHARED_LOG_MAX_LINES", 10)
     ep = "http://localhost:8080/mcp"
     # Seed past the threshold via _append_shared (which never compacts), so compaction is
