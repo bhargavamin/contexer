@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.45.3](https://github.com/bhargavamin/contexer/compare/v0.45.2...v0.45.3) (2026-09-01)
+
+
+### Documentation
+
+* add public Contexer FAQ ([f06499e](https://github.com/bhargavamin/contexer/commit/f06499ed4fa57b1b1ce1d737f1e6b09815d7a585))
+* add public Contexer FAQ ([73dc6b7](https://github.com/bhargavamin/contexer/commit/73dc6b7a7aacb208213a9ab945469bbc7be8e3a2))
+* make FAQ the detailed product reference ([17262f3](https://github.com/bhargavamin/contexer/commit/17262f3de026bfae0f34b3ad1c4145d5c25e84e9))
+* replace private privacy reference ([5c8d088](https://github.com/bhargavamin/contexer/commit/5c8d088b379ee635aaa7aa138c626aef291a9b28))
+
 ## [0.45.2](https://github.com/bhargavamin/contexer/compare/v0.45.1...v0.45.2) (2026-09-01)
 
 
