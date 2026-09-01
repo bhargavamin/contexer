@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import secrets
@@ -49,7 +50,11 @@ _INSTRUCTIONS = (
     "RETRIEVE - call get_context BEFORE reading files for any question about architecture, design "
     "rationale, constraints, patterns, or conventions."
 )
-mcp = FastMCP("contexer", instructions=_INSTRUCTIONS)
+# FastMCP configures the process-wide Python logger. Its INFO default enables httpx and the MCP
+# HTTP client's request logs, which include the remote endpoint and would put destination identity
+# on the host's stderr pipe. Contexer's own decision-operation telemetry is emitted independently
+# through its closed vocabulary, so dependency logs stay warning-only here.
+mcp = FastMCP("contexer", instructions=_INSTRUCTIONS, log_level="WARNING")
 
 
 @mcp.tool()
@@ -541,24 +546,10 @@ async def share_decision(decision_id: str = "", repo_path: str = "", confirm: bo
         resolved, decision_id, confirm=confirm, timeout=_SHARE_TIMEOUT)
 
 
-@mcp.tool()
-def manage_share_policy(action: str = "show", repo_path: str = "", team: str = "",
-                        include_existing: bool = False, confirm: bool = False,
-                        confirmation_token: str = "", intent_id: str = "") -> str:
-    """Inspect or control automatic proposals of approved local decisions to one team.
-
-    action: show | enable | disable | flush | attention | retry.
-    team: exact immutable team id or exact team name; required for enable.
-    include_existing: false is future-only; true also queues currently eligible revisions.
-    confirm: enable is a two-call operation. The default false returns an exact destination
-             preview and changes nothing. Call again with true only after the developer explicitly
-             approves that preview. The profile's skip_confirm setting is deliberately ignored.
-    confirmation_token: single-use token returned by the enable preview; required with confirm=true.
-    intent_id: exact id or unique displayed prefix for the attention item selected by retry.
-
-    This policy authorizes proposing approved decisions; it never approves team candidates. A
-    queued local intent is not a completed submission, and status keeps those states distinct.
-    """
+def _manage_share_policy(action: str = "show", repo_path: str = "", team: str = "",
+                         include_existing: bool = False, confirm: bool = False,
+                         confirmation_token: str = "", intent_id: str = "") -> str:
+    """Synchronous policy-control implementation, run off the MCP event loop."""
     resolved = store.resolve_repo(repo_path)
     if not resolved:
         return "Refused - repo path not detected. No policy was changed."
@@ -683,6 +674,36 @@ def manage_share_policy(action: str = "show", repo_path: str = "", team: str = "
             "The operation could not be completed or fully inspected. Run the show action before "
             "retrying; no repair was attempted."
         )
+
+
+@mcp.tool()
+async def manage_share_policy(action: str = "show", repo_path: str = "", team: str = "",
+                              include_existing: bool = False, confirm: bool = False,
+                              confirmation_token: str = "", intent_id: str = "") -> str:
+    """Inspect or control automatic proposals of approved local decisions to one team.
+
+    action: show | enable | disable | flush | attention | retry.
+    team: exact immutable team id or exact team name; required for enable.
+    include_existing: false is future-only; true also queues currently eligible revisions.
+    confirm: enable is a two-call operation. The default false returns an exact destination
+             preview and changes nothing. Call again with true only after the developer explicitly
+             approves that preview. The profile's skip_confirm setting is deliberately ignored.
+    confirmation_token: single-use token returned by the enable preview; required with confirm=true.
+    intent_id: exact id or unique displayed prefix for the attention item selected by retry.
+
+    This policy authorizes proposing approved decisions; it never approves team candidates. A
+    queued local intent is not a completed submission, and status keeps those states distinct.
+    """
+    return await asyncio.to_thread(
+        _manage_share_policy,
+        action,
+        repo_path,
+        team,
+        include_existing,
+        confirm,
+        confirmation_token,
+        intent_id,
+    )
 
 
 @mcp.tool()
