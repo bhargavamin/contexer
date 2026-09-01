@@ -391,9 +391,9 @@ source files are stored so leads can inspect where proposed rules came from.
 
 Contexer does not generally upload coding-agent prompts, full transcripts, or arbitrary model
 inputs/outputs. A decision derived from local evidence may carry bounded evidence summaries when it
-is shared, but the raw local evidence ledger is not the share payload. See
-[Contexer Check privacy details](https://github.com/contexer-ai/contexer-teams/blob/main/docs/ci-check.md#privacy)
-for the managed pull-request path.
+is shared, but the raw local evidence ledger is not the share payload. For service-wide data
+handling and subprocessors, see the public
+[Contexer Privacy Policy](https://contexer.ai/privacy).
 
 ### What is the difference between Contexer OSS and Contexer Teams?
 
