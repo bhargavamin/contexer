@@ -37,10 +37,10 @@ _BACKLOG_ESCALATE = 10            # pending-review count at which surfacing tone
 
 # ── the store directory: one reader, one builder ───────────────────────────────────────
 # `STORE_DIR` is the VALUE; `store_dir()` is the only thing that reads it. That matters for
-# one reason: 29 sites used to create this directory themselves, and 28 of them spelled
+# one reason: 35 sites used to create this directory themselves, 34 of them spelling
 # `mode=0o700` while spool.py spelled its own `_DIR_MODE` alias. A private-file guarantee
-# repeated 29 times is a permissions bug the first time one copy forgets, and nothing would
-# report it.
+# repeated 35 times is a permissions bug the first time one copy forgets, and nothing would
+# report it. (Counts measured against the merge-base of the change that introduced this.)
 #
 # The constant stays public: it is what a test substitutes, and monkeypatch's automatic
 # restore is why that idiom is right rather than a smell. A test needing the directory to

@@ -7,7 +7,31 @@ from pathlib import Path
 import pytest
 
 from contexer import remote, store, updates
-from tests.seams import redirect_store_dir
+
+
+def redirect_store_dir(patcher, path) -> Path:
+    """Point Contexer's store directory at `path` for `patcher`'s lifetime. Returns it.
+
+    The one place the suite chooses which name to write. 66 call sites across 24 files each
+    spelled `monkeypatch.setattr(store, "STORE_DIR", ...)` out by hand, and 4 more assigned
+    the attribute directly and restored it themselves. That count is what has to change if the
+    mechanism ever does. Monkeypatch is not the smell: its automatic restore is why a test may
+    write a module attribute at all, and it is what the 4 hand-written restores lacked.
+
+    `patcher` is any object with pytest's `setattr(obj, name, value)` restore semantics, and it
+    is a parameter rather than a fixture because the call sites are not uniform: most hold the
+    function-scoped `monkeypatch`, test_benchmark_extended.py holds a `pytest.MonkeyPatch()`
+    inside a module-scoped fixture, and either may sit in a `monkeypatch.context()` block. A
+    fixture bound to one would not restore at the right moment for the others.
+
+    The CONSTANT is written, not `store.store_dir` itself, because production resolves the
+    directory through that function on every call: writing the value redirects every builder,
+    and a test that separately reads `store.STORE_DIR` still agrees with it. Substitute
+    `store.store_dir` directly only where the directory must VARY during a single call.
+    """
+    target = Path(path)
+    patcher.setattr(store, "STORE_DIR", target)
+    return target
 
 
 def pytest_collection_modifyitems(config, items):

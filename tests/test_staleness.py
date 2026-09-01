@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from contexer import revisions, store
-from tests.seams import redirect_store_dir
+from tests.conftest import redirect_store_dir
 
 
 @pytest.fixture

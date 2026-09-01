@@ -45,7 +45,7 @@ from contexer import (
     spool,
     store,
 )
-from tests.seams import redirect_store_dir
+from tests.conftest import redirect_store_dir
 from tests.test_evidence_hardening_replays import (
     FIXTURES,
     GENERATED,

@@ -20,7 +20,7 @@ import pytest
 import contexer.share as share_mod
 import contexer.share_status as share_status
 from contexer import config as _config_mod
-from tests.seams import redirect_store_dir
+from tests.conftest import redirect_store_dir
 from contexer import review
 from contexer import server, store
 

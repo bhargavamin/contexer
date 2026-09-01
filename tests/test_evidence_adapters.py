@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from contexer import evidence, share_policy, spool, store
-from tests.seams import redirect_store_dir
+from tests.conftest import redirect_store_dir
 from contexer.adapters import claude, codex, cursor, gemini
 
 # The keys that legitimately differ between two hosts observing the same edit.

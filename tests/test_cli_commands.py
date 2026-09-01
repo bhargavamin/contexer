@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from contexer import cli, updates
-from tests.seams import redirect_store_dir
+from tests.conftest import redirect_store_dir
 from contexer.cli import install, reinstall, status, uninstall, version
 
 
@@ -373,14 +373,20 @@ class TestMainDispatch:
         with pytest.raises(SystemExit) as exc:
             _run_main("bogus")
         assert exc.value.code == 1
-        assert "Unknown command: bogus" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "Unknown command: bogus" in err and "Usage: contexer" in err
 
-    def test_no_args_launches_server(self, monkeypatch):
+    def test_no_args_launches_server(self, monkeypatch, capsys):
+        """No subcommand means the assistant launched us as its MCP server over stdio, so
+        stdout is the protocol and the update aside must never follow it."""
         import contexer.server as server
         called = []
         monkeypatch.setattr(server, "main", lambda: called.append(True))
+        monkeypatch.setattr(cli, "_print_update_backstop",
+                            lambda: pytest.fail("no aside may follow the server"))
         cli.dispatch([])
         assert called == [True]
+        assert capsys.readouterr().out == ""
 
 
 # ── status resilience ─────────────────────────────────────────────────────────
@@ -2567,28 +2573,6 @@ class TestCommandTable:
         """Direction two: a help text may not promise a command that exits 1."""
         stale = self._documented() - set(cli._BY_NAME)
         assert stale == set(), sorted(stale)
-
-    # ── the two edges dispatch owns itself ──
-
-    def test_an_unknown_command_exits_one_with_the_usage_text(self, capsys):
-        with pytest.raises(SystemExit) as exc:
-            cli.dispatch(["bogus"])
-        assert exc.value.code == 1
-        err = capsys.readouterr().err
-        assert "Unknown command: bogus" in err and "Usage: contexer" in err
-
-    def test_no_argv_runs_the_mcp_server_and_prints_nothing_after_it(self, monkeypatch,
-                                                                     capsys):
-        """stdout is the MCP transport once the server is running, so the update aside must
-        never follow it."""
-        import contexer.server as server
-        ran = []
-        monkeypatch.setattr(server, "main", lambda: ran.append(True))
-        monkeypatch.setattr(cli, "_print_update_backstop",
-                            lambda: pytest.fail("no aside may follow the server"))
-        cli.dispatch([])
-        assert ran == [True]
-        assert capsys.readouterr().out == ""
 
     def test_a_row_resolves_its_handler_when_it_runs_not_when_it_is_built(self, monkeypatch):
         """Late binding, pinned. A table holding the function object captured at import

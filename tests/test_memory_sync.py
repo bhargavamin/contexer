@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 from contexer import memory_sync, store
-from tests.seams import redirect_store_dir
+from tests.conftest import redirect_store_dir
 from contexer.adapters import claude
 
 FEEDBACK = """---

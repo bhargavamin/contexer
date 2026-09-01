@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 import pytest
 
 from contexer import store
-from tests.seams import redirect_store_dir
+from tests.conftest import redirect_store_dir
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -109,11 +109,13 @@ def base_store_dir(tmp_path_factory):
     d = tmp_path_factory.mktemp("ext_base")
     d.mkdir(parents=True, exist_ok=True)
     repo = "/bench/app"
-    original = store.STORE_DIR
-    store.STORE_DIR = d
-    for content, subtype in BASE_DECISIONS:
-        store.update_decision(repo, content, SESSION, subtype)
-    store.STORE_DIR = original
+    # pytest.MonkeyPatch() rather than a hand-written save-and-restore: `monkeypatch` is
+    # function-scoped and this fixture is not, and the manual form leaks the redirect into
+    # every later test if the body raises.
+    with pytest.MonkeyPatch.context() as patcher:
+        redirect_store_dir(patcher, d)
+        for content, subtype in BASE_DECISIONS:
+            store.update_decision(repo, content, SESSION, subtype)
     return d, repo
 
 
@@ -316,10 +318,9 @@ class TestStorageAtCapacity:
         d = tmp_path_factory.mktemp("ext_full")
         d.mkdir(parents=True, exist_ok=True)
         repo = "/bench/full"
-        original = store.STORE_DIR
-        store.STORE_DIR = d
-        _write_direct(repo, 505)   # write 505 directly — cap keeps last 500
-        store.STORE_DIR = original
+        with pytest.MonkeyPatch.context() as patcher:
+            redirect_store_dir(patcher, d)
+            _write_direct(repo, 505)   # write 505 directly — cap keeps last 500
         return d, repo
 
     @pytest.fixture(autouse=True)

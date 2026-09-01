@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from contexer import store
-from tests.seams import redirect_store_dir
+from tests.conftest import redirect_store_dir
 
 
 def _git(*args, cwd):

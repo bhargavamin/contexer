@@ -11,7 +11,7 @@ import sys
 import pytest
 
 from contexer import anchors, lifecycle, review, revisions, store
-from tests.seams import redirect_store_dir
+from tests.conftest import redirect_store_dir
 
 
 # ── fixtures ────────────────────────────────────────────────────────────────

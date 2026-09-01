@@ -29,7 +29,7 @@ from pathlib import Path
 import pytest
 
 from contexer import console_api, store
-from tests.seams import redirect_store_dir
+from tests.conftest import redirect_store_dir
 
 
 # Every name that moved out of store.py, public and private. A name reappearing as a top-level

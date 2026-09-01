@@ -1,6 +1,5 @@
 """CLI and MCP contracts for explicit automatic-proposal policy control."""
 import re
-import sys
 
 import pytest
 
@@ -118,9 +117,8 @@ def test_cli_help_says_skip_confirm_cannot_bypass_policy_confirmation(capsys):
 def test_main_dispatches_share_policy(monkeypatch):
     calls = []
     monkeypatch.setattr(cli, "share_policy_cmd", lambda args: calls.append(args))
-    monkeypatch.setattr(sys, "argv", ["contexer", "share-policy", "show"])
 
-    cli.main()
+    cli.dispatch(["share-policy", "show"])
 
     assert calls == [["show"]]
 

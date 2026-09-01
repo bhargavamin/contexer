@@ -13,9 +13,10 @@ called. It does not own WHERE they live, and it never will: staying a pure leaf 
 from the package is what lets `store.py` import it.
 
 `store.sidecar_path(kind, **fields)` is the one function that joins a DECLARED name onto the
-store directory, and `store.store_dir()` is the one that reads that directory.
-`tests/test_sidecars.py::TestStoreDirectorySeam` holds both, because a module that builds the
-path by hand still works, so the erosion is invisible.
+store directory, `glob_for` renders the pattern for callers that sweep a whole family, and
+`store.store_dir()` is the one that reads the directory. `tests/test_store_dir_seam.py` holds
+all of it, because a module that builds the path by hand still works, so the erosion is
+invisible.
 
 Two things in the store directory are deliberately outside this declaration, and both are
 someone else's to own. `config.toml` is the developer's own hand-edited settings file, owned
@@ -188,6 +189,20 @@ def filename(kind: str, **fields: str) -> str:
         return _BY_NAME[kind].template.format(**fields)
     except KeyError as exc:
         raise KeyError(f"unknown sidecar kind or missing field: {kind} {fields}") from exc
+
+
+def glob_for(kind: str) -> str:
+    """The fnmatch pattern that matches every file of `kind`, e.g. `.team_*.json`.
+
+    The companion to `filename`, for the callers that sweep a family rather than address one
+    file. It exists because `team_context` spelled `.team_*.json` as a literal directly below
+    a comment reading "Ask the declaration, not a literal": renaming a kind would have left
+    that sweep matching the old shape, silently.
+    """
+    try:
+        return _BY_NAME[kind].glob
+    except KeyError as exc:
+        raise KeyError(f"unknown sidecar kind: {kind}") from exc
 
 
 def lifetime_for(name: str) -> int | None:

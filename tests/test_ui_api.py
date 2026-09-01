@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from contexer import config, store, team_context
-from tests.seams import redirect_store_dir
+from tests.conftest import redirect_store_dir
 from contexer.ui import api, daemon, server
 
 TOKEN = "console-token-for-tests"

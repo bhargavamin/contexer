@@ -4,7 +4,7 @@ import json
 import pytest
 
 from contexer import store
-from tests.seams import redirect_store_dir
+from tests.conftest import redirect_store_dir
 
 
 @pytest.fixture(autouse=True)

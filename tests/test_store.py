@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from contexer import sidecars
-from tests.seams import redirect_store_dir
+from tests.conftest import redirect_store_dir
 from contexer import miner as miner_mod
 from contexer import retrieval, review, revisions
 from contexer import store

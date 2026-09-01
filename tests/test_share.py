@@ -13,7 +13,7 @@ import pytest
 
 import contexer.remote as remote
 from contexer import config, share, share_status, store
-from tests.seams import redirect_store_dir
+from tests.conftest import redirect_store_dir
 from contexer.remote import (
     RemoteAuthError,
     RemoteRateLimitError,

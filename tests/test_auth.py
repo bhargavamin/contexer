@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from contexer import auth, config, store
-from tests.seams import redirect_store_dir
+from tests.conftest import redirect_store_dir
 
 TEAM = config.Profile(mode="team", endpoint="http://localhost:8080/mcp", token=None)
 

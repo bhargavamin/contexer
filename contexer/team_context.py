@@ -102,7 +102,7 @@ def clear_caches() -> int:
     Fail-soft per file: a cache that will not delete is left behind rather than raising into a
     login that has already succeeded."""
     try:
-        paths = sorted(store.store_dir().glob(".team_*.json"))
+        paths = sorted(store.store_dir().glob(sidecars.glob_for("team_cache")))
     except OSError:
         return 0
     removed = 0

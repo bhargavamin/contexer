@@ -14,7 +14,7 @@ import time
 import pytest
 
 from contexer import guard_engine, revisions, store
-from tests.seams import redirect_store_dir
+from tests.conftest import redirect_store_dir
 from tests.conftest import _git, _seed_entry, _write
 
 

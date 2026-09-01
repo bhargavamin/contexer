@@ -29,7 +29,7 @@ from pathlib import Path
 import pytest
 
 from contexer import candidates, cli, evidence, lifecycle, reconcile, review_impact, spool, store
-from tests.seams import redirect_store_dir
+from tests.conftest import redirect_store_dir
 from contexer.adapters import claude, codex, cursor, gemini
 
 SESSION = "sess-1"
@@ -2590,8 +2590,7 @@ class TestCliCommand:
         from contexer import cli
 
         monkeypatch.setattr(cli, "_cli_repo", lambda: tmp_repo)
-        monkeypatch.setattr("sys.argv", ["contexer", "reconcile-session", *args])
-        cli.main()
+        cli.dispatch(["reconcile-session", *args])
 
     def test_prints_the_receipt(self, tmp_repo, monkeypatch, capsys):
         _emit(tmp_repo, "user_directive", UNRELATED)
@@ -2633,11 +2632,10 @@ class TestCliCommand:
         assert exc.value.code == 1
         assert "Unknown argument" in capsys.readouterr().err
 
-    def test_listed_in_help(self, monkeypatch, capsys):
+    def test_listed_in_help(self, capsys):
         from contexer import cli
 
-        monkeypatch.setattr("sys.argv", ["contexer", "help"])
-        cli.main()
+        cli.dispatch(["help"])
         assert "reconcile-session" in capsys.readouterr().out
 
 

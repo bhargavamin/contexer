@@ -12,7 +12,7 @@ import time
 import pytest
 
 from contexer import config
-from tests.seams import redirect_store_dir
+from tests.conftest import redirect_store_dir
 from contexer.ui import daemon, server
 
 TOKEN = "console-token-for-tests"

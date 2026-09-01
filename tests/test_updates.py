@@ -12,7 +12,7 @@ import time
 import pytest
 
 from contexer import store, updates
-from tests.seams import redirect_store_dir
+from tests.conftest import redirect_store_dir
 from contexer.adapters import claude, codex, cursor, gemini
 
 
