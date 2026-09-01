@@ -31,6 +31,12 @@ def test_share_decision_is_async_tool():
     assert inspect.iscoroutinefunction(server.share_decision)
 
 
+def test_mcp_server_keeps_dependency_request_logs_off_host_pipes():
+    # FastMCP's INFO default enables httpx request lines containing the configured remote URL.
+    # Contexer's closed decision telemetry remains independent of this dependency-log threshold.
+    assert server.mcp.settings.log_level == "WARNING"
+
+
 def test_share_decision_short_circuits_without_repo(monkeypatch):
     monkeypatch.setattr(server.store, "resolve_repo", lambda p: "")
     called = {"share": False}

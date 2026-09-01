@@ -1,5 +1,8 @@
 """CLI and MCP contracts for explicit automatic-proposal policy control."""
+import asyncio
+import inspect
 import re
+import threading
 
 import pytest
 
@@ -37,6 +40,10 @@ def _patch_cli_repo(monkeypatch):
     monkeypatch.setattr(store, "resolve_repo", lambda _path: "/repo")
 
 
+def _mcp(**kwargs):
+    return asyncio.run(server.manage_share_policy(**kwargs))
+
+
 def test_cli_enable_requires_visible_confirmation_and_fresh_binding(
         monkeypatch, capsys):
     _patch_cli_repo(monkeypatch)
@@ -65,6 +72,32 @@ def test_cli_enable_requires_visible_confirmation_and_fresh_binding(
     assert "Team approval remains manual" in output
     assert len(previews) == 2
     assert activated == [preview]
+
+
+def test_cli_enable_reports_durable_intents_when_detached_launch_fails(
+        monkeypatch, capsys):
+    _patch_cli_repo(monkeypatch)
+    preview = _preview()
+    monkeypatch.setattr(
+        share_policy, "prepare_policy_activation",
+        lambda *_args, **_kwargs: (
+            preview, share_policy.OperationOutcome("success", "none")),
+    )
+    monkeypatch.setattr(
+        share_policy, "activate_policy",
+        lambda _preview: share_policy.ScanOutcome(
+            "queued", "validation_error", scanned=1, queued=1),
+    )
+    monkeypatch.setattr(share_policy, "policy_status", lambda _repo: {})
+    monkeypatch.setattr(share_policy, "format_policy_status", lambda _snapshot: "policy active")
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "yes")
+
+    cli.share_policy_cmd(["enable", "--team", "Platform", "--include-existing"])
+
+    output = capsys.readouterr().out
+    assert "initial intents are durable" in output
+    assert "detached uploader process did not start" in output
+    assert "flush" in output
 
 
 def test_cli_enable_decline_changes_nothing(monkeypatch, capsys):
@@ -123,6 +156,38 @@ def test_main_dispatches_share_policy(monkeypatch):
     assert calls == [["show"]]
 
 
+def test_mcp_policy_control_is_async_and_runs_sync_work_off_the_event_loop(monkeypatch):
+    """The real MCP host invokes tools on its event loop. Policy preparation uses the
+    synchronous RemoteStore shim, which owns an ``asyncio.run`` for CLI callers, so executing
+    that shim on the MCP loop raises before a preview can render. Keep the established sync
+    policy transaction intact, but run it on a worker where it cannot nest event loops or freeze
+    unrelated MCP requests.
+    """
+    assert inspect.iscoroutinefunction(server.manage_share_policy)
+    seen = {}
+
+    def sync_policy_control(*args):
+        seen["worker_thread"] = threading.current_thread()
+        seen["args"] = args
+        # Stands in for RemoteStore.get_capabilities/list_teams. This is the exact operation that
+        # failed when manage_share_policy was a synchronous MCP tool called on the running loop.
+        asyncio.run(asyncio.sleep(0))
+        return "policy preview"
+
+    monkeypatch.setattr(server, "_manage_share_policy", sync_policy_control)
+
+    async def driver():
+        seen["loop_thread"] = threading.current_thread()
+        return await server.manage_share_policy(
+            action="enable", repo_path="/repo", team="Platform")
+
+    result = asyncio.run(driver())
+
+    assert result == "policy preview"
+    assert seen["worker_thread"] is not seen["loop_thread"]
+    assert seen["args"] == ("enable", "/repo", "Platform", False, False, "", "")
+
+
 def test_mcp_enable_is_two_call_and_never_activates_preview(monkeypatch):
     server._POLICY_CONFIRMATIONS.clear()
     monkeypatch.setattr(server.store, "resolve_repo", lambda _path: "/repo")
@@ -140,14 +205,14 @@ def test_mcp_enable_is_two_call_and_never_activates_preview(monkeypatch):
     monkeypatch.setattr(share_policy, "policy_status", lambda _repo: {})
     monkeypatch.setattr(share_policy, "format_policy_status", lambda _snapshot: "policy active")
 
-    first = server.manage_share_policy(action="enable", repo_path="/repo", team="Platform")
+    first = _mcp(action="enable", repo_path="/repo", team="Platform")
 
     assert "No policy has been changed yet" in first
     assert "confirm=true" in first
     assert calls == []
     token = re.search(r"confirmation_token=([A-Za-z0-9_-]+)", first).group(1)
 
-    second = server.manage_share_policy(
+    second = _mcp(
         action="enable", repo_path="/repo", team="Platform", confirm=True,
         confirmation_token=token)
 
@@ -169,7 +234,7 @@ def test_mcp_cannot_confirm_enable_without_a_prior_single_use_preview(monkeypatc
         lambda _preview: pytest.fail("direct confirmation must not activate"),
     )
 
-    result = server.manage_share_policy(
+    result = _mcp(
         action="enable", repo_path="/repo", team="Platform", confirm=True)
 
     assert "single-use preview token" in result
@@ -189,11 +254,11 @@ def test_mcp_confirmation_is_consumed_and_repreviewed_when_binding_changes(monke
         share_policy, "activate_policy",
         lambda _preview: pytest.fail("changed binding must not activate"),
     )
-    first = server.manage_share_policy(
+    first = _mcp(
         action="enable", repo_path="/repo", team="Platform")
     token = re.search(r"confirmation_token=([A-Za-z0-9_-]+)", first).group(1)
 
-    result = server.manage_share_policy(
+    result = _mcp(
         action="enable", repo_path="/repo", team="Platform", confirm=True,
         confirmation_token=token)
 
@@ -222,11 +287,11 @@ def test_mcp_reports_saved_policy_as_enabled_when_activation_mirror_fails(monkey
         share_policy, "format_policy_status",
         lambda _snapshot: "policy active",
     )
-    first = server.manage_share_policy(
+    first = _mcp(
         action="enable", repo_path="/repo", team="Platform")
     token = re.search(r"confirmation_token=([A-Za-z0-9_-]+)", first).group(1)
 
-    result = server.manage_share_policy(
+    result = _mcp(
         action="enable", repo_path="/repo", team="Platform", confirm=True,
         confirmation_token=token)
 
@@ -245,7 +310,7 @@ def test_mcp_policy_status_and_retry_preserve_lifecycle_wording(monkeypatch):
             "attention": 1, "baseline": 0, "repo_key": None,
         },
     )
-    status = server.manage_share_policy(action="show", repo_path="/repo")
+    status = _mcp(action="show", repo_path="/repo")
     assert "queued" in status and "uploading" in status
     assert "pending lead review" in status and "already current" in status
     assert "shared" not in status.lower()
@@ -254,7 +319,24 @@ def test_mcp_policy_status_and_retry_preserve_lifecycle_wording(monkeypatch):
         share_policy, "retry_attention",
         lambda *_args: share_policy.OperationOutcome("queued", "none"),
     )
-    retried = server.manage_share_policy(
+    retried = _mcp(
         action="retry", repo_path="/repo", intent_id="intent-1")
     assert "local proposal intent" in retried
     assert "shared" not in retried.lower()
+
+
+def test_mcp_retry_reports_durable_intent_when_detached_launch_fails(monkeypatch):
+    monkeypatch.setattr(server.store, "resolve_repo", lambda _path: "/repo")
+    monkeypatch.setattr(
+        share_policy,
+        "retry_attention",
+        lambda *_args: share_policy.OperationOutcome(
+            "queued", "validation_error", "diag_4Z7K2N8Q5W1C9M6P"),
+    )
+
+    result = _mcp(
+        action="retry", repo_path="/repo", intent_id="intent-1")
+
+    assert "Retry queued" in result
+    assert "detached uploader process did not start" in result
+    assert "durable intent" in result

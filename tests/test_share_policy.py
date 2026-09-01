@@ -15,7 +15,7 @@ from contexer.config import ConfigError, Profile
 
 NOW = "2026-08-30T12:00:00Z"
 FINGERPRINT = "acctfp_v1_7M4Q2PX9C6N8"
-_REAL_START_DETACHED_DRAINER = share_policy.start_detached_drainer
+_REAL_START_IN_PROCESS_DRAINER = share_policy.start_in_process_drainer
 
 
 @pytest.fixture(autouse=True)
@@ -630,6 +630,21 @@ def test_include_existing_activation_queues_only_eligible_human_approved_revisio
     assert [row["decision_id"] for row in share_policy.read_outbox()] == ["eligible"]
 
 
+def test_include_existing_activation_preserves_queue_when_detached_launch_fails(
+        tmp_repo, monkeypatch):
+    entry = _entry("eligible", "eligible-revision")
+    (preview, _outcome), _remote_store = _prepare_activation(
+        tmp_repo, monkeypatch, entries=[entry], include_existing=True)
+    monkeypatch.setattr(share_policy, "start_detached_drainer", lambda: False)
+
+    result = share_policy.activate_policy(preview)
+
+    assert result.result == "queued"
+    assert result.reason_code == "validation_error"
+    assert result.queued == 1
+    assert [row["decision_id"] for row in share_policy.read_outbox()] == ["eligible"]
+
+
 def test_include_existing_preview_count_honors_terminal_receipts(tmp_repo, monkeypatch):
     entry = _entry("decision-1", "revision-2")
     share_policy.append_receipt(_receipt(state="submitted"))
@@ -719,6 +734,23 @@ def test_retry_attention_reopens_receipt_then_queues_stable_idempotency_key(
     assert share_policy.fold_receipts(share_policy.read_receipts())[
         share_policy.receipt_key(attention)]["state"] == "queued"
     assert starts == [True]
+
+
+def test_retry_attention_preserves_durable_intent_when_detached_launch_fails(
+        tmp_repo, monkeypatch):
+    share_policy.save_policy(tmp_repo, _policy(tmp_repo, include_existing=True))
+    attention = _attention(tmp_repo)
+    share_policy.append_attention(attention)
+    share_policy.append_receipt(_receipt(state="attention"))
+    monkeypatch.setattr(share_policy, "start_detached_drainer", lambda: False)
+
+    outcome = share_policy.retry_attention(tmp_repo, "intent-1")
+
+    assert outcome.result == "queued"
+    assert outcome.reason_code == "validation_error"
+    assert outcome.diagnostic_id is not None
+    assert share_policy.read_attention() == []
+    assert share_policy.read_outbox()[0]["idempotency_key"] == "intent-1"
 
 
 def test_retry_attention_keeps_item_when_queue_lock_is_busy(tmp_repo, monkeypatch):
@@ -1013,11 +1045,13 @@ class _ProposalRemote:
         )
         self.statuses = list(statuses)
         self.teams = [remote.RemoteTeam("team-1", "Platform", "member")] if member else []
+        self.capability_calls = 0
         self.list_calls = 0
         self.preview_calls = []
         self.submit_calls = []
 
     def get_capabilities(self):
+        self.capability_calls += 1
         return self.capabilities
 
     def list_teams(self):
@@ -1205,7 +1239,7 @@ def test_drainer_refreshes_preview_once_after_head_conflict(tmp_repo, monkeypatc
 
 
 @pytest.mark.parametrize("automatic,atomic", [(False, True), (True, False)])
-def test_drainer_refuses_legacy_capabilities_without_wire_submission(
+def test_drainer_parks_legacy_capabilities_once_and_pauses_policy(
         tmp_repo, monkeypatch, automatic, atomic):
     remote_store = _ProposalRemote(automatic=automatic, atomic=atomic)
     _intent_row, _policy_row, profile, _secret = _ready_drain(
@@ -1213,9 +1247,67 @@ def test_drainer_refuses_legacy_capabilities_without_wire_submission(
 
     outcomes = share_policy.drain_once(profile)
 
-    assert outcomes == [share_policy.OperationOutcome("refused", "unsupported_protocol")]
+    assert outcomes[0].result == "attention"
+    assert outcomes[0].reason_code == "unsupported_protocol"
     assert not remote_store.preview_calls and not remote_store.submit_calls
-    assert len(share_policy.read_outbox()) == 1
+    assert share_policy.read_outbox() == []
+    assert share_policy.read_attention()[0]["reason"] == "unsupported_protocol"
+    assert share_policy.read_receipts()[-1]["state"] == "attention"
+    assert share_policy.load_policy(tmp_repo)["paused_reason"] == "unsupported_protocol"
+    assert remote_store.capability_calls == 1
+
+    assert share_policy.drain_once(profile) == []
+    assert remote_store.capability_calls == 1
+
+
+def test_submission_unsupported_protocol_parks_intent_and_pauses_policy(
+        tmp_repo, monkeypatch):
+    remote_store = _ProposalRemote(statuses=("unsupported_protocol",))
+    _intent_row, _policy_row, profile, _secret = _ready_drain(
+        tmp_repo, monkeypatch, remote_store)
+
+    outcomes = share_policy.drain_once(profile)
+
+    assert outcomes[0].result == "attention"
+    assert outcomes[0].reason_code == "unsupported_protocol"
+    assert len(remote_store.preview_calls) == len(remote_store.submit_calls) == 1
+    assert share_policy.read_outbox() == []
+    assert share_policy.read_attention()[0]["reason"] == "unsupported_protocol"
+    assert share_policy.load_policy(tmp_repo)["paused_reason"] == "unsupported_protocol"
+
+
+def test_same_destination_reenable_then_retry_recovers_unsupported_attention(
+        tmp_repo, monkeypatch):
+    unsupported = _ProposalRemote(automatic=False)
+    intent, paused_policy, profile, _secret = _ready_drain(
+        tmp_repo, monkeypatch, unsupported)
+    assert share_policy.drain_once(profile)[0].reason_code == "unsupported_protocol"
+
+    recovered = _ProposalRemote()
+    monkeypatch.setattr(
+        share_policy.remote.RemoteStore,
+        "from_profile",
+        staticmethod(lambda _profile, **kwargs: (
+            recovered if kwargs == {"reactive_refresh": False}
+            else pytest.fail("automatic flows must pin the validated credential")
+        )),
+    )
+    monkeypatch.setattr(store, "run_git", lambda *_args: "git@github.com:org/repo.git")
+    preview, outcome = share_policy.prepare_policy_activation(
+        tmp_repo, "Platform", profile=profile)
+
+    assert outcome == share_policy.OperationOutcome("success", "none")
+    assert preview is not None
+    assert preview.policy["policy_generation"] == paused_policy["policy_generation"]
+    monkeypatch.setattr(share_policy, "start_detached_drainer", lambda: True)
+    share_policy.activate_policy(preview)
+    assert share_policy.retry_attention(tmp_repo, intent["idempotency_key"]).result == "queued"
+
+    assert share_policy.drain_once(profile) == [
+        share_policy.OperationOutcome("submitted", "none")]
+    assert share_policy.read_outbox() == []
+    assert share_policy.read_attention() == []
+    assert len(recovered.submit_calls) == 1
 
 
 def test_drainer_account_mismatch_moves_attention_and_pauses(tmp_repo, monkeypatch):
@@ -1532,8 +1624,8 @@ def test_detached_start_returns_before_worker_finishes(tmp_repo, monkeypatch):
         return []
 
     monkeypatch.setattr(share_policy, "drain_once", blocked_drain)
-    assert _REAL_START_DETACHED_DRAINER() is True
+    assert _REAL_START_IN_PROCESS_DRAINER() is True
     assert entered.wait(timeout=1)
-    assert _REAL_START_DETACHED_DRAINER() is False
+    assert _REAL_START_IN_PROCESS_DRAINER() is False
     release.set()
     assert finished.wait(timeout=1)
