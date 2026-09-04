@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.45.4](https://github.com/bhargavamin/contexer/compare/v0.45.3...v0.45.4) (2026-09-04)
+
+
+### Bug Fixes
+
+* capture plain constraints and improve recall ([00fe2e5](https://github.com/bhargavamin/contexer/commit/00fe2e5103c2197a3e378f1066f623eeb3f564a6))
+
 ## [0.45.3](https://github.com/bhargavamin/contexer/compare/v0.45.2...v0.45.3) (2026-09-01)
 
 
