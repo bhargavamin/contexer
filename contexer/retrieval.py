@@ -64,6 +64,7 @@ _TOPIC_ALIASES: dict[str, frozenset] = {
 # BM25 tuning (Robertson/Sparck-Jones defaults — corpus is <=500 short jargon sentences).
 _BM25_K1 = 1.5
 _BM25_B = 0.75
+_TITLE_BM25_WEIGHT = 2.0
 
 # Artifact extraction: signal-rich tokens pulled from a paste even when the prose is empty.
 _ARTIFACT_PATH_RE = re.compile(r"[\w./-]+\.(?:py|ts|js|go|rs|sh|md|toml|yaml|json)\b")
@@ -97,7 +98,9 @@ def derive_topics(content: str) -> list[str]:
     return sorted(topics)
 
 
-def bm25_rank(keywords: list[str], index: dict) -> list[tuple[str, float, int, int]]:
+def bm25_rank(keywords: list[str], index: dict, *, tf_field: str = "tf",
+              len_field: str = "len", df_field: str = "df",
+              avgdl_field: str = "avgdl") -> list[tuple[str, float, int, int]]:
     """BM25-score every indexed doc against `keywords` (which may repeat — repeats raise
     that term's query weight). Returns (decision_id, score, distinct_term_hits,
     discriminative_hits) sorted by score desc. Terms absent from the corpus contribute
@@ -105,9 +108,9 @@ def bm25_rank(keywords: list[str], index: dict) -> list[tuple[str, float, int, i
     (df <= max(2, n_docs // 20)) — the router's junk guard for question-only prompts."""
     import math
     docs = index.get("docs", {})
-    df = index.get("df", {})
+    df = index.get(df_field, {})
     n_docs = index.get("n_docs", 0) or 0
-    avgdl = index.get("avgdl", 0.0) or 0.0
+    avgdl = index.get(avgdl_field, 0.0) or 0.0
     if not docs or not keywords:
         return []
     # Query-term weights: a repeated keyword (e.g. a double-weighted artifact) counts twice.
@@ -129,8 +132,8 @@ def bm25_rank(keywords: list[str], index: dict) -> list[tuple[str, float, int, i
     disc_cap = max(2, n_docs // 20)
     ranked: list[tuple[str, float, int, int]] = []
     for did, doc in docs.items():
-        tf = doc.get("tf", {})
-        dl = doc.get("len", 0) or 0
+        tf = doc.get(tf_field, {})
+        dl = doc.get(len_field, 0) or 0
         score = 0.0
         hits = 0
         dhits = 0
@@ -151,6 +154,43 @@ def bm25_rank(keywords: list[str], index: dict) -> list[tuple[str, float, int, i
         if hits:
             ranked.append((did, score, hits, dhits))
     ranked.sort(key=lambda r: r[1], reverse=True)
+    return ranked
+
+
+def prompt_rank(keywords: list[str], index: dict) -> list[tuple[str, float, int, int, int, int]]:
+    """Rank prompt-retrieval candidates across content and their own titles.
+
+    Content remains the broad recall field. A concise authored title contributes a weighted
+    BM25 score only to the decision that owns it, and a title-only match can therefore enter
+    the candidate set and outrank an incidental body mention. The returned hit counts use the
+    conservative maximum across the fields; this never manufactures two distinct lexical hits.
+    The fifth and sixth return fields are the content and title distinct-term hit counts, so
+    the prompt router can distinguish a true title-only subject from a concise title that
+    simply mirrors an already-strong body.
+    """
+    content = {row[0]: row for row in bm25_rank(keywords, index)}
+    titles = {row[0]: row for row in bm25_rank(
+        keywords, index, tf_field="title_tf", len_field="title_len",
+        df_field="title_df", avgdl_field="title_avgdl",
+    )}
+    ranked = []
+    # Walk the persisted document order rather than a set union. Python's stable sort then
+    # gives equal-score candidates deterministic ordering across hook processes.
+    candidate_ids = (
+        did for did in index.get("docs", {}) if did in content or did in titles
+    )
+    for did in candidate_ids:
+        content_row = content.get(did, (did, 0.0, 0, 0))
+        title_row = titles.get(did, (did, 0.0, 0, 0))
+        ranked.append((
+            did,
+            content_row[1] + _TITLE_BM25_WEIGHT * title_row[1],
+            max(content_row[2], title_row[2]),
+            max(content_row[3], title_row[3]),
+            content_row[2],
+            title_row[2],
+        ))
+    ranked.sort(key=lambda row: row[1], reverse=True)
     return ranked
 
 

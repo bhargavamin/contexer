@@ -42,8 +42,10 @@ uvx ruff@0.15.4 check .
   synthesized understanding of a subsystem while answering a question. Pass the full reasoning
   and a `subtype` (`architecture` | `constraint` | `pattern` | `convention`). The server filters
   duplicates silently, so err on the side of calling it.
-- Call `get_context` **before reading files** for any question about architecture, design
-  rationale, constraints, patterns, or conventions.
+- Before reading files for a question about architecture, design rationale, constraints,
+  patterns, or conventions, use a relevant `[Contexer: auto-fetched ...]` block when present.
+  If it does not answer the question, call Contexer's `get_context` with concise subject keywords.
+  Another memory, graph, or search tool is not a substitute for Contexer.
 - Keep your own unratified proposals provisional (`created_by="ai"`) rather than storing them as
   settled fact.
 

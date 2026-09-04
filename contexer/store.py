@@ -1195,6 +1195,7 @@ _CONSTRAINT_TRIGGER = re.compile(
     r"|"
     r"al+w(?:ay|ya)s"               # always + common typos: allways, alwyas
     r"|never"                        # never
+    r"|can\s+only"                  # plain restrictive declaration: "orders.py can only import X"
     r"|must\s+(?:always|never)"      # must always / must never
     r"|should\s+(?:always|never)"    # should always / should never
     r"|at\s+all\s+times"             # at all times
@@ -1219,6 +1220,7 @@ _CONSTRAINT_TRIGGER = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+_CAN_ONLY_TRIGGER = re.compile(r"\bcan\s+only\b", re.IGNORECASE)
 
 # Soft conversational prose that contains "don't/do not/avoid" but is NOT a directive:
 # "don't worry about the tests", "I don't know why", "don't hesitate to ask". These are
@@ -1305,10 +1307,12 @@ _CONVENTION_SIGNALS = re.compile(
 )
 
 # Personal-descriptive patterns - these describe existing habits, not directives.
-# "I always get this error", "we never did that", "it always worked before" are descriptive.
+# "I always get this error", "we never did that", and "it always worked before" are descriptive.
+# Bare "I can only ..." is not discarded here: it may be a binding engineering constraint, so
+# the capture path keeps it but routes the ambiguity to pending review.
 # NOTE: "it should always" is NOT caught here because "should" sits between "it" and "always".
 _PERSONAL_DESCRIPTOR = re.compile(
-    r"\b(i|we|it)\s+(have\s+|has\s+|did\s+|does\s+)?(always|never)\b",
+    r"\b(?:i|we|it)\s+(?:have\s+|has\s+|did\s+|does\s+)?(?:always|never)\b",
     re.IGNORECASE,
 )
 
@@ -1402,7 +1406,8 @@ _NON_DIRECTIVE_CONTAINER = re.compile(
     r"maintainer|reviewer|owner|architect|speaker\s+\d+)\s*"
     r"(?::|[>|]|[\u2013\u2014]|\s+-\s+)\s*"
     r"(?=(?:always|never|must\b|should\b|do\s+not\b|don['\u2019]t\b|from\s+now\s+on\b|"
-    r"going\s+forward\b|ensure\b|make\s+sure\b|avoid\b|prefer\b|use\b))"
+    r"going\s+forward\b|ensure\b|make\s+sure\b|avoid\b|prefer\b|use\b|"
+    r"[^\n]{0,120}\bcan\s+only\b))"
     r"|according\s+to\s+[^,:\n]{1,80}[,:]"      # attributed statement
     r"|(?:the\s+)?(?:README|documentation|docs?|release\s+notes?|issues?|changelog|log|output)"
     r"\s+(?:says?|said|states?|reads)\b"
@@ -1413,7 +1418,8 @@ _NON_DIRECTIVE_CONTAINER = re.compile(
     r"tells?(?:\s+(?:me|us|you))?\s+to|told(?:\s+(?:me|us|you))?\s+to)\s*[:,]?[ \t]+"
     r"(?:(?:that\s+)?(?:we|you|they|I)\s+|that\s+)?"
     r"(?=(?:always|never|must\b|do\s+not\b|don['’]t\b|from\s+now\s+on\b|"
-    r"going\s+forward\b|ensure\b|make\s+sure\b|avoid\b|prefer\b|use\b))"
+    r"going\s+forward\b|ensure\b|make\s+sure\b|avoid\b|prefer\b|use\b|"
+    r"[^\n]{0,120}\bcan\s+only\b))"
     r"|[A-Z][A-Za-z .'-]{0,40}\s+(?:says?|said|states?|stated|writes?|wrote|"
     r"recommends?|recommended|tells?|told)\s*,?\s*[\"“]"
     r")",
@@ -1527,13 +1533,15 @@ _AMBIGUOUS_LABELLED_DIRECTIVE = re.compile(
     r"(?:\([^()\n]{1,40}\)|\[[^\[\]\n]{1,40}\]|/\s*[a-z0-9_. '-]{1,40})?\s*"
     r"(?::|[>|]|[\u2013\u2014]|\s+-\s+)\s*"
     r"(?=(?:always|never|must\b|should\b|do\s+not\b|don['\u2019]t\b|from\s+now\s+on\b|"
-    r"going\s+forward\b|ensure\b|make\s+sure\b|avoid\b|prefer\b|use\b))",
+    r"going\s+forward\b|ensure\b|make\s+sure\b|avoid\b|prefer\b|use\b|"
+    r"[^\n]{0,120}\bcan\s+only\b))",
     re.IGNORECASE,
 )
 _AMBIGUOUS_STANDALONE_ATTRIBUTION = re.compile(
     _STANDALONE_ATTRIBUTION_HEADER.pattern
     + r"\s*\n\s*(?=(?:always|never|must\b|should\b|do\s+not\b|don['\u2019]t\b|"
-      r"from\s+now\s+on\b|going\s+forward\b|ensure\b|make\s+sure\b|avoid\b|prefer\b|use\b))",
+      r"from\s+now\s+on\b|going\s+forward\b|ensure\b|make\s+sure\b|avoid\b|prefer\b|"
+      r"use\b|[^\n]{0,120}\bcan\s+only\b))",
     re.IGNORECASE | re.MULTILINE,
 )
 _CLEAR_SCOPE_LABEL = re.compile(
@@ -1806,7 +1814,8 @@ def _is_prescriptive_constraint(text: str) -> tuple[bool, str]:
     # Everything else (mandatory requirements, prohibitions) → constraint
     is_soft = bool(_CONVENTION_SIGNALS.search(cleaned))
     has_hard = bool(re.search(
-        r"\b(?:al+w(?:ay|ya)s|never|must|should|do\s*n['’]?t|do\s+not|avoid|no\s+longer|stop)\b",
+        r"\b(?:al+w(?:ay|ya)s|never|can\s+only|must|should|do\s*n['’]?t|do\s+not|"
+        r"avoid|no\s+longer|stop)\b",
         cleaned, re.IGNORECASE))
     subtype = "convention" if (is_soft and not has_hard) else "constraint"
     return True, subtype
@@ -1842,16 +1851,16 @@ def capture_user_constraint_with_meta(
     blocking: bool = True,
 ) -> tuple:
     """Called on every UserPromptSubmit. Detects prescriptive 'always/never/from now on' directives
-    and stores them as decisions. A directive carrying a deictic referent (see _is_deictic) is
-    stored but NOT auto-trusted - it lands pending_approval so the developer can generalize,
-    approve, or discard it via review_pending, since "this feature"/"It ..." only means
-    something to the conversation that typed it.
+    and stores them as decisions. A directive whose scope or authority is ambiguous is stored
+    but NOT auto-trusted: deictic referents (see _is_deictic), arbitrary speaker labels, and a
+    bare ``X can only Y`` declaration land pending_approval so the developer can generalize,
+    approve, or discard them via review_pending.
 
-    A clean (non-deictic) restatement that matches - via the standard >70% token-overlap
-    gate - a still-pending twin THIS path created earlier is treated as the developer's
-    generalization: it promotes the pending entry to approved in place (status "promoted"),
-    rather than being silently dropped as a duplicate. Any other match (an already-approved
-    entry, or a still-deictic restatement of the pending twin) stays today's silent no-op.
+    A clean restatement that no longer requires review and matches - via the standard >70%
+    token-overlap gate - a still-pending twin THIS path created earlier is treated as the
+    developer's generalization: it promotes the pending entry to approved in place (status
+    "promoted"), rather than being silently dropped as a duplicate. Any other match (an
+    already-approved entry, or a still-ambiguous restatement) stays today's silent no-op.
     'ignored' entries are excluded from matching here ONLY - a user re-typing a rule after
     discarding a false positive gets a fresh entry, not a permanently blocked match.
 
@@ -1889,7 +1898,17 @@ def capture_user_constraint_with_meta(
         bool(_AMBIGUOUS_LABELLED_DIRECTIVE.search(content))
         and not _CLEAR_SCOPE_LABEL.search(content)
         and not _EXPLICIT_AUTHORITY_LABEL.search(content))
-    status = "pending_approval" if deictic or ambiguous_label else "approved"
+    # "X can only Y" is semantically ambiguous without a model: it can be a durable rule,
+    # a transient capability report, or the limitation this very prompt asks us to remove.
+    # Capture it rather than miss it, but never mint trusted human policy from that phrase
+    # alone. A second independent directive signal or an explicit authority label is enough
+    # to make the developer's normative intent unambiguous.
+    bare_can_only = bool(_CAN_ONLY_TRIGGER.search(content)) and not (
+        _CONSTRAINT_TRIGGER.search(_CAN_ONLY_TRIGGER.sub("", content))
+        or _EXPLICIT_AUTHORITY_LABEL.search(content)
+    )
+    status = "pending_approval" if deictic or ambiguous_label or bare_can_only else "approved"
+    review_required = status == "pending_approval"
     with store_lock(repo_slug(repo_path), blocking=blocking):
         data = load(repo_path)
         # 'ignored' entries never block a re-typed rule from landing fresh (Fix 3).
@@ -1901,7 +1920,7 @@ def capture_user_constraint_with_meta(
         if match is not None:
             # A pending entry with created_by="human" can only have been born here: the normal
             # update_decision path always classifies created_by="human" as auto-approved.
-            if (not deictic and match.get("status") == "pending_approval"
+            if (not review_required and match.get("status") == "pending_approval"
                     and match.get("created_by") == "human"):
                 now = datetime.now(timezone.utc).isoformat()
                 revisions.append_revision(match, content, source="human", approved_at=now)
@@ -1931,7 +1950,7 @@ def capture_user_constraint_with_meta(
         hit = _find_containment(content, decisions_only)
         if hit is not None:
             return _route_containment(repo_path, data, hit, content, subtype,
-                                      deictic, session_id, source)
+                                      review_required, session_id, source)
         if near_misses is not None:
             near_misses.extend(_near_misses(content, decisions_only))
         entry = _new_decision_entry(content, session_id, subtype,
@@ -1970,7 +1989,7 @@ def capture_user_constraint_with_meta(
 
 
 def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subtype: str,
-                       deictic: bool, session_id: str, source: str = "") -> tuple:
+                       review_required: bool, session_id: str, source: str = "") -> tuple:
     """Route a containment hit from capture_user_constraint onto the matched entry `hit`.
     Called under the store lock; saves and returns the capture 4-tuple (see
     capture_user_constraint_with_meta - the recurrence branches carry the meta that lets a
@@ -1979,7 +1998,7 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
 
     New content LONGER (the observed bug - superset restatement):
       - pending twin (born on this path) + clean  → promote with the fuller content
-      - pending twin + deictic                    → amend v1 in place, stays pending
+      - pending twin + still review-required      → amend v1 in place, stays pending
       - other pending (AI-captured)               → recurrence (base needs review first)
       - approved/suggested, no unresolved proposal → attach a proposed_revision (Suggested
                                                     Update - approval promotes it)
@@ -2014,7 +2033,7 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
 
     if longer:
         if pending_twin:
-            if deictic:
+            if review_required:
                 # Pre-approval amend precedent: rewrite v1 in place, stays pending.
                 rev = revisions.current_revision(hit)
                 if rev is not None:
@@ -2066,7 +2085,7 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
                 touch_pending_review(repo_path)
         return hit["id"], norm, "revision_proposed", {}
 
-    if pending_twin and not deictic:
+    if pending_twin and not review_required:
         # Terse clean restatement is the activation gesture: bless revision 1 in place,
         # keeping the fuller stored content (approve_decision precedent).
         cur = revisions.current_revision(hit)
@@ -2105,8 +2124,8 @@ def constraint_ack(content: str, status: str, entry_id: str = "",
         )
     if status == "pending_approval":
         return (
-            f"Stored pending your review: '{content}' - it references something only this "
-            "conversation understands (this/it/here), so it is not yet trusted. Briefly tell "
+            f"Stored pending your review: '{content}' - its scope or authority is ambiguous, "
+            "so it is not yet trusted. Briefly tell "
             "the developer it was stored pending review. Do NOT approve it yourself; only the "
             "developer decides (they can run `contexer review`, or ask you to show it via "
             "review_pending)." + near_note
@@ -4932,7 +4951,7 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     except Exception:
         pass
     # Self-heal a missing / corrupt / wrong-version retrieval index before this session
-    # routes its first prompt (a readable v2 index whose CONTENT has drifted is not detected
+    # routes its first prompt (a readable current-version index whose CONTENT has drifted is not detected
     # here - that is save's job). Deliberately ahead of the `resume` early-return below and
     # unconditional on `source`: a resumed or compacted session injects nothing here, but its
     # LATER prompts still go through the router, so it needs a usable index just as much as a
@@ -5412,6 +5431,7 @@ _STRONG_SCORE_FRAC = 0.5    # a candidate is strong only within this fraction of
 _STRONG_MIN_HITS = 2        # ...and with at least this many distinct query-term hits
 _STRONG_CAP = 3             # never inject more than this many decisions per prompt
 _RETRIEVAL_LOG_CAP = 200    # pointer/usage log is tail-capped
+_RETRIEVAL_INDEX_VERSION = 3
 
 
 
@@ -5443,7 +5463,9 @@ def _build_retrieval_index(data: dict) -> dict:
     from contexer import conflicts, guard_engine
     docs: dict[str, dict] = {}
     df: dict[str, int] = {}
+    title_df: dict[str, int] = {}
     total_len = 0
+    total_title_len = 0
     for e in data.get("entries", []):
         if e.get("type") != "decision":
             continue
@@ -5467,31 +5489,44 @@ def _build_retrieval_index(data: dict) -> dict:
         prop_content = ((e.get("proposed_revision") or {}).get("content", "")
                         if conflicts.has_open_conflict(e) else "")
         toks = retrieval.index_tokens(f"{content} {prop_content}" if prop_content else content)
+        title = e.get("title") or revisions.derive_title(content)
+        title_toks = retrieval.index_tokens(title)
         tf: dict[str, int] = {}
         for t in toks:
             tf[t] = tf.get(t, 0) + 1
+        title_tf: dict[str, int] = {}
+        for t in title_toks:
+            title_tf[t] = title_tf.get(t, 0) + 1
         for t in tf:
             df[t] = df.get(t, 0) + 1
+        for t in title_tf:
+            title_df[t] = title_df.get(t, 0) + 1
         total_len += len(toks)
+        total_title_len += len(title_toks)
         docs[did] = {
             "tf": tf, "len": len(toks), "topics": retrieval.derive_topics(content),
+            "title_tf": title_tf, "title_len": len(title_toks),
             "subtype": e.get("subtype", ""), "status": status,
             "source_files": list(e.get("source_files") or []),
             "path_artifacts": guard_engine._guard_content_artifacts(content),
-            "title": e.get("title") or revisions.derive_title(content),
+            "title": title,
         }
     n_docs = len(docs)
     avgdl = (total_len / n_docs) if n_docs else 0.0
-    # v2 (issue #187 fix round 1): docs gained source_files/path_artifacts/title. Bumped
-    # (not left at v1 with new optional keys) so a pre-#187 v1 index on disk is rejected by
-    # _read_retrieval_index as "wrong version" and the WHOLE per-prompt path falls back to
-    # legacy - not just the file route half-served against docs missing the new fields. The
-    # established pattern (see _read_retrieval_index's docstring): never rebuild inline. Repair
-    # comes from the repo's next save (every write rebuilds every doc's fields from scratch)
-    # or, for a repo nobody writes to, from ensure_retrieval_index at the next session start -
-    # a version bump strands EVERY already-indexed repo at once, so save alone is not a
-    # sufficient self-heal.
-    return {"v": 2, "n_docs": n_docs, "avgdl": avgdl, "df": df, "docs": docs}
+    title_avgdl = (total_title_len / n_docs) if n_docs else 0.0
+    # v3 adds a separate per-decision title field. Keeping title terms outside content tf
+    # preserves content-ranker parity for Guard while prompt_rank can retrieve a title-only
+    # subject and reward only the decision that owns the matching title. The version bump
+    # deliberately sends old sidecars through the established session-start self-heal path.
+    return {
+        "v": _RETRIEVAL_INDEX_VERSION,
+        "n_docs": n_docs,
+        "avgdl": avgdl,
+        "title_avgdl": title_avgdl,
+        "df": df,
+        "title_df": title_df,
+        "docs": docs,
+    }
 
 
 def _write_retrieval_index(repo_path: str, data: dict) -> None:
@@ -5514,20 +5549,24 @@ def _read_retrieval_index(repo_path: str) -> dict | None:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError, UnicodeDecodeError):
         return None
-    if not isinstance(data, dict) or data.get("v") != 2 or not isinstance(data.get("docs"), dict):
+    if (not isinstance(data, dict)
+            or data.get("v") != _RETRIEVAL_INDEX_VERSION
+            or not isinstance(data.get("docs"), dict)
+            or not isinstance(data.get("title_df"), dict)):
         return None
     return data
 
 
 def ensure_retrieval_index(repo_path: str) -> bool:
     """Rebuild the index sidecar when it is missing / corrupt / wrong-version. True only
-    when this call actually produced a readable v2 index.
+    when this call actually produced a readable current-version index.
 
     Why this exists, and why it is NOT in `_read_retrieval_index`: the per-prompt reader
     stays strictly read-only, because rebuilding inline would put a whole-store scan on the
     prompt path. The documented self-heal was "the repo's next `save` rebuilds it", which
     is right for a fresh repo but strands an EXISTING one the moment the index VERSION is
-    bumped (v1 -> v2 at #187 fix round 1): every already-indexed repo is rejected as
+    bumped (for example v1 -> v2 at #187 or v2 -> v3 for title fields): every already-indexed
+    repo is rejected as
     wrong-version and silently demoted to `_legacy_prompt_context` - whose keyword pick is
     the three LONGEST words of the prompt - until someone happens to capture a decision
     there. A repo nobody writes to never recovers at all. So the rebuild runs once per
@@ -6252,7 +6291,10 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
     # BM25's own hits >= _STRONG_MIN_HITS (2) bar without genuine additional overlap.
     art_tokens = retrieval.index_tokens(" ".join(artifacts))
     query_terms = retrieval.index_tokens(prompt) + art_tokens + art_tokens   # artifacts double-weighted
-    ranked = retrieval.bm25_rank(query_terms, index)
+    # Prompt retrieval fuses content BM25 with each decision's own title field. The generic
+    # content ranker used by Guard stays unchanged, while a title-only subject can be found and
+    # an incidental rare word in another decision cannot borrow that title's relevance.
+    ranked = retrieval.prompt_rank(query_terms, index)
     ranked = [r for r in ranked if r[0] not in ws]
 
     strong: list[str] = list(anchor_ids)
@@ -6265,8 +6307,16 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
         question_only = is_question and not is_rationale and not is_project
         allow_strong = not question_only or ranked[0][3] >= 1
         bm25_strong: list[str] = []
-        if allow_strong:
-            for did, score, hits, _dh in ranked[:_STRONG_CANDIDATES]:
+        # A title hit belongs to this exact decision and is authored as its concise subject,
+        # so a rationale/project question may trust the top title-ranked candidate even when
+        # its body deliberately uses different wording. Do this before the generic two-hit
+        # loop; otherwise a lower-ranked body matching two incidental words wins merely
+        # because the correct title-only candidate has one lexical hit.
+        if (allow_strong and (is_rationale or is_project)
+                and ranked[0][4] == 0 and ranked[0][5] >= 1):
+            bm25_strong = [ranked[0][0]]
+        elif allow_strong:
+            for did, score, hits, _dh, _content_hits, _title_hits in ranked[:_STRONG_CANDIDATES]:
                 if score >= _STRONG_SCORE_FRAC * top_score and hits >= _STRONG_MIN_HITS:
                     bm25_strong.append(did)
         # Rationale/project boost: a single-keyword "why X?" / "what's the goal for X?" often
@@ -6287,10 +6337,14 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
         rendered = _render_prompt_decisions(repo_path, strong)
         if rendered:
             _ws_add(repo_path, session_id, strong)
-            # Suffix (not part of the pinned header prefix): without it the model
-            # narrates "I'll pull this from Contexer" and re-fetches what it already has.
+            # Suffix (not part of the pinned header prefix): the block normally avoids a
+            # redundant fetch, but a lexical candidate can still be a false positive. Tell
+            # the model to judge relevance and recover through Contexer before reading files.
             text = ("[Contexer: auto-fetched for this question] "
-                    f"(already in context - no get_context call needed)\n{rendered}")
+                    "(use the relevant context below; if it does not answer the question, "
+                    "call Contexer's get_context with concise subject keywords before reading files; "
+                    "do not substitute another memory, graph, or search tool)\n"
+                    f"{rendered}")
             return text, _rendered_meta("strong", text)
 
     # WEAK: no strong content, but the prompt's topics overlap not-yet-injected docs →
@@ -6487,6 +6541,18 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
                 d for d in decisions
                 if set(re.findall(r"[a-z0-9]+", d.get("content", "").lower())) & aliases
             ]
+        # A model recovering from an insufficient prompt injection naturally supplies a
+        # multiword subject ("bm25 algorithm"), while the historical filter above treats it
+        # as one literal phrase. On a literal miss, reuse the prompt ranker so content and
+        # title terms are matched independently and returned in relevance order. The index
+        # reader remains read-only/fail-soft; a missing or stale sidecar keeps the old miss.
+        if not matched:
+            index = _read_retrieval_index(repo_path)
+            query_terms = retrieval.index_tokens(query)
+            if index is not None and query_terms:
+                allowed = {d.get("id"): d for d in decisions if d.get("id")}
+                matched = [allowed[did] for did, *_ in retrieval.prompt_rank(query_terms, index)
+                           if did in allowed]
         decisions = matched
 
     display_limit = limit if limit > 0 else (_FILTERED_DISPLAY if is_filtered else _UNFILTERED_DISPLAY)

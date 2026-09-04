@@ -109,6 +109,20 @@ class TestClaudeCaptureEntrypoints:
         assert "additionalContext" in out["hookSpecificOutput"]
         assert "constraint" in out["hookSpecificOutput"]["additionalContext"].lower()
 
+    def test_capture_constraint_stores_plain_can_only_decision(self, tmp_repo):
+        prompt = (r"orders.py can only import payment\_store with a proper method call named "
+                  r"payment\_endpoint instead of payment\_api")
+        raw = _json.dumps({"prompt": prompt, "session_id": "s1"})
+
+        out = _json.loads(claude.capture_constraint(tmp_repo, raw))
+
+        assert "additionalContext" in out["hookSpecificOutput"]
+        (entry,) = [e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision"]
+        assert entry["content"] == prompt[0].upper() + prompt[1:]
+        assert entry["subtype"] == "constraint"
+        assert entry["status"] == "pending_approval"
+        assert "pending" in out["hookSpecificOutput"]["additionalContext"].lower()
+
     def test_capture_constraint_noop_on_plain_prompt(self, tmp_repo):
         raw = _json.dumps({"prompt": "please add a button", "session_id": "s1"})
         assert claude.capture_constraint(tmp_repo, raw) == "{}"
