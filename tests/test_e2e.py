@@ -1009,6 +1009,7 @@ class TestConstraintCapture:
         ("always use type hints in Python", "constraint"),
         ("never commit secrets to the repo", "constraint"),
         ("must always include a docstring for public APIs", "constraint"),
+        ("orders.py can only import payment_store and call payment_endpoint", "constraint"),
         ("allways run tests before merging", "constraint"),       # typo
         ("from now on use snake_case for all variables", "convention"),
         ("going forward, prefer async functions", "convention"),

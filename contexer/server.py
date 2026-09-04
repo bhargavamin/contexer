@@ -47,8 +47,10 @@ _INSTRUCTIONS = (
     "not-yet-approved proposals provisional (created_by=ai records them as 'suggested', not "
     "authoritative) instead of writing them as fact. A decision from an approved-but-unimplemented "
     "plan is provisional (created_by=plan) until implementation validates it, then reconciled.\n"
-    "RETRIEVE - call get_context BEFORE reading files for any question about architecture, design "
-    "rationale, constraints, patterns, or conventions."
+    "RETRIEVE - before reading files for any question about architecture, design rationale, "
+    "constraints, patterns, or conventions, use a relevant [Contexer: auto-fetched ...] block "
+    "when one is present; if that block does not answer the question, call get_context with the "
+    "concise subject keywords. Another memory, graph, or search tool is not a substitute for Contexer."
 )
 # FastMCP configures the process-wide Python logger. Its INFO default enables httpx and the MCP
 # HTTP client's request logs, which include the remote endpoint and would put destination identity

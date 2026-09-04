@@ -1598,6 +1598,39 @@ class TestIsPrescriptiveConstraint:
         assert is_c is True
         assert subtype == "constraint"
 
+    def test_plain_can_only_restriction_is_constraint(self):
+        is_c, subtype = store._is_prescriptive_constraint(
+            r"orders.py can only import payment\_store with a proper method call named "
+            r"payment\_endpoint instead of payment\_api"
+        )
+        assert is_c is True
+        assert subtype == "constraint"
+
+    def test_first_person_can_only_limitation_is_captured_for_review(self):
+        is_c, subtype = store._is_prescriptive_constraint(
+            "I can only reproduce the timeout on Tuesdays"
+        )
+        assert is_c is True
+        assert subtype == "constraint"
+
+    def test_can_only_question_is_not_constraint(self):
+        is_c, _ = store._is_prescriptive_constraint(
+            "Can orders.py only import payment_store?"
+        )
+        assert is_c is False
+
+    def test_attributed_can_only_statement_is_not_constraint(self):
+        is_c, _ = store._is_prescriptive_constraint(
+            "Assistant: orders.py can only import payment_store"
+        )
+        assert is_c is False
+
+    def test_named_attribution_can_only_statement_is_not_constraint(self):
+        is_c, _ = store._is_prescriptive_constraint(
+            "Alice says orders.py can only import payment_store"
+        )
+        assert is_c is False
+
     def test_genuine_always_still_detected(self):
         # Sarcasm exclusion should not affect real directives
         is_c, _ = store._is_prescriptive_constraint("always use uv not pip")
@@ -3429,6 +3462,71 @@ class TestCaptureUserConstraintFields:
         assert entry["created_by"] == "human"
 
 
+class TestCanOnlyConstraintTrust:
+    @pytest.mark.parametrize("prompt", [
+        "orders.py can only import payment_store",
+        "The API can only return JSON today. Add XML support.",
+        "Currently the deploy job can only run from main, but we need feature branches too.",
+        "I can only use Postgres because compliance forbids SQLite.",
+        "I can only reproduce the timeout on Tuesdays.",
+    ])
+    def test_bare_can_only_is_captured_but_never_auto_trusted(self, tmp_repo, prompt):
+        entry_id, _content, status = store.capture_user_constraint(tmp_repo, prompt, "s1")
+        assert entry_id is not None
+        assert status == "pending_approval"
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == entry_id)
+        assert entry["status"] == "pending_approval"
+
+    @pytest.mark.parametrize("prompt", [
+        "Rule: orders.py can only import payment_store",
+        "From now on orders.py can only import payment_store",
+        "Always ensure orders.py can only import payment_store",
+    ])
+    def test_explicitly_normative_can_only_remains_trusted(self, tmp_repo, prompt):
+        entry_id, _content, status = store.capture_user_constraint(tmp_repo, prompt, "s1")
+        assert entry_id is not None
+        assert status == "approved"
+
+    def test_repeating_bare_can_only_does_not_self_approve(self, tmp_repo):
+        prompt = "orders.py can only import payment_store"
+        entry_id, _, status = store.capture_user_constraint(tmp_repo, prompt, "s1")
+        assert status == "pending_approval"
+
+        assert store.capture_user_constraint(tmp_repo, prompt, "s2") == (None, None, None)
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == entry_id)
+        assert entry["status"] == "pending_approval"
+        assert entry["occurrence_count"] == 2
+
+    def test_explicitly_normative_restatement_promotes_bare_pending_rule(self, tmp_repo):
+        prompt = "orders.py can only import payment_store"
+        entry_id, _, status = store.capture_user_constraint(tmp_repo, prompt, "s1")
+        assert status == "pending_approval"
+
+        entry_id_2, _, status_2 = store.capture_user_constraint(
+            tmp_repo, f"Rule: {prompt}", "s2")
+        assert entry_id_2 == entry_id
+        assert status_2 == "promoted"
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == entry_id)
+        assert entry["status"] == "approved"
+
+    def test_bare_can_only_superset_amends_but_stays_pending(self, tmp_repo):
+        entry_id, _, status = store.capture_user_constraint(
+            tmp_repo, "orders.py can only import payment_store", "s1")
+        assert status == "pending_approval"
+
+        entry_id_2, content_2, status_2 = store.capture_user_constraint(
+            tmp_repo,
+            "orders.py can only import payment_store through payment_endpoint with "
+            "normalized arguments before outbound execution",
+            "s2",
+        )
+        assert entry_id_2 == entry_id
+        assert status_2 == "pending_approval"
+        assert "payment_endpoint" in content_2
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == entry_id)
+        assert entry["status"] == "pending_approval"
+
+
 # ── deictic constraint scope (decision ceb955f5) ───────────────────────────────
 # A prescriptive directive that leans on a conversation-local pronoun (this/that/these/
 # those/it/here) is a strong signal of session-scoped intent, not a standing rule.
@@ -4326,10 +4424,11 @@ class TestRetrievalIndex:
         store.update_decision(tmp_repo, "We chose postgres for the orders schema", RV1_SESSION, "architecture")
         idx = store._read_retrieval_index(tmp_repo)
         assert idx is not None
-        assert idx["v"] == 2 and idx["n_docs"] == 1
+        assert idx["v"] == store._RETRIEVAL_INDEX_VERSION and idx["n_docs"] == 1
         (doc,) = idx["docs"].values()
         assert "db" in doc["topics"]
         assert "postgres" in doc["tf"]
+        assert "postgres" in doc["title_tf"]
 
     def test_reflects_current_content_after_revision(self, tmp_repo):
         store.update_decision(tmp_repo, "Use redis for caching the product feed", RV1_SESSION, "architecture")
@@ -4354,7 +4453,7 @@ class TestRetrievalIndex:
         store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
         p = store._index_path(tmp_repo)
         payload = json.loads(p.read_text())
-        payload["v"] = 3
+        payload["v"] = store._RETRIEVAL_INDEX_VERSION + 1
         p.write_text(json.dumps(payload))
         assert store._read_retrieval_index(tmp_repo) is None
 
@@ -4362,11 +4461,11 @@ class TestRetrievalIndex:
         # A v1 index predates source_files/path_artifacts/title per doc (issue #187 fix
         # round 1). It must be rejected outright — not accepted and half-served against docs
         # missing the new fields — so the whole per-prompt path falls back to legacy until
-        # the repo's next _save rebuilds the index at v2.
+        # the repo's next _save rebuilds the index at the current version.
         store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
         p = store._index_path(tmp_repo)
         payload = json.loads(p.read_text())
-        assert payload["v"] == 2
+        assert payload["v"] == store._RETRIEVAL_INDEX_VERSION
         payload["v"] = 1
         for doc in payload["docs"].values():
             doc.pop("source_files", None)
@@ -4398,6 +4497,19 @@ def _downgrade_index_to_v1(repo):
     p.write_text(json.dumps(payload))
 
 
+def _downgrade_index_to_v2(repo):
+    """Rewrite the current sidecar as the real pre-title-field v2 shape."""
+    p = store._index_path(repo)
+    payload = json.loads(p.read_text())
+    payload["v"] = 2
+    payload.pop("title_df", None)
+    payload.pop("title_avgdl", None)
+    for doc in payload["docs"].values():
+        doc.pop("title_tf", None)
+        doc.pop("title_len", None)
+    p.write_text(json.dumps(payload))
+
+
 class TestIndexSelfHeal:
     """`ensure_retrieval_index`: the session-start rebuild that stops a version bump from
     silently demoting an existing repo to the legacy longest-word keyword path forever."""
@@ -4409,9 +4521,25 @@ class TestIndexSelfHeal:
 
         assert store.ensure_retrieval_index(tmp_repo) is True
         idx = store._read_retrieval_index(tmp_repo)
-        assert idx is not None and idx["v"] == 2 and idx["n_docs"] == 1
+        assert (idx is not None
+                and idx["v"] == store._RETRIEVAL_INDEX_VERSION
+                and idx["n_docs"] == 1)
         (doc,) = idx["docs"].values()
         assert "source_files" in doc and "path_artifacts" in doc and "title" in doc
+        assert "title_tf" in doc and "title_len" in doc and "title_df" in idx
+
+    def test_rebuilds_pre_title_v2_index(self, tmp_repo):
+        store.update_decision(
+            tmp_repo, "Use lexical scoring because it is local", RV1_SESSION,
+            "architecture", title="Use BM25 for prompt retrieval")
+        _downgrade_index_to_v2(tmp_repo)
+        assert store._read_retrieval_index(tmp_repo) is None
+
+        assert store.ensure_retrieval_index(tmp_repo) is True
+        idx = store._read_retrieval_index(tmp_repo)
+        assert idx["v"] == store._RETRIEVAL_INDEX_VERSION
+        (doc,) = idx["docs"].values()
+        assert "bm25" in doc["title_tf"] and "bm25" in idx["title_df"]
 
     def test_rebuilds_missing_index(self, tmp_repo):
         store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
@@ -4506,7 +4634,7 @@ class TestIndexSelfHeal:
 
         monkeypatch.setattr(store, "_retrieval_log", boom)
         assert store.ensure_retrieval_index(tmp_repo) is False   # never raises
-        assert store._read_retrieval_index(tmp_repo)["v"] == 2   # rebuild still landed
+        assert store._read_retrieval_index(tmp_repo)["v"] == store._RETRIEVAL_INDEX_VERSION
 
     def test_retrieval_log_survives_a_non_utf8_log_file(self, tmp_repo):
         store.STORE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -4539,7 +4667,7 @@ class TestIndexSelfHeal:
         _downgrade_index_to_v1(tmp_repo)
 
         store.session_start_payload(tmp_repo)
-        assert store._read_retrieval_index(tmp_repo)["v"] == 2
+        assert store._read_retrieval_index(tmp_repo)["v"] == store._RETRIEVAL_INDEX_VERSION
 
     def test_session_start_heals_on_resume_and_compact(self, tmp_repo):
         # Both sources return early / take shortened paths, but their LATER prompts still
@@ -4549,12 +4677,12 @@ class TestIndexSelfHeal:
                                   RV1_SESSION, "architecture")
             _downgrade_index_to_v1(tmp_repo)
             store.session_start_payload(tmp_repo, source=source)
-            assert store._read_retrieval_index(tmp_repo)["v"] == 2, source
+            assert store._read_retrieval_index(tmp_repo)["v"] == store._RETRIEVAL_INDEX_VERSION, source
 
     def test_healed_index_restores_bm25_ranking_over_longest_word_lookup(self, tmp_repo):
         # The behaviour the fix exists for. Legacy renders through get_context(query=<the
         # longest word>) and carries its filter note; the BM25 path renders decisions
-        # directly and adds the no-refetch suffix. The marker tells the two apart.
+        # directly and adds the relevance/fallback suffix. The marker tells the two apart.
         _seed_rv1(tmp_repo, RV1_CORPUS)
         _downgrade_index_to_v1(tmp_repo)
 
@@ -4564,7 +4692,7 @@ class TestIndexSelfHeal:
         store.session_start_payload(tmp_repo)
         healed = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens live in cookies?")
         assert "(filtered: query=" not in healed
-        assert "already in context" in healed
+        assert "if it does not answer the question" in healed
         assert "JWT" in healed and "cookies" in healed
 
 
@@ -4622,6 +4750,36 @@ class TestBM25Router:
         result = store.get_context_for_prompt(tmp_repo, "why alembic?")
         assert result != ""
         assert "Alembic" in result
+
+    def test_generic_algorithm_word_does_not_select_an_unrelated_rule(self, tmp_repo):
+        store.update_decision(
+            tmp_repo, "Use lexical scoring because it is local and fast",
+            RV1_SESSION, "architecture", title="Use BM25 for prompt retrieval",
+        )
+        store.update_decision(
+            tmp_repo, "BM25 appears in generated release notes about the algorithm",
+            RV1_SESSION, "convention", title="Keep generated release notes concise",
+        )
+        result = store.get_context_for_prompt(tmp_repo, "why was bm25 algorithm implemented?")
+        assert "Use BM25 for prompt retrieval" in result
+        assert "Keep generated release notes concise" not in result
+        assert "if it does not answer the question" in result
+        assert "do not substitute another memory, graph, or search tool" in result
+
+    def test_multiword_get_context_recovery_uses_ranked_terms(self, tmp_repo):
+        store.update_decision(
+            tmp_repo, "Use lexical scoring because it is local and fast",
+            RV1_SESSION, "architecture", title="Use BM25 for prompt retrieval",
+        )
+        store.update_decision(
+            tmp_repo, "BM25 appears in generated release notes about the algorithm",
+            RV1_SESSION, "convention", title="Keep generated release notes concise",
+        )
+        result = store.get_context(tmp_repo, query="bm25 algorithm")
+        assert "No matching decisions" not in result
+        assert result.index("Use BM25 for prompt retrieval") < result.index(
+            "Keep generated release notes concise"
+        )
 
     def test_weak_topic_overlap_returns_pointer(self, tmp_repo):
         _seed_rv1(tmp_repo, RV1_CORPUS)
@@ -5694,7 +5852,7 @@ class TestFileRoute:
         store.save(tmp_repo, data)
 
         index = store._read_retrieval_index(tmp_repo)
-        assert index is not None and index["v"] == 2
+        assert index is not None and index["v"] == store._RETRIEVAL_INDEX_VERSION
 
         prompt = "fix the bug in contexer/mod_0250.py that touches contexer/shared_05.py"
         store._prompt_file_hits(tmp_repo, prompt, set(), index)   # warm up
@@ -5960,8 +6118,8 @@ class TestRationaleSessionIdPlumbing:
 
     def test_injection_is_observable(self, tmp_repo):
         # The developer sees WHAT was recalled (systemMessage, user-facing); a routine
-        # small injection stays silent about cost. The model is told the fetch already
-        # happened so it doesn't re-call get_context.
+        # small injection stays silent about cost. The model uses a relevant fetch directly,
+        # but is told how to recover when lexical retrieval supplied the wrong candidate.
         from contexer.adapters import claude
         _seed_rv1(tmp_repo, RV1_CORPUS)
         raw = json.dumps({
@@ -5974,7 +6132,8 @@ class TestRationaleSessionIdPlumbing:
         assert "tokens" not in msg  # small injection -> cost note suppressed
         ctx = out["hookSpecificOutput"]["additionalContext"]
         assert ctx.startswith("[Contexer: auto-fetched for this question]")
-        assert "no get_context call needed" in ctx
+        assert "if it does not answer the question" in ctx
+        assert "Contexer's get_context" in ctx
 
     def test_large_injection_flags_cost(self, tmp_repo):
         # Cost-on-exception: only an injection above _COST_NOTE_TOKENS carries the estimate.

@@ -1,5 +1,9 @@
 """Unit tests for the pure lexical retrieval primitives."""
 
+import time
+
+import pytest
+
 from contexer import retrieval, store
 
 
@@ -19,6 +23,25 @@ def _index(docs: dict[str, list[str]]) -> dict:
         built[did] = {"tf": tf, "len": len(toks)}
     n = len(built)
     return {"v": 2, "n_docs": n, "avgdl": (total / n) if n else 0.0, "df": df, "docs": built}
+
+
+def _prompt_index(docs: dict[str, tuple[list[str], list[str]]]) -> dict:
+    """Build the two-field shape consumed by prompt_rank."""
+    index = _index({did: fields[0] for did, fields in docs.items()})
+    title_df: dict[str, int] = {}
+    title_total = 0
+    for did, (_, title_tokens) in docs.items():
+        title_tf: dict[str, int] = {}
+        for token in title_tokens:
+            title_tf[token] = title_tf.get(token, 0) + 1
+        index["docs"][did]["title_tf"] = title_tf
+        index["docs"][did]["title_len"] = len(title_tokens)
+        title_total += len(title_tokens)
+        for token in title_tf:
+            title_df[token] = title_df.get(token, 0) + 1
+    index["title_df"] = title_df
+    index["title_avgdl"] = title_total / len(docs) if docs else 0.0
+    return index
 
 
 class TestStoreDoesNotAliasThisLeaf:
@@ -71,13 +94,17 @@ class TestIndexTokens:
     def test_drops_stop_words(self):
         assert retrieval.index_tokens("why was the decision about postgres") == ["postgres"]
 
+    def test_arbitrary_content_words_are_not_hard_coded_away(self):
+        assert retrieval.index_tokens("why was the bm25 algorithm implemented?") == [
+            "bm25", "algorithm",
+        ]
+
     def test_empty_and_none_safe(self):
         assert retrieval.index_tokens("") == []
         assert retrieval.index_tokens(None) == []
 
     def test_keeps_duplicates_because_bm25_weights_them(self):
         assert retrieval.index_tokens("orders orders") == ["orders", "orders"]
-
 
 class TestDeriveTopics:
     def test_single_alias_hit(self):
@@ -168,6 +195,58 @@ class TestBm25Rank:
         assert dhits == 1
         common = next(r for r in retrieval.bm25_rank(["common"], idx) if r[0] == "d2")
         assert common[3] == 0, "a term in every doc discriminates nothing"
+
+
+class TestPromptRank:
+    def test_title_only_subject_enters_candidates_and_outranks_body_noise(self):
+        idx = _prompt_index({
+            "subject": (["lexical", "scoring", "local", "fast"],
+                        ["bm25", "prompt", "retrieval"]),
+            "noise": (["bm25", "appears", "release", "notes"],
+                      ["keep", "release", "notes", "concise"]),
+        })
+        ranked = retrieval.prompt_rank(["bm25"], idx)
+        assert [row[0] for row in ranked] == ["subject", "noise"]
+
+    def test_title_score_is_attached_only_to_its_owner(self):
+        idx = _prompt_index({
+            "owner": (["lexical"], ["bm25"]),
+            "borrower": (["bm25"], ["unrelated"]),
+        })
+        ranked = retrieval.prompt_rank(["bm25"], idx)
+        assert ranked[0][0] == "owner"
+        by_id = {row[0]: row for row in ranked}
+        assert by_id["owner"][4:] == (0, 1)
+        assert by_id["borrower"][4:] == (1, 0)
+
+    def test_equal_scores_preserve_index_order(self):
+        idx = _prompt_index({
+            "first": (["bm25"], ["bm25"]),
+            "second": (["bm25"], ["bm25"]),
+        })
+        assert [row[0] for row in retrieval.prompt_rank(["bm25"], idx)] == [
+            "first", "second",
+        ]
+
+    @pytest.mark.perf
+    def test_two_field_rank_meets_prompt_latency_budget_at_store_cap(self):
+        idx = _prompt_index({
+            f"d{i:03d}": (
+                ["lexical", "scoring", f"feature{i:03d}", "shared"],
+                ["decision", f"feature{i:03d}", "retrieval"],
+            )
+            for i in range(500)
+        })
+        query = ["feature250", "retrieval"]
+        retrieval.prompt_rank(query, idx)  # warm caches
+        times = []
+        for _ in range(30):
+            started = time.perf_counter()
+            retrieval.prompt_rank(query, idx)
+            times.append((time.perf_counter() - started) * 1000)
+        times.sort()
+        p50 = times[len(times) // 2]
+        assert p50 < 5.0, f"two-field prompt rank too slow: p50={p50:.3f}ms"
 
 
 class TestExtractArtifacts:
