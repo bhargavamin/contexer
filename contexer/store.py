@@ -4698,10 +4698,11 @@ def session_start_payload(repo_path: str, source: str = "", session_id: str = ""
     leaves the local payload untouched.
 
     Resume exception: when a session is resumed with local decisions already present, the
-    local path deliberately injects nothing (context='') because those decisions - and the
+    local path skips policy reinjection because those decisions - and the
     team section injected at the ORIGINAL session start - are already in the reloaded
     conversation. Re-appending team there would duplicate it; freshly-approved team rows
-    still surface via the per-prompt delta poll. So team is suppressed on that path too.
+    still surface via the per-prompt delta poll. A bootstrap reminder is not policy
+    reinjection, so team remains suppressed even when that reminder makes context non-empty.
 
     Visibility (Phase 2): when a team section IS appended, the human-facing `status` string
     gets a short ` | team: N synced` suffix so the developer can tell team sync is live
@@ -4734,10 +4735,11 @@ def session_start_payload(repo_path: str, source: str = "", session_id: str = ""
         anchor_repo(resolved)
     repo_path = resolved
     payload = _local_session_start_payload(repo_path, source, session_id, host)
+    resume_loaded = payload.pop("_resume_context_loaded", False)
     # text/count/deferred come from ONE team_context snapshot (see _team_section_with_counts)
     # so the status-suffix arithmetic below can never describe a different moment than `team`.
     team, count, deferred = _team_section_with_counts(repo_path)
-    if not team or (source == "resume" and not payload.get("context")):
+    if not team or (source == "resume" and (resume_loaded or not payload.get("context"))):
         return _with_console_url(payload, repo_path, console_url)
     status = payload.get("status", "")
     if count:
@@ -4885,7 +4887,8 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
             from contexer import bootstrap
             return {
                 "status": f"Contexer: session resumed - {_pl(len(decisions), 'decision')} already loaded in conversation{reconcile_note}",
-                "context": bootstrap.directive(repo_path, data) if data.get("bootstrap_scan") else "",
+                "context": bootstrap.directive(repo_path, data),
+                "_resume_context_loaded": True,
             }
         # Best-effort: the flag only silences a duplicate bootstrap offer on the first
         # prompt. An unwritable ~/.contexer (sandboxed host, #152) must not cost the
@@ -4954,6 +4957,10 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
                 decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     except Exception:
         pass  # verification is opportunistic; a session start must never fail on it
+
+    from contexer import bootstrap
+    data = bootstrap.refresh_for_session(repo_path, data)
+    decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
 
     # Read before the no-context branch below, because the reconsideration lane is the one
     # that can be non-empty when `decisions` is empty: a repo whose only decision was RETIRED
@@ -5056,11 +5063,9 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
             sys_parts.extend("    " + line for line in bootstrap.render(d, repo_path))
         if len(inferred) > 8:
             sys_parts.append(f"{len(inferred) - 8} more inferred findings available via get_context.")
-    if data.get("bootstrap_scan"):
-        from contexer import bootstrap
-        bootstrap_next = bootstrap.directive(repo_path, data, check_freshness=source != "resume")
-        if bootstrap_next:
-            sys_parts.append(bootstrap_next)
+    bootstrap_next = bootstrap.directive(repo_path, data)
+    if bootstrap_next:
+        sys_parts.append(bootstrap_next)
     if deferred_count > 0:
         arch_count = sum(1 for d in trusted if d.get("subtype") == "architecture")
         breakdown = f" ({arch_count} architecture)" if arch_count else ""
@@ -5204,11 +5209,6 @@ def bootstrap_prompt_payload(repo_path: str, prompt: str = "") -> dict:
     from contexer import bootstrap
     repo_path = hook_cwd_repo(repo_path)
     data = load(repo_path)
-    decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
-    if decisions and not data.get("bootstrap_scan") and not _offer_already_made(repo_path):
-        # An unrelated decision captured by another first-prompt hook is not evidence
-        # the bootstrap requested at SessionStart actually happened.
-        return {"status": "", "context": ""}
     try:
         if _offer_flag(repo_path).read_text(encoding="utf-8") == "prompt":
             return {"status": "", "context": ""}

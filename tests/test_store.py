@@ -542,9 +542,9 @@ class TestGetBootstrapContextPrompt:
         assert "bootstrap" in ctx.lower()
         assert "bootstrap_context" in ctx
 
-    def test_populated_repo_returns_empty_dict(self, populated_repo):
+    def test_populated_repo_without_report_requests_bootstrap(self, populated_repo):
         result = store.get_bootstrap_context_prompt(populated_repo)
-        assert result == {}
+        assert "call bootstrap_context now" in result["hookSpecificOutput"]["additionalContext"]
 
     def test_directive_scans_before_asking_questions(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
@@ -1800,10 +1800,10 @@ class TestSessionStartPayload:
         assert "get_context" in p["context"]
         assert "on demand" in p["status"]
 
-    def test_resume_with_decisions_has_status_no_context(self, populated_repo):
+    def test_resume_with_legacy_decisions_requests_missing_bootstrap(self, populated_repo):
         from contexer import store
         p = store.session_start_payload(populated_repo, source="resume")
-        assert p["context"] == ""
+        assert "call bootstrap_context now" in p["context"]
         assert "resumed" in p["status"].lower()
 
     def test_get_session_start_context_envelope_unchanged(self, tmp_repo):
@@ -1816,10 +1816,11 @@ class TestSessionStartPayload:
 
 
 class TestBootstrapPromptPayload:
-    def test_decisions_present_payload_empty(self, populated_repo):
+    def test_decisions_without_bootstrap_report_still_request_analysis(self, populated_repo):
         from contexer import store
         p = store.bootstrap_prompt_payload(populated_repo, "anything")
-        assert p == {"status": "", "context": ""}
+        assert p["status"] == ""
+        assert "call bootstrap_context now" in p["context"]
 
     def test_empty_repo_payload_has_context(self, tmp_repo):
         from contexer import store
@@ -2741,8 +2742,8 @@ class TestApproveDecision:
         assert "uv" in before["hookSpecificOutput"]["additionalContext"]
         store.approve_decision(tmp_repo, eid, "ignore")
         after = store.get_session_start_context(tmp_repo)
-        # The lone decision is now ignored -> nothing left to inject at all.
-        assert "hookSpecificOutput" not in after
+        # The ignored decision stays absent; bootstrap itself is still outstanding.
+        assert "call bootstrap_context now" in after["hookSpecificOutput"]["additionalContext"]
         assert "uv" not in json.dumps(after)
 
     def test_approve_action_on_approved_decision_rejected(self, tmp_repo):

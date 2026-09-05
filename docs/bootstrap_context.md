@@ -3,6 +3,8 @@
 Bootstrap builds useful repository context without a setup interview or routine approval
 questions. Hooks request bootstrap automatically for a context-less repository, regardless
 of Git history or authorship. The host agent performs the analysis through `bootstrap_context`.
+Existing or legacy decisions do not count as a completed bootstrap report: those repositories
+also receive the automatic request while preserving their standing decisions.
 
 The first-run notice invites: **Ask “Run Contexer bootstrap” to discover this repo's decisions,
 rules, and conventions.** This works as a chat instruction across hosts; Claude also installs
@@ -60,6 +62,17 @@ Source fingerprints include uncommitted changes. A scan with changed/added/remov
 or changed decision revisions, cannot accept an old interpretation report. Rescanning withholds
 old inferred context whose evidence changed, disappeared, or left the authorized scope. A valid
 re-analysis can reactivate it; human decisions are never silently withdrawn by this mechanism.
+Session start checks applicability before rendering inferred claims and persists derived
+withholding for later prompt retrieval. It does not wait for a busy store lock; unavailable
+freshness or an unwritable store produces a conservative withheld rendering, not stale guidance.
+This check does not approve, revise or delete a decision. Initial scans serialize authorization,
+snapshot construction and persistence under the store lock so older work cannot restore revoked
+external paths or replace newer interpretation progress.
+
+Parsed JSON evidence is located by its object-member path, not by the first matching word.
+Escaped keys, duplicate keys (last value wins), and multiline values are handled consistently
+with parsing. If a complete excerpt exceeds the evidence budget, automatic capture omits that
+fact and leaves it for host inspection rather than attaching an incomplete quote.
 
 ## Completion and limits
 

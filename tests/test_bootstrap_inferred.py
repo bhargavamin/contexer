@@ -5,6 +5,9 @@ import copy
 import json
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -681,3 +684,185 @@ def test_first_prompt_capture_does_not_masquerade_as_bootstrap_completion(projec
     store.update_decision(str(project), "Always use Conventional Commits.", "user", "convention")
     assert "bootstrap_scan" not in store.load(str(project))
     assert "call bootstrap_context now" in store.bootstrap_prompt_payload(str(project))["context"]
+
+
+@pytest.mark.parametrize("source", ["startup", "resume", "compact"])
+def test_legacy_decisions_do_not_prevent_automatic_bootstrap(project, source):
+    store.update_decision(str(project), "Always use Conventional Commits.", "user", "convention")
+    before = store.load(str(project))["entries"]
+    assert "call bootstrap_context now" in store.session_start_payload(str(project), source)["context"]
+    assert "call bootstrap_context now" in store.bootstrap_prompt_payload(str(project))["context"]
+    assert not store.bootstrap_prompt_payload(str(project))["context"]
+    assert store.load(str(project))["entries"] == before
+
+
+@pytest.mark.parametrize("change", ["modify", "delete", "symlink"])
+def test_startup_withholds_stale_inference_before_any_prompt_can_use_it(project, change, tmp_path):
+    scan = scan_rule(project)
+    did = finish(project, scan, [finding(project, scan)])["outcomes"][0]["id"]
+    before = copy.deepcopy(store.entry_by_id(store.load(str(project))["entries"], did))
+    path = project / "billing.py"
+    if change == "modify":
+        path.write_text("send_email_synchronously()\n")
+    else:
+        path.unlink()
+        if change == "symlink":
+            target = tmp_path / "outside.py"
+            target.write_text("send_email_synchronously()\n")
+            path.symlink_to(target)
+    payload = store.session_start_payload(str(project))
+    assert before["content"] not in payload["context"]
+    assert "call bootstrap_context now" in payload["context"]
+    assert before["content"] not in store._render_prompt_decisions(str(project), [did])
+    entry = store.entry_by_id(store.load(str(project))["entries"], did)
+    assert entry["bootstrap_withheld"]
+    assert entry["revisions"] == before["revisions"]
+    assert entry["status"] == before["status"]  # derived suppression, not human dismissal
+
+
+def test_startup_freshness_preserves_human_correction(project):
+    scan = scan_rule(project)
+    did = finish(project, scan, [finding(project, scan)])["outcomes"][0]["id"]
+    store.approve_decision(str(project), did, "edit", "Keep using an outbox for billing email.")
+    (project / "billing.py").write_text("send_email_synchronously()\n")
+    store.session_start_payload(str(project))
+    entry = store.entry_by_id(store.load(str(project))["entries"], did)
+    assert not entry.get("bootstrap_withheld")
+    assert entry["approved_by"] == "human"
+
+
+@pytest.mark.parametrize("failure", ["lock", "save"])
+def test_startup_freshness_fails_closed_without_writable_bookkeeping(project, monkeypatch, failure):
+    scan = scan_rule(project)
+    did = finish(project, scan, [finding(project, scan)])["outcomes"][0]["id"]
+    (project / "billing.py").write_text("send_email_synchronously()\n")
+    data = store.load(str(project))
+
+    def denied(*args, **kwargs):
+        raise PermissionError("read only")
+
+    monkeypatch.setattr(store, "store_lock" if failure == "lock" else "save", denied)
+    view = bootstrap.refresh_for_session(str(project), data)
+    assert store.entry_status(store.entry_by_id(view["entries"], did)) == "ignored"
+    assert "call bootstrap_context now" in bootstrap.directive(str(project), view)
+    assert not store.entry_by_id(data["entries"], did).get("bootstrap_withheld")
+
+
+def test_json_facts_cite_actual_object_members_not_earlier_decoys(project):
+    text = ('{\n  "keywords": ["node", "dependencies"],\n'
+            '  "example": {"engines": {"node": ">=16"}, "dependencies": {"fake": "*"}},\n'
+            '  "engines": {\n    "node": ">=20"\n  },\n'
+            '  "dependencies": {\n    "express": "^5.0.0",\n    "zod": "^4.0.0"\n  }\n}\n')
+    (project / "package.json").write_text(text)
+    scan = bootstrap.run(str(project), "test")
+    facts = {f["topic"]: f for f in scan["facts"]}
+    assert facts["node-requirement"]["sources"][0] == ref(project, "package.json", 5, role="config")
+    assert facts["node-dependencies"]["sources"][0] == ref(project, "package.json", 7, 10, "config")
+    assert "express, zod" in facts["node-dependencies"]["content"]
+
+
+def test_json_location_matches_escaped_keys_and_last_duplicate_wins(project):
+    (project / "package.json").write_text(
+        '{\n"engines": {"node": ">=14"},\n"engines": {\n'
+        '"node": ">=18",\n"no\\u0064e": ">=22"\n}\n}\n')
+    scan = bootstrap.run(str(project), "test")
+    fact = next(f for f in scan["facts"] if f["topic"] == "node-requirement")
+    assert fact["content"] == "Node requirement is >=22."
+    assert fact["sources"][0] == ref(project, "package.json", 5, role="config")
+
+
+def test_oversized_json_excerpt_omits_fact_instead_of_citing_only_heading(project):
+    dependencies = ",\n".join(f'"package-{i}": "1.0.0"' for i in range(30))
+    (project / "package.json").write_text('{"dependencies": {\n' + dependencies + '\n}}')
+    scan = bootstrap.run(str(project), "test")
+    assert not any(f["topic"] == "node-dependencies" for f in scan["facts"])
+
+
+@pytest.mark.parametrize("replace", [False, True])
+def test_scan_serializes_external_authorization_with_concurrent_revocation(project, tmp_path, monkeypatch, replace):
+    external = tmp_path / "shared.md"
+    external.write_text("# Rules\n- Never log customer emails.\n")
+    replacement = tmp_path / "new-shared.md"
+    replacement.write_text("# Rules\n- Keep receipt data private.\n")
+    requested = [str(replacement)] if replace else []
+    bootstrap.run(str(project), "setup", external_paths=[str(external)])
+    scanning, revoke_attempted, release = threading.Event(), threading.Event(), threading.Event()
+    original_snapshot, original_lock = bootstrap.snapshot, store.store_lock
+    local = threading.local()
+
+    def paused_snapshot(*args, **kwargs):
+        if getattr(local, "role", "") == "scan":
+            scanning.set()
+            assert getattr(local, "locked", False), "authorization and snapshot must be read under the lock"
+            assert release.wait(5)
+        return original_snapshot(*args, **kwargs)
+
+    @contextmanager
+    def traced_lock(*args, **kwargs):
+        if getattr(local, "role", "") == "revoke":
+            revoke_attempted.set()
+        with original_lock(*args, **kwargs):
+            local.locked = True
+            try:
+                yield
+            finally:
+                local.locked = False
+
+    def run(role, **kwargs):
+        local.role = role
+        return bootstrap.run(str(project), role, **kwargs)
+
+    monkeypatch.setattr(bootstrap, "snapshot", paused_snapshot)
+    monkeypatch.setattr(store, "store_lock", traced_lock)
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        first = workers.submit(run, "scan")
+        try:
+            assert scanning.wait(5)
+            second = workers.submit(run, "revoke", external_paths=requested)
+            assert revoke_attempted.wait(5)
+        finally:
+            release.set()
+        first.result(timeout=5)
+        second.result(timeout=5)
+    saved = store.load(str(project))["bootstrap_scan"]
+    assert saved["external_paths"] == requested
+    assert str(external) not in saved["files"]
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
+def test_json_locator_uses_logical_source_lines(project, newline):
+    text = newline.join(['{', '"engines": {', '"node": ">=20"', '}', '}'])
+    (project / "package.json").write_bytes(text.encode())
+    scan = bootstrap.run(str(project), "test")
+    fact = next(f for f in scan["facts"] if f["topic"] == "node-requirement")
+    assert fact["sources"][0]["line"] == 3
+    assert fact["sources"][0]["quote"] == '\"node\": \">=20\"'
+
+
+def test_new_sources_persist_rescan_request_without_withholding_unchanged_facts(project):
+    scan = bootstrap.run(str(project), "test")
+    finish(project, scan, [])
+    before = store.load(str(project))["entries"]
+    (project / "new_subsystem.py").write_text("DATABASE_BACKEND = 'postgres'\n")
+    payload = store.session_start_payload(str(project))
+    assert "call bootstrap_context now" in payload["context"]
+    saved = store.load(str(project))
+    assert saved["bootstrap_scan"]["refresh_needed"]
+    assert saved["entries"] == before
+    assert "call bootstrap_context now" in store.bootstrap_prompt_payload(str(project))["context"]
+    fresh = bootstrap.run(str(project), "test")
+    assert fresh["stage"] == "interpreting"
+    finish(project, fresh, [])
+    assert not bootstrap.directive(str(project))
+
+
+def test_valid_final_report_clears_refresh_request_after_transient_source_change(project):
+    scan = bootstrap.run(str(project), "test")
+    receipt = finish(project, scan, [])
+    added = project / "temporary.py"
+    added.write_text("ENABLED = True\n")
+    store.session_start_payload(str(project))
+    added.unlink()
+    # The original snapshot is current again; a validated final report can settle it.
+    finish(project, receipt, [])
+    assert not bootstrap.directive(str(project))

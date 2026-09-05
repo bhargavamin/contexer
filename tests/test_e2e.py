@@ -322,11 +322,11 @@ class TestBootstrapOffer:
         ctx = result.get("hookSpecificOutput", {}).get("additionalContext", "")
         assert "Ask only about concrete conflicts" in ctx
 
-    def test_with_context_returns_empty(self, tmp_repo):
+    def test_with_context_but_no_bootstrap_report_requests_analysis(self, tmp_repo):
         store.update_decision(tmp_repo, "Use Django for the web layer", SESSION, "architecture")
         result = store.get_bootstrap_context_prompt(tmp_repo)
         ctx = result.get("hookSpecificOutput", {}).get("additionalContext", "")
-        assert ctx == ""
+        assert "call bootstrap_context now" in ctx
 
 
 # ── 4b. PostCompact bootstrap re-trigger ─────────────────────────────────────
@@ -515,9 +515,10 @@ class TestNewcomerQuestionDetection:
         assert "without asking setup permission or familiarity" in ctx
 
 
-    def test_existing_context_stays_silent(self, tmp_repo):
+    def test_existing_context_without_report_requests_bootstrap(self, tmp_repo):
         store.update_decision(tmp_repo, "decided to use postgres for primary storage", "s1")
-        assert store.get_bootstrap_context_prompt(tmp_repo, "what is this repo doing?") == {}
+        result = store.get_bootstrap_context_prompt(tmp_repo, "what is this repo doing?")
+        assert "call bootstrap_context now" in result["hookSpecificOutput"]["additionalContext"]
 
     @pytest.mark.parametrize("raw,expected", [
         ('{"prompt": "hello"}', "hello"),
@@ -593,7 +594,9 @@ class TestResumeSessionStart:
         re-injecting duplicates ~1k tokens."""
         store.update_decision(tmp_repo, "decided to use postgres for primary storage", "s1")
         result = store.get_session_start_context(tmp_repo, source="resume")
-        assert "hookSpecificOutput" not in result
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "postgres" not in ctx
+        assert "call bootstrap_context now" in ctx
         assert "resumed" in result["systemMessage"]
 
     def test_resume_without_context_mines_conversation(self, tmp_repo):
@@ -1673,12 +1676,12 @@ class TestNonGitProjectDir:
         assert "never hardcode dynatrace api tokens" in ctx.lower()
         assert "1 architecture" in ctx
 
-    def test_bootstrap_hook_does_not_offer_setup_without_git(self, non_git_project, tmp_home):
+    def test_bootstrap_hook_requests_missing_analysis_without_git(self, non_git_project, tmp_home):
         cli.install()
         cmds = self._hook_cmds(tmp_home, "UserPromptSubmit", "get_bootstrap_context_prompt")
         assert len(cmds) == 1
         out = self._run(tmp_home, non_git_project, cmds[0], '{"prompt": "hello"}')
-        assert out == {}, f"bootstrap must not offer setup when context exists: {out}"
+        assert "call bootstrap_context now" in out["hookSpecificOutput"]["additionalContext"]
 
     def test_per_prompt_hooks_resolve_via_cwd_without_git(self, non_git_project, tmp_home,
                                                           monkeypatch):

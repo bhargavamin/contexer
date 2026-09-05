@@ -123,24 +123,60 @@ def _external_paths(paths: list[str]) -> list[str]:
     return sorted(set(result))
 
 
-def _reference(file: str, text: str, needle: str, role: str = "config") -> dict:
-    lines = text.splitlines()
-    line = next((i for i, row in enumerate(lines, 1) if needle in row), 1)
-    return {"file": file, "line": line, "end_line": line,
-            "quote": lines[line - 1] if lines else "", "role": role}
+def _json_reference(file: str, text: str, selector: list[str]) -> dict | None:
+    """Locate parsed object members, including escaped keys and last-key-wins JSON."""
+    decoder = json.JSONDecoder()
+
+    def whitespace(index):
+        while index < len(text) and text[index] in " \t\r\n":
+            index += 1
+        return index
+
+    start, key_start, end = 0, 0, 0
+    for wanted in selector:
+        index = whitespace(start)
+        if text[index:index + 1] != "{":
+            return None
+        index = whitespace(index + 1)
+        found = None
+        while text[index:index + 1] != "}":
+            member_start = index
+            key, index = decoder.raw_decode(text, index)
+            index = whitespace(index)
+            if text[index:index + 1] != ":":
+                return None
+            value_start = whitespace(index + 1)
+            _, index = decoder.raw_decode(text, value_start)
+            if key == wanted:
+                found = (member_start, value_start, index)
+            index = whitespace(index)
+            if text[index:index + 1] != ",":
+                break
+            index = whitespace(index + 1)
+        if found is None:
+            return None
+        key_start, start, end = found
+    line = len(re.findall(r"\r\n|\r|\n", text[:key_start])) + 1
+    end_line = len(re.findall(r"\r\n|\r|\n", text[:end - 1])) + 1
+    quote = "\n".join(text.splitlines()[line - 1:end_line])
+    if end_line - line >= 20 or len(quote) > 2000:
+        return None  # omit an automatic fact rather than attach incomplete evidence
+    return {"file": file, "line": line, "end_line": end_line, "quote": quote, "role": "config"}
 
 
 def _config_facts(file: str, text: str) -> list[dict]:
     facts = []
 
     def add(topic, content, needle):
-        reference = _reference(file, text, needle)
         if file.endswith(".toml"):
             selector = (["project", needle] if topic.startswith("python-") else
                         ["tool", "ruff", needle] if file == "pyproject.toml" else [needle])
             reference = _toml_reference(file, text, selector)
-            if reference is None:
-                return  # parsed fact with no honest bounded locator: leave it for inspection
+        else:
+            selector = ["engines", "node"] if topic == "node-requirement" else ["dependencies"]
+            reference = _json_reference(file, text, selector)
+        if reference is None:
+            return  # parsed fact with no honest bounded locator: leave it for inspection
         facts.append({"topic": topic, "content": content, "kind": "observed",
                       "subtype": "architecture", "scope": file,
                       "assessment": "supported", "reason": "Parsed repository configuration",
@@ -584,6 +620,8 @@ def run(repo_path: str, session_id: str, *, apply: bool = True, snapshot_id: str
             if finish and missing:
                 raise ValueError("Unaccounted document candidates: " + ", ".join(missing))
             scan["stage"] = "reported_complete" if finish else "interpreting"
+            if finish:
+                scan.pop("refresh_needed", None)
             scan["heads"] = _heads(data["entries"])
             scan["snapshot_id"] = _digest([scan["checkout"], scan["files"], scan["heads"], scan["external_paths"], scan["global_heads"]])
             store.save(repo_path, data)
@@ -598,13 +636,15 @@ def run(repo_path: str, session_id: str, *, apply: bool = True, snapshot_id: str
                     "missing_candidates": missing, "coverage": scan["coverage"],
                     "omitted": scan["omitted"], "guide": GUIDE}
 
-    previous = store.load_for_update(repo_path).get("bootstrap_scan") or {}
-    roots = (_external_paths(external_paths) if external_paths is not None
-             else _external_paths(previous.get("external_paths", [])))
-    scan = snapshot(repo_path, roots)
     # Read-only preview does not create entries, completion state, or consume the optional ask.
     with store.store_lock(store.repo_slug(repo_path)) if apply else _no_lock():
-        data = store.load_for_update(repo_path) if apply else store.load(repo_path)
+        # Authorization, snapshot and commit are one transaction. An older scan cannot
+        # restore revoked paths or replace interpretation saved while it was scanning.
+        data = store.load_for_update(repo_path)
+        previous = data.get("bootstrap_scan") or {}
+        roots = (_external_paths(external_paths) if external_paths is not None
+                 else _external_paths(previous.get("external_paths", [])))
+        scan = snapshot(repo_path, roots)
         outcomes = []
         if apply:
             facts = [{**f, "key": "code:" + f["topic"] + ":" + f["scope"]} for f in scan["facts"]]
@@ -649,10 +689,59 @@ def _no_lock():
     return nullcontext()
 
 
+def freshness_view(repo_path: str, data: dict, *, unavailable: bool = False) -> dict:
+    """Read-only applicability projection; never withdraw human decisions or revive AI claims."""
+    if not data.get("bootstrap_scan"):
+        return data
+    result = copy.deepcopy(data)
+    scan = result["bootstrap_scan"]
+    files = {}
+    if not unavailable:
+        try:
+            files = snapshot(repo_path, _external_paths(scan["external_paths"]))["files"]
+        except (OSError, ValueError, UnicodeError, KeyError, TypeError):
+            unavailable = True
+    if unavailable or files != scan["files"]:
+        # Latched until bootstrap rebuilds the snapshot. New files can require analysis
+        # without invalidating any existing citation; that request must reach prompt hooks.
+        scan["refresh_needed"] = True
+    for entry in result["entries"]:
+        if not entry.get("bootstrap") or _human(entry):
+            continue
+        if unavailable or any(files.get(r["file"], {}).get("sha256") != r["sha256"]
+                              for r in entry["bootstrap"].get("sources", [])):
+            entry["bootstrap_withheld"] = "Evidence changed, disappeared, or could not be checked; re-analysis required"
+    return result
+
+
+def refresh_for_session(repo_path: str, data: dict) -> dict:
+    """Withhold before startup rendering; persist suppression for later read-only prompt hooks.
+
+    SessionStart never waits for another store writer. If freshness cannot be persisted,
+    the returned projection still fails closed instead of injecting an obsolete claim.
+    """
+    if not data.get("bootstrap_scan"):
+        return data
+    try:
+        with store.store_lock(store.repo_slug(repo_path), blocking=False):
+            current = store.load_for_update(repo_path)
+            view = freshness_view(repo_path, current)
+            if view != current:
+                try:
+                    store.save(repo_path, view)
+                except OSError:
+                    pass  # read-only stores still receive the safe rendering projection
+            return view
+    except (OSError, ValueError):
+        return freshness_view(repo_path, data, unavailable=True)
+
+
 def directive(repo_path: str, data: dict | None = None, *, check_freshness: bool = False) -> str:
     data = data if data is not None else store.load(repo_path)
     scan = data.get("bootstrap_scan") or {}
-    if scan.get("stage") == "reported_complete":
+    needs_refresh = scan.get("refresh_needed") or any(
+        e.get("bootstrap_withheld") and not _human(e) for e in data.get("entries", []))
+    if scan.get("stage") == "reported_complete" and not needs_refresh:
         if not check_freshness:
             return ""
         try:
