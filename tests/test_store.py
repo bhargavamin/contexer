@@ -471,18 +471,13 @@ class TestRepoSourceStamp:
         monkeypatch.setattr(store, "_SESSION_REPO", session)
         assert store._hook_repo_verbose(str(Path.home() / ".claude")) == (session, "session")
 
-    def test_bootstrap_stamps_its_bulk_write(self, tmp_repo, monkeypatch):
-        # The largest bulk write in the system — a misroute here plants the most content in
-        # the wrong store, so it is the write that most needs its branch recorded.
-        monkeypatch.setattr(store, "bootstrap_scan",
-                            lambda *a, **k: {"inferred": ["Python 3.12", "uv"], "gaps": []})
-        monkeypatch.setattr("contexer.miner.mine_conventions",
-                            lambda *a, **k: [{"content": "Functions use snake_case (98% of 412)",
-                                              "subtype": "convention", "tier": "high"}])
+    def test_bootstrap_records_only_observed_context_without_human_stamp(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nrequires-python = ">=3.12"\n')
         store.bootstrap_apply(tmp_repo, "s1", "high", repo_source="pointer")
-
         entries = store.load(tmp_repo)["entries"]
-        assert entries and all(e["repo_source"] == "pointer" for e in entries)
+        assert entries and all(e["created_by"] == "ai" and "approved_by" not in e for e in entries)
+
 
     def test_constraint_capture_stamps_too(self, tmp_repo):
         # The hook-driven surface: no MCP server binding of its own, so it is the path most
@@ -499,17 +494,14 @@ class TestGetSessionStartContext:
     def test_empty_repo_offers_bootstrap(self, tmp_repo):
         result = store.get_session_start_context(tmp_repo)
         assert "bootstrap" in result["hookSpecificOutput"]["additionalContext"].lower()
-        assert "no context stored" in result["systemMessage"].lower()
+        assert 'ask "run contexer bootstrap"' in result["systemMessage"].lower()
 
-    def test_empty_repo_directive_stops_and_waits(self, tmp_repo):
-        # Bootstrap offer must pause Claude — it waits for yes/full/no before doing anything
-        result = store.get_session_start_context(tmp_repo)
-        ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "CRITICAL" in ctx or "stop completely" in ctx.lower()
-        assert "yes" in ctx.lower()
-        assert "skip" in ctx.lower()
-        # Hard constraint: Claude must not call bootstrap_context before hearing yes
-        assert "do not" in ctx.lower() or "don't" in ctx.lower()
+    def test_empty_repo_scans_without_stopping_for_confirmation(self, tmp_repo):
+        ctx = store.get_session_start_context(tmp_repo)["hookSpecificOutput"]["additionalContext"]
+        assert "call bootstrap_context now" in ctx
+        assert "without asking setup" in ctx
+        assert "Continue the user's task" in ctx
+
 
     def test_empty_repo_directive_includes_repo_path(self, tmp_repo):
         result = store.get_session_start_context(tmp_repo)
@@ -547,24 +539,19 @@ class TestGetBootstrapContextPrompt:
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         result = store.get_bootstrap_context_prompt(tmp_repo)
         ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "no project context" in ctx.lower()
-        assert "update_context" in ctx
+        assert "bootstrap" in ctx.lower()
+        assert "bootstrap_context" in ctx
 
     def test_populated_repo_returns_empty_dict(self, populated_repo):
         result = store.get_bootstrap_context_prompt(populated_repo)
         assert result == {}
 
-    def test_directive_tells_claude_to_call_bootstrap_tool(self, tmp_repo):
-        # Opt-in: Claude asks first, calls bootstrap_context only after user says yes
+    def test_directive_scans_before_asking_questions(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "uv.lock").write_text("")
-        result = store.get_bootstrap_context_prompt(tmp_repo)
-        ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "bootstrap_context" in ctx
-        assert "CRITICAL" in ctx or "stop completely" in ctx.lower()
-        assert "yes" in ctx.lower()
-        assert "skip" in ctx.lower()
-        assert "do not" in ctx.lower() or "don't" in ctx.lower()
+        ctx = store.get_bootstrap_context_prompt(tmp_repo)["hookSpecificOutput"]["additionalContext"]
+        assert "call bootstrap_context now" in ctx
+        assert "without asking setup permission or familiarity" in ctx
+
 
     def test_directive_includes_repo_path(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
@@ -572,11 +559,10 @@ class TestGetBootstrapContextPrompt:
         ctx = result["hookSpecificOutput"]["additionalContext"]
         assert tmp_repo in ctx
 
-    def test_directive_includes_update_context_instruction(self, tmp_repo):
+    def test_directive_requires_grounded_report_not_per_fact_choreography(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        result = store.get_bootstrap_context_prompt(tmp_repo)
-        ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "update_context" in ctx
+        ctx = store.get_bootstrap_context_prompt(tmp_repo)["hookSpecificOutput"]["additionalContext"]
+        assert "finish the interpretation report" in ctx
 
 
 # ── bootstrap_scan ────────────────────────────────────────────────────────────
@@ -1115,159 +1101,12 @@ def _snake_file(n_snake: int, n_bad: int = 0) -> str:
 
 
 class TestBootstrapApply:
-    def test_consolidated_stack_entry_not_per_fact(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "widgets-api"\nrequires-python = ">=3.12"\n'
-            'dependencies = ["fastapi", "sqlalchemy", "boto3", "stripe", "redis"]\n'
-        )
-        result = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
-        decisions = [e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision"]
-        stack_entries = [d for d in decisions if d["content"].startswith("Stack: ")]
-        assert len(stack_entries) == 1
-        inferred_facts = set(result["inferred"])
-        assert not any(d["content"] in inferred_facts for d in decisions)
-
-    def test_high_tier_mined_stored_approved_scan(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=25))
-        result = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
-        entry = next(
-            e for e in store.load(tmp_repo)["entries"]
-            if e["type"] == "decision" and "snake_case" in e["content"]
-        )
-        assert entry["status"] == "approved"
-        assert entry["created_by"] == "scan"
-        assert entry["subtype"] == "convention"
-        assert "%" in entry["content"]
-        assert result["stored"] >= 1
-
-    def test_medium_tier_mined_stored_pending_approval(self, tmp_repo):
-        # NOT 'suggested': suggested entries inject at session start and never surface
-        # in review_pending — a 60-89% signal must wait for the developer instead.
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=14, n_bad=6))
-        result = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
-        entry = next(
-            e for e in store.load(tmp_repo)["entries"]
-            if e["type"] == "decision" and "snake_case" in e["content"]
-        )
-        assert entry["status"] == "pending_approval"
-        assert result["pending"] >= 1
-
-    def test_medium_tier_surfaces_in_review_and_arms_nudge(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=14, n_bad=6))
-        store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
-        pending = store.get_pending_decisions(tmp_repo)
-        assert any("snake_case" in e["content"] for e in pending)
-        assert store._pending_review_flag(tmp_repo).exists()
-
-    def test_single_save_for_batch(self, tmp_repo, monkeypatch):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "widgets-api"\ndependencies = ["fastapi", "boto3"]\n'
-        )
-        (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=25))
+    def test_compatibility_entrypoint_uses_evidence_bootstrap(self, tmp_repo, monkeypatch):
+        from contexer import bootstrap
         calls = []
-        real_save = store.save
-
-        def counting_save(repo_path, data):
-            calls.append(1)
-            return real_save(repo_path, data)
-
-        monkeypatch.setattr(store, "save", counting_save)
-        store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
-        assert len(calls) == 1
-
-    def test_second_call_is_noop(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "widgets-api"\ndependencies = ["fastapi", "boto3"]\n'
-        )
-        (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=25))
-        store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
-        before = {e["id"]: e.get("occurrence_count", 1) for e in store.load(tmp_repo)["entries"]}
-
-        result2 = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
-
-        after = {e["id"]: e.get("occurrence_count", 1) for e in store.load(tmp_repo)["entries"]}
-        assert result2["stored"] == 0
-        assert result2["pending"] == 0
-        assert result2["skipped"] > 0
-        assert before == after
-
-    def test_empty_repo_no_crash(self, tmp_repo):
-        result = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
-        assert result["stored"] == 0
-        assert result["pending"] == 0
-        assert result["skipped"] == 0
-
-    def test_return_shape(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        result = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
-        for key in ("inferred", "gaps", "insight", "insight_source", "decisive",
-                    "stored", "pending", "skipped"):
-            assert key in result
-
-    def test_never_stores_constraint_from_mining(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "widgets-api"\n'
-            'dependencies = ["fastapi", "sqlalchemy", "boto3", "stripe", "redis"]\n\n'
-            '[tool.ruff]\nline-length = 100\n\n[tool.mypy]\nstrict = true\n'
-        )
-        (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=25))
-        store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
-        data = store.load(tmp_repo)
-        assert not any(
-            e["type"] == "decision" and e.get("created_by") == "scan" and e.get("subtype") == "constraint"
-            for e in data["entries"]
-        )
-
-    def test_stored_counts_reflect_post_trim_survivors(self, tmp_repo, monkeypatch):
-        # Near MAX_ENTRIES, _keep_top can evict freshly-appended bootstrap entries
-        # (pin_last protects only the final one). The returned counts must reflect
-        # what actually survived, never what was appended (Greptile #114 P1).
-        monkeypatch.setattr(store, "MAX_ENTRIES", 3)
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "widgets-api"\ndependencies = ["fastapi", "boto3"]\n'
-        )
-        (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=25))
-        for i, f in enumerate(["filler decision alpha topic", "filler decision bravo topic",
-                               "filler decision charlie topic"]):
-            store.update_decision(tmp_repo, f, f"seed-{i}")
-
-        result = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
-
-        data = store.load(tmp_repo)
-        surviving_scan = sum(1 for e in data["entries"]
-                             if e["type"] == "decision" and e.get("created_by") == "scan"
-                             and e.get("status") == "approved")
-        surviving_pending = sum(1 for e in data["entries"]
-                                if e["type"] == "decision" and e.get("created_by") == "scan"
-                                and e.get("status") == "pending_approval")
-        assert result["stored"] == surviving_scan
-        assert result["pending"] == surviving_pending
-        assert len(data["entries"]) <= store.MAX_ENTRIES
-
-    def test_max_entries_respected(self, tmp_repo, monkeypatch):
-        monkeypatch.setattr(store, "MAX_ENTRIES", 5)
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "widgets-api"\ndependencies = ["fastapi", "boto3"]\n'
-        )
-        (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=25))
-        fillers = ["filler decision alpha topic", "filler decision bravo topic",
-                   "filler decision charlie topic", "filler decision delta topic"]
-        for i, f in enumerate(fillers):
-            store.update_decision(tmp_repo, f, f"seed-{i}")
-
-        store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
-
-        data = store.load(tmp_repo)
-        assert len(data["entries"]) <= store.MAX_ENTRIES
+        monkeypatch.setattr(bootstrap, "run", lambda *a, **k: calls.append((a, k)) or {"stage": "interpreting"})
+        assert store.bootstrap_apply(tmp_repo, SESSION_ID_BA)["stage"] == "interpreting"
+        assert calls[0][0] == (tmp_repo, SESSION_ID_BA)
 
 
 # ── session start subtype breakdown (v0.4.0) ─────────────────────────────────
@@ -1953,7 +1792,7 @@ class TestSessionStartPayload:
         from contexer import store
         p = store.session_start_payload(tmp_repo)
         assert "bootstrap" in p["context"].lower()
-        assert "no context stored" in p["status"].lower()
+        assert 'ask "run contexer bootstrap"' in p["status"].lower()
 
     def test_populated_repo_payload_pointer(self, populated_repo):
         from contexer import store
@@ -1971,7 +1810,7 @@ class TestSessionStartPayload:
         # Back-compat: the Claude dict shape is preserved exactly.
         from contexer import store
         result = store.get_session_start_context(tmp_repo)
-        assert "no context stored" in result["systemMessage"].lower()
+        assert 'ask "run contexer bootstrap"' in result["systemMessage"].lower()
         assert "bootstrap" in result["hookSpecificOutput"]["additionalContext"].lower()
         assert result["hookSpecificOutput"]["hookEventName"] == "SessionStart"
 

@@ -631,29 +631,22 @@ def test_get_context_passes_files_through(tmp_repo):
     assert result == store.get_context(tmp_repo, files=["auth/jwt.py"])
 
 
-def test_bootstrap_context_attaches_ask_shape_only_when_gaps_exist(monkeypatch):
-    """The gap-question ask shape rides the tool result, not the session-start injection:
-    it is unusable without gaps, while the injected block is paid on every context-less
-    session start including the skip path."""
-    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo/x")
-    monkeypatch.setattr(
-        server.store, "bootstrap_apply",
-        lambda *a, **k: {"gaps": [{"question": "What does this repo do?"}], "stored": 3},
-    )
-    with_gaps = json.loads(server.bootstrap_context("/repo/x"))
-    assert with_gaps["how_to_ask"] == store.GAP_ASK_GUIDE
-    assert with_gaps["gaps"] and with_gaps["stored"] == 3, "result passes through unchanged"
-
-    monkeypatch.setattr(server.store, "bootstrap_apply",
-                        lambda *a, **k: {"gaps": [], "stored": 3})
-    assert "how_to_ask" not in json.loads(server.bootstrap_context("/repo/x"))
+def test_bootstrap_context_delegates_grounded_report(monkeypatch):
+    from contexer import bootstrap
+    calls = []
+    monkeypatch.setattr(server.store, "resolve_repo_verbose", lambda p: ("/repo/x", "argument"))
+    monkeypatch.setattr(bootstrap, "run", lambda *a, **k: calls.append((a, k)) or {"stage": "interpreting"})
+    assert json.loads(server.bootstrap_context("/repo/x"))["stage"] == "interpreting"
+    assert calls[0][1]["findings"] is None
 
 
-def test_bootstrap_context_ask_shape_on_the_read_only_preview(monkeypatch):
-    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo/x")
-    monkeypatch.setattr(server.store, "bootstrap_scan",
-                        lambda *a, **k: {"gaps": [{"question": "Tests in scope?"}]})
-    assert "how_to_ask" in json.loads(server.bootstrap_context("/repo/x", apply=False))
+def test_bootstrap_preview_does_not_apply(monkeypatch):
+    from contexer import bootstrap
+    calls = []
+    monkeypatch.setattr(server.store, "resolve_repo_verbose", lambda p: ("/repo/x", "argument"))
+    monkeypatch.setattr(bootstrap, "run", lambda *a, **k: calls.append(k) or {})
+    server.bootstrap_context("/repo/x", apply=False)
+    assert calls == [{"apply": False, "snapshot_id": "", "findings": None, "finish": False, "external_paths": None, "repo_source": "argument"}]
 
 
 # ── capture_lint: bounce narrative-shaped AI captures ───────────────────────

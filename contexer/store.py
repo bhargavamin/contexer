@@ -390,6 +390,28 @@ def load(repo_path: str) -> dict:
     return {"repo_path": repo_path, "entries": []}
 
 
+def load_for_update(repo_path: str) -> dict:
+    """Strict read for bootstrap transactions; corrupt context must never become empty."""
+    path = _store_path(repo_path)
+    if not path.exists():
+        return {"repo_path": repo_path, "entries": []}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or _entries_error(data.get("entries")) is not None:
+        raise ValueError("Decision store is malformed; refusing bootstrap write")
+    if "bootstrap_scan" in data and (not isinstance(data["bootstrap_scan"], dict)
+                                    or data["bootstrap_scan"].get("version") != 1):
+        raise ValueError("Unknown bootstrap state; refusing to overwrite it")
+    if "bootstrap_scan" in data:
+        scan = data["bootstrap_scan"]
+        shapes = {"files": dict, "heads": dict, "reported": dict, "candidates": list,
+                  "external_paths": list, "snapshot_id": str, "checkout": str, "omitted": list}
+        if (any(not isinstance(scan.get(k), t) for k, t in shapes.items())
+                or scan.get("stage") not in {"interpreting", "reported_complete"}):
+            raise ValueError("Malformed bootstrap state; refusing to overwrite it")
+    _migrate_entries(data)
+    return data
+
+
 def atomic_write(path: Path, text: str) -> None:
     """Write via a unique temp file + os.replace so readers never see a torn file.
 
@@ -1129,6 +1151,10 @@ _L3_CONTENT_SIGNALS = re.compile(
 
 def entry_status(entry: dict) -> str:
     """Returns the effective status of an entry, defaulting to 'approved' for old entries."""
+    if entry.get("bootstrap_withheld") and entry.get("approved_by") != "human":
+        # Derived applicability, not a human dismissal: keep the capture/history on disk,
+        # but all existing inactive filters must exclude stale or withdrawn AI guidance.
+        return "ignored"
     return entry.get("status", "approved")
 
 
@@ -2339,6 +2365,15 @@ def _new_decision_entry(content: str, session_id: str, subtype: str,
 
 
 
+def build_inferred_entry(content: str, session_id: str, subtype: str, status: str) -> dict:
+    """Construct bootstrap context without granting approval, scope anchors or guard trust."""
+    if status not in ("suggested", "pending_approval"):
+        raise ValueError("Inferred bootstrap entries cannot be born approved")
+    entry = _new_decision_entry(content, session_id, subtype, created_by="ai", status=status)
+    revisions.current_revision(entry)["approved_at"] = None
+    return entry
+
+
 def attach_team_reconciliation_proposal(repo_path: str, entry_id: str, *, content: str,
                                         title: str = "", team_id: str = "",
                                         team_name: str = "", team_head: str = "") -> bool:
@@ -2453,26 +2488,21 @@ def _offer_flag(repo_path: str) -> Path:
     return sidecar_path("bootstrap_offered", slug=repo_slug(repo_path))
 
 
-def _arm_offer(repo_path: str) -> None:
-    """Record that the setup offer has gone out for this repo in this session. Fail-soft:
-    a flag-write error must degrade to the old always-offer behaviour, never raise."""
+def _arm_offer(repo_path: str, *, prompt: bool = False) -> None:
+    """Track notice vs first-prompt delivery, not completion. Bookkeeping is fail-soft."""
     try:
         ensure_store_dir()
-        _offer_flag(repo_path).touch()
+        _offer_flag(repo_path).write_text("prompt" if prompt else "session", encoding="utf-8")
     except OSError:
         pass
 
 
 def _offer_already_made(repo_path: str) -> bool:
-    """True once the offer has been emitted for this repo in this session.
+    """Whether this session received a notice; never evidence bootstrap actually ran.
 
-    The offer instructs the model to treat a dismissed picker as skip and never re-ask, but
-    that promise could not hold: skipping stores no decision, so `if decisions` never trips
-    and the whole block was rebuilt on the next UserPromptSubmit and after every /compact -
-    re-summoning, since the picker landed, a blocking modal instead of a re-printed menu.
-    A non-resume, non-compact session start clears the flag, so a genuinely new session
-    still offers exactly once; `compact` deliberately does NOT clear it, because compaction
-    continues the same session in which the developer already answered."""
+    New sessions clear the flag. Compaction retains it to avoid repeating the visible
+    notice; the first-prompt fallback separately checks whether it has been delivered.
+    """
     try:
         return _offer_flag(repo_path).exists()
     except OSError:
@@ -2891,6 +2921,12 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
                 None,
             )
             if target is not None:
+                if target.get("bootstrap") and created_by != "human":
+                    return True, target["id"], {
+                        "refusal_ack": "Bootstrap capture unchanged. Re-analyze source evidence with "
+                        "bootstrap_context to update an inference. For an explicit user correction, "
+                        "use approve_decision(action='edit', entry_id=..., content=...). Do not "
+                        "replace a human correction with an inferred update."}
                 # Fix: validate content before any mutation - replace_id bypasses the
                 # downstream _is_storable check, so guard here to prevent blank content
                 # from wiping a trusted decision.
@@ -3250,6 +3286,19 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
         preview = stored[:80] + ("..." if len(stored) > 80 else "")
         verb = "Updated and approved" if action == "edit" else "Approved"
         return True, f"{verb}. Now revision {entry['revision']}: \"{preview}\"", True
+
+    # Bootstrap has a usable-but-unratified lane. A user's explicit correction/confirmation
+    # creates a new human revision even for its first capture; the inference stays immutable.
+    if (entry.get("bootstrap") and action in ("approve", "edit")
+            and entry.get("status") != "ignored"
+            and (action == "edit" or entry.get("approved_by") != "human")):
+        entry["approved_by"] = "human"
+        entry["approved_at"] = now
+        entry["status"] = "approved"
+        entry.pop("bootstrap_withheld", None)
+        revisions.append_revision(entry, content if action == "edit" else revisions.current_content(entry),
+                                  "human", approved_at=now)
+        return True, f"Human decision saved as revision {entry['revision']}; original inference preserved.", True
 
     # No proposed_revision: a plain decision entry, gated on its own status.
     status = entry_status(entry)
@@ -3659,6 +3708,15 @@ def edit_decision(repo_path: str, entry_id: str, *, content: str | None = None,
         # approved; a pending one gets no approval stamp and stays in the review queue.
         approved_at = (datetime.now(timezone.utc).isoformat()
                        if entry_status(entry) in ("approved", "suggested") else None)
+        if entry.get("bootstrap") and content is not None and source == "ui":
+            # A developer editing bootstrap content in the console is the same explicit
+            # correction as the conversational edit action, not another AI inference.
+            source = "human"
+            approved_at = datetime.now(timezone.utc).isoformat()
+            entry["approved_by"] = "human"
+            entry["approved_at"] = approved_at
+            entry["status"] = "approved"
+            entry.pop("bootstrap_withheld", None)
         if subtype is not None:
             entry["subtype"] = subtype
         # A Suggested Update was written against the text being replaced here. Kept across a
@@ -4481,178 +4539,8 @@ GAP_ASK_GUIDE = (
 
 
 def _build_bootstrap_context(repo_path: str, *, allow_git: bool = True) -> list[str]:
-    level, decisive = (_cached_insight(repo_path) if allow_git
-                       else _cached_insight_read_only(repo_path))
-    repo_name = Path(repo_path).name if repo_path else ""
-    label = f'"{repo_name}"' if repo_name else "this repo"
-
-    # Every variant is NUMBERED and capped at FOUR options. The cap is the interactive
-    # picker's: Claude Code's AskUserQuestion takes at most 4 options (plus its own free-text
-    # "Other"), so a 5-row menu could not be rendered as a picker at all. Numbers are purely
-    # additive - the keywords stay valid, since a text-mode reply and the picker's "Other"
-    # both arrive as words. 'some' is the row that gave way (see the ambiguous variant).
-    if decisive and level == "high":
-        # commits by this user found - don't ask how well they know their own repo
-        offer = [
-            f"  Contexer: no project context stored for {label}."
-            " How should I set up context for future sessions?",
-            "   1. quick - 1 question (what does this repo do?)",
-            "   2. full - guided setup, a few questions",
-            "   3. skip - not now",
-            "   4. scan - I'm actually new to this repo (scan code and docs, 1 short question)",
-        ]
-        replies = "1-4, or quick / full / skip / scan"
-    elif decisive and level == "low":
-        # state the evidence, never the conclusion - detection can be wrong
-        offer = [
-            f"  Contexer: no project context stored for {label}."
-            " No commits from your git email found here, so I'd scan the code and docs"
-            " instead of asking questions you may not be able to answer.",
-            "   1. scan - go ahead (scan code and docs, 1 short question)",
-            "   2. quick - I actually know this repo (1 question)",
-            "   3. full - I actually know this repo (guided setup)",
-            "   4. skip - not now",
-        ]
-        replies = "1-4, or scan / quick / full / skip"
-    else:
-        # ambiguous signals - ask familiarity directly. 'some' has no row here: five options
-        # exceed the picker cap, and scan covers "didn't build it" without a wrong answer
-        # (it asks nothing the user can't answer). Typed, 'some' still maps to medium.
-        suggestion = (
-            ["   (a few commits from your git email found - if you work with this repo but"
-             " didn't build it, reply 'some')"]
-            if level == "medium" else []
-        )
-        offer = [
-            f"  Contexer: no project context stored for {label}."
-            " How well do you know this repo?",
-            "   1. quick - I wrote or maintain it (1 question: what does this repo do?)",
-            "   2. full - I wrote or maintain it (guided setup, a few questions)",
-            "   3. scan - I didn't build it, or it's my first time: scan code and docs,"
-            " then up to 2 short questions",
-            "   4. skip - not now",
-            *suggestion,
-        ]
-        replies = ("1-4, or quick / full / scan / skip"
-                   " (or 'some' if you work with it but didn't build it)")
-
-    # Option 1 differs per variant, so a bare "yes" / "go ahead" cannot mean a fixed keyword:
-    # in the low variant the proposal on the table is scan, and routing that affirmative to
-    # quick (insight='high') would start the author interview the low variant exists to avoid.
-    first_option = offer[1].split(".", 1)[1].split(" - ")[0].strip()
-    # ...and in the ambiguous variant it cannot mean option 1 either. There the question is
-    # "How well do you know this repo?", whose option 1 asserts "I wrote or maintain it" -
-    # an authorship claim a bare "yes" never makes, in the one variant that exists precisely
-    # because the git signal could not establish authorship. Resolving it to quick would
-    # route a newcomer to insight='high', which drops the goal gap they CAN answer and asks
-    # only the purpose question they cannot. So: don't guess, ask which one.
-    affirmative = (
-        f"A bare 'yes' or 'go ahead' means option 1 - here that is {first_option},"
-        " not any other mode."
-        if decisive else
-        "A bare 'yes' or 'go ahead' is NOT an answer here - this question asks how well they"
-        " know the repo, and option 1 claims they wrote or maintain it. Never infer authorship"
-        " from an affirmative: ask which of the four they mean. If they only say they're new"
-        " to the repo, take scan."
-    )
-    # Who reaches scan differs too. In the low variant the evidence says the user has no
-    # commits here, so scan means "don't quiz me" (insight='low', one goal question). In the
-    # ambiguous variant scan is also the row a developer picks for "I work with it but didn't
-    # build it" - 'some' has no row of its own - and insight='low' would silently drop the
-    # purpose gap (min_insight='medium'), losing exactly the answer that user CAN give.
-    scan_is_medium = not (decisive and level in {"high", "low"})
-
-    # A question about the repo asked as the first prompt ("what is this repo doing?",
-    # "summarize this repo") must be ANSWERED, not met with a menu that mirrors the question
-    # back. This check comes FIRST: placed after the menu it loses to "response must be ONLY
-    # the offer". It applies at EVERY insight level - a repo author asking what the repo does
-    # still wants an answer, just phrased as a maintainer, not quizzed as a newcomer; the
-    # commit signal only tunes the phrasing (see _newcomer_answer_block), never whether we
-    # answer.
-    newbie_exception = [
-        "STEP 0 - read the user's message before anything else: if it is asking what this"
-        " repo or code is or does, or asking to summarize/explain/give an overview of it"
-        " ('what is repo doing?', 'explain this codebase', 'tell me about this repo',"
-        " 'summarize this codebase', 'give me an overview'), then do NOT output the menu"
-        " below. Instead:",
-        *_newcomer_answer_block(label, level, decisive),
-        "Only when their message is NOT such a question, output the menu below instead:",
-    ]
-
-    return [
-        f"No project context stored for {repo_path}.",
-        "CRITICAL INSTRUCTION - read before writing a single word:",
-        *newbie_exception,
-        "Ask the offer as an interactive multiple-choice question if you have a tool for that"
-        " (Claude Code: AskUserQuestion) - ONE question, header \"Setup\", one choice per"
-        " numbered option below in the same order (label = the keyword, description = the text"
-        " after the dash), and no options of your own. Make no other tool call and do no other"
-        " work in that turn. The answer comes back to you within the SAME turn, so do not end"
-        " the turn on the question - run the matching handler below as soon as it arrives."
-        " Without such a tool, print the numbered list verbatim as plain text, end your turn"
-        " there, and run the handler when the user's next message answers it.",
-        "Your ENTIRE response must be ONLY the offer block below - as one multiple-choice"
-        " question, or as the text list. No task work. No file reads. No acknowledgment of any"
-        " prior request. No explanation. Just the offer, then stop.",
-        *offer,
-        "Output the offer and nothing else. Do NOT call bootstrap_context before you have their"
-        " answer, and do NOT start the user's task. Their reply is one of - "
-        f"{replies}. In the picker that answer lands in this same turn: act on it immediately."
-        " In plain text your turn ends with the list and their next message is the answer.",
-        "A numeric reply means the option at that position in the offer above; the keyword"
-        f" itself means the same thing, typed or picked as free text. {affirmative}"
-        " If the user dismisses or cancels the question, treat that as skip and never re-ask.",
-        "Once the user replies:",
-        "If quick → call bootstrap_context with insight='high'. It scans the codebase and stores"
-        " detected facts and measured conventions automatically - do NOT re-store them. Report the"
-        " stored/pending counts in one line, e.g. 'Contexer: stored 6, 2 pending review.' Ask ONLY the"
-        " first gap question (purpose); store the answer with update_context using the gap's subtype."
-        " Stop - do not ask more.",
-        "If full (guided) → call bootstrap_context with insight='high'. Detected facts and measured"
-        " conventions are stored automatically - do NOT re-store them. Report the stored/pending counts"
-        " in one line. Then ask each remaining gap question one at a time, in the shape described"
-        " below. After each answer, re-evaluate remaining gaps - if the"
-        " purpose answer reveals a docs-only, portfolio, personal, or learning repo, skip"
-        " tests/CI/deploy/compliance/exclusion gaps. Store each answer as a separate update_context"
-        " call using the gap's subtype. Write each stored entry as a single plain sentence, max 15"
-        " words, no em dashes, no filler phrases. Example: 'No CI/CD pipeline.' NOT 'There is no CI/CD"
-        " pipeline planned or needed for this repo.' Stop when the gaps are done.",
-        "If some (works with the repo but didn't build it) → call bootstrap_context with"
-        " insight='medium'. Detected facts and measured conventions are stored automatically - do NOT"
-        " re-store them. Report the stored/pending counts in one line. Ask the returned gap questions"
-        " one at a time (purpose and the user's goal) and store each answer. Same sentence style:"
-        " plain, max 15 words.",
-        ("If scan (didn't build it, or first time here) → call bootstrap_context with"
-         " insight='medium'. That row covers BOTH a developer who works with this repo without"
-         " having built it and a genuine first-timer, so use 'medium', not 'low': it returns only"
-         " the two gaps either of them can attempt (what they plan to do here, and what the repo"
-         " does). If they say they don't know what the repo does, drop that gap instead of"
-         " pressing. Do NOT quiz them on this repo's history or conventions."
-         if scan_is_medium else
-         "If scan (first time seeing this repo) → call bootstrap_context with insight='low'."
-         " The user cannot answer questions about this repo's history or conventions - do NOT"
-         " quiz them. Ask only the single gap question returned (what the user plans to do here).")
-        + " Detected facts and measured conventions are stored automatically - do NOT re-store"
-          " them. Report the stored/pending counts in one line. Store each answer. Same sentence"
-          " style: plain, max 15 words.",
-        "If no or skip → proceed with their original request directly, do not mention bootstrap again.",
-        "After any handler's tool call: if the result shows pending > 0, mention once that"
-        " measured-but-unratified conventions await review - say 'run `contexer review` when"
-        " convenient' - and never block on it.",
-        "Purpose question - never echo it back: if the user's original message itself asked what"
-        " this repo does, do NOT ask them the purpose gap question. Read the README and code,"
-        " answer their question with your own summary, then ask 'Did I get that right -"
-        " anything to correct?' and store the confirmed summary as the purpose.",
-        "Where a gap carries an assumption, lead with it and ask the user to confirm or correct"
-        " it rather than asking open-ended what the scan can already half-answer - but a gap"
-        " may legitimately carry NO assumption (nothing in a repo predicts what the user plans"
-        " to do in it), and there you must ask openly and never invent one."
-        " bootstrap_context's result carries a `how_to_ask` field with the exact question shape"
-        " whenever it returns gaps; follow it then. It is deliberately NOT repeated here: this"
-        " block is injected on every context-less session start, including the skip path, where"
-        " gap-asking rules can never be used.",
-        "After any path completes, answer the user's original message - never leave it hanging.",
-    ]
+    from contexer import bootstrap
+    return [bootstrap.directive(repo_path, check_freshness=allow_git)]
 
 
 def _pl(n: int, word: str) -> str:
@@ -4661,20 +4549,9 @@ def _pl(n: int, word: str) -> str:
 
 def _build_resume_mining_context(repo_path: str) -> list[str]:
     return [
-        f"No project context stored for {repo_path}, but this is a RESUMED session -"
-        " the conversation above may already contain decisions. Do NOT show any setup"
-        " menu and do NOT quiz the user. Instead, in your FIRST response:",
-        "1. Review the visible conversation for decisions already made - technology"
-        " choices, constraints, conventions, approaches chosen over alternatives."
-        " Store each via update_context with the right subtype and the original reasoning.",
-        "2. Call bootstrap_context (no insight argument) - repo facts and measured conventions"
-        " are stored automatically; do NOT re-store them.",
-        "3. Tell the user in one line how many decisions were stored, e.g."
-        " 'Contexer: stored 4 decisions from this conversation.'",
-        "4. Then continue with the user's request as normal.",
-        "If the conversation contains no decisions, store nothing else yourself - the scan"
-        " already stored repo facts and conventions automatically; never invent decisions"
-        " that weren't actually discussed.",
+        "This is a RESUMED session. Continue the user's request; never invent decisions "
+        "that were not discussed. Capture actual conversation decisions via update_context.",
+        *_build_bootstrap_context(repo_path),
     ]
 
 
@@ -5005,9 +4882,10 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
 
     if source == "resume":
         if decisions:
+            from contexer import bootstrap
             return {
                 "status": f"Contexer: session resumed - {_pl(len(decisions), 'decision')} already loaded in conversation{reconcile_note}",
-                "context": "",
+                "context": bootstrap.directive(repo_path, data) if data.get("bootstrap_scan") else "",
             }
         # Best-effort: the flag only silences a duplicate bootstrap offer on the first
         # prompt. An unwritable ~/.contexer (sandboxed host, #152) must not cost the
@@ -5031,6 +4909,7 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
                     sys_parts.append(f"    {body}")
             sys_parts.append("")
         sys_parts.extend(_build_resume_mining_context(repo_path))
+        _arm_offer(repo_path)
         return {
             "status": f"Contexer: resumed with no stored context - mining this conversation for decisions{reconcile_note}",
             "context": "\n".join(sys_parts),
@@ -5108,7 +4987,8 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
             sys_parts.append(_pending_review_notice(len(reconsidering)))
         global_note = f" ({_pl(len(global_rules), 'global rule')} active)" if global_rules else ""
         return {
-            "status": f"Contexer: no context stored{global_note} - setup offer on next prompt{reconcile_note}",
+            "status": (f'Contexer: quick setup{global_note} - ask "Run Contexer bootstrap" to discover '
+                       f"this repo's decisions, rules, and conventions.{reconcile_note}"),
             "context": "\n".join(sys_parts),
         }
 
@@ -5119,7 +4999,9 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     with_proposals = [d for d in decisions
                       if (d.get("proposed_revision") or d.get("proposed_lifecycle"))
                       and entry_status(d) != "pending_approval"]
-    trusted = [d for d in decisions if entry_status(d) in ("approved", "suggested")]
+    inferred = [d for d in decisions if d.get("bootstrap") and d.get("approved_by") != "human"
+                and entry_status(d) == "suggested"]
+    trusted = [d for d in decisions if entry_status(d) in ("approved", "suggested") and d not in inferred]
     pre_loaded = [d for d in trusted if d.get("subtype") in ("convention", "constraint", "pattern")]
     deferred_count = len(trusted) - len(pre_loaded)
 
@@ -5166,6 +5048,19 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
             "If the current task conflicts with any of these decisions, "
             "surface the conflict and confirm with the developer before proceeding."
         )
+    if inferred:
+        from contexer import bootstrap
+        sys_parts.append("## Observed / AI-inferred context (not human-approved policy):")
+        for d in inferred[:8]:
+            sys_parts.append(f"- {d['content']} (id={d['id'][:8]})")
+            sys_parts.extend("    " + line for line in bootstrap.render(d, repo_path))
+        if len(inferred) > 8:
+            sys_parts.append(f"{len(inferred) - 8} more inferred findings available via get_context.")
+    if data.get("bootstrap_scan"):
+        from contexer import bootstrap
+        bootstrap_next = bootstrap.directive(repo_path, data, check_freshness=source != "resume")
+        if bootstrap_next:
+            sys_parts.append(bootstrap_next)
     if deferred_count > 0:
         arch_count = sum(1 for d in trusted if d.get("subtype") == "architecture")
         breakdown = f" ({arch_count} architecture)" if arch_count else ""
@@ -5305,50 +5200,24 @@ def session_from_hook_stdin(raw: str) -> str:
 
 
 def bootstrap_prompt_payload(repo_path: str, prompt: str = "") -> dict:
-    """Neutral UserPromptSubmit bootstrap-fallback content. {"status": "", "context": str}.
-    Empty context => emit nothing. Logic unchanged from get_bootstrap_context_prompt."""
+    """Read-only prompt fallback; never scan code or invoke Git on the prompt hot path."""
+    from contexer import bootstrap
     repo_path = hook_cwd_repo(repo_path)
     data = load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
-    if decisions:
+    if decisions and not data.get("bootstrap_scan") and not _offer_already_made(repo_path):
+        # An unrelated decision captured by another first-prompt hook is not evidence
+        # the bootstrap requested at SessionStart actually happened.
         return {"status": "", "context": ""}
-    resume_flag = sidecar_path("resume_mining")
-    if resume_flag.exists():
-        try:
-            flagged = resume_flag.read_text(encoding="utf-8").strip()
-        except Exception:
-            flagged = ""
-        if flagged == repo_path:
-            # Guarded like its twin in _local_session_start_payload (3806-3813): consuming
-            # the flag is bookkeeping, and this runs inside a `python -c` UserPromptSubmit
-            # hook with no try/except of its own. A read-only ~/.contexer (#152, Codex's
-            # managed sandbox) makes unlink raise PermissionError, which would replace the
-            # hook's JSON with a traceback - losing the whole injection over a flag whose
-            # only job is staying silent. Staying silent is exactly what we return anyway.
-            try:
-                resume_flag.unlink(missing_ok=True)
-            except OSError:
-                pass
+    try:
+        if _offer_flag(repo_path).read_text(encoding="utf-8") == "prompt":
             return {"status": "", "context": ""}
-    level, decisive = _cached_insight_read_only(repo_path)
-    repo_name = Path(repo_path).name if repo_path else ""
-    label = f'"{repo_name}"' if repo_name else "this repo"
-    if _is_newcomer_question(prompt):
-        # Answer-first at EVERY insight level (deterministic match): a repo question is
-        # answered, never met with a menu. The commit signal only tunes the phrasing.
-        # Not gated on the offer flag: this path shows no menu, it answers the question.
-        lines = [
-            "Contexer OVERRIDE - ignore any earlier bootstrap menu instructions for this turn.",
-            *_newcomer_answer_block(label, level, decisive),
-        ]
-    else:
-        if _offer_already_made(repo_path):
-            # SessionStart (or an earlier prompt) already offered this session. Re-injecting
-            # would re-open the picker the developer just dismissed, one modal per prompt.
-            return {"status": "", "context": ""}
-        _arm_offer(repo_path)
-        lines = _build_bootstrap_context(repo_path, allow_git=False)
-    return {"status": "", "context": "\n".join(lines)}
+    except (OSError, UnicodeError):
+        pass  # Missing, legacy or unreadable bookkeeping cannot suppress unfinished work.
+    context = bootstrap.directive(repo_path, data)
+    if context:
+        _arm_offer(repo_path, prompt=True)
+    return {"status": "", "context": context}
 
 
 def get_bootstrap_context_prompt(repo_path: str, prompt: str = "") -> dict:
@@ -5825,12 +5694,15 @@ def _rehydrate_working_set(repo_path: str, session_id: str) -> str:
         entry_id = e.get("id", "")[:8]
         id_tag = f" (id={entry_id})" if entry_id else ""   # _CONFLICT_GUIDE points at it
         title, body, extras = conflicts._conflict_view(e)
+        if e.get("bootstrap"):
+            from contexer import bootstrap
+            extras = bootstrap.render(e, repo_path) + (extras if conflicts.has_open_conflict(e) else [])
         lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag} {title}{id_tag}")
         if body is not None:
             lines.append(f"    {body}")
         for extra in extras:
             lines.append(f"    {extra}")
-        conflicted = conflicted or bool(extras)
+        conflicted = conflicted or conflicts.has_open_conflict(e)
     if not lines:
         return ""
     if conflicted:
@@ -6045,7 +5917,7 @@ def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
             lines.append(f"    {body}")
         for extra in extras:
             lines.append(f"    {extra}")
-        conflicted = conflicted or bool(extras)
+        conflicted = conflicted or conflicts.has_open_conflict(e)
     if conflicted:
         lines.append(f"\n{conflicts._CONFLICT_GUIDE}")
     return "\n".join(lines)
@@ -6585,6 +6457,9 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
             # has no replace_id path - so _conflict_view can only ever plain-render them.
             title, body, extras = conflicts._conflict_view(d)
             hit = file_hits.get(d.get("id")) if files else None
+            if d.get("bootstrap"):
+                from contexer import bootstrap
+                extras = bootstrap.render(d, repo_path) + (extras if conflicts.has_open_conflict(d) else [])
             scope = hit["scope"] if hit else "personal"
             lines.append(f"- [scope={scope}] [{d['timestamp'][:10]}]{subtype_tag}{status_tag}"
                          f"{update_tag}{_recur_suffix(d)} {title}{id_tag}{stale.get(d.get('id'), '')}")
@@ -7299,99 +7174,12 @@ def bootstrap_scan(repo_path: str, insight: str = "", mined: list | None = None)
 
 def bootstrap_apply(repo_path: str, session_id: str, insight: str = "",
                     repo_source: str = "") -> dict:
-    """Scan + mine + persist in one step: bootstrap_scan's read-only preview, made
-    idempotent and self-storing. This is the core-wiring entrypoint bootstrap_context
-    calls by default (apply=True) so a bootstrap actually writes something instead of
-    only ever returning a preview.
-
-    Stores exactly ONE consolidated "Stack: ..." decision for all inferred repo facts
-    (never one entry per fact - that would flood the store with ~15 near-useless
-    entries for a single scan) plus one decision per measured convention/pattern from
-    miner.mine_conventions, tier-gated: high tier is measured strongly enough to be
-    born approved (created_by='scan' already classifies auto -> approved via
-    _classify_level); medium tier is 'pending_approval' - NOT 'suggested', because
-    suggested entries inject at session start (merely tagged) and never surface in
-    review_pending, which is the opposite of what a 60-89% signal deserves: held out
-    of every session until the developer ratifies it in `contexer review`.
-    Mined items are skip-don't-bump on dedup - re-deriving the same measurement on a
-    later call is not an independent rediscovery, so occurrence_count is left alone."""
-    from contexer import miner              # function-level: mirrors _team_section's
-                                              # cycle-avoidance style used elsewhere here.
-    with store_lock(repo_slug(repo_path)):
-        mined = miner.mine_conventions(repo_path)
-        result = bootstrap_scan(repo_path, insight, mined=mined)
-        data = load(repo_path)
-        decisions = [e for e in data["entries"] if e["type"] == "decision"]
-        # A mined convention is re-derived from the repo on every bootstrap, so without the
-        # tombstone check a deleted one returns on the next session. Counted as `skipped`,
-        # exactly like a live-store duplicate.
-        tombstoned = _load_deleted(repo_path).get("entries", [])
-
-        skipped = 0
-        changed = False
-        # Ids of entries appended this call, by born status. Counts are derived from
-        # the post-trim survivors: near MAX_ENTRIES, _keep_top can evict a fresh entry
-        # (pin_last protects only the final one), and reporting an evicted entry as
-        # "stored" would be a lie.
-        new_approved: list[str] = []
-        new_pending: list[str] = []
-
-        # Consolidated stack entry - one sentence for every inferred fact, truncated to
-        # 400 chars at a "; " boundary so a dependency-heavy repo can't blow past a
-        # sane entry size.
-        if result["inferred"]:
-            sentence = "Stack: " + "; ".join(result["inferred"])
-            if len(sentence) > 400:
-                cut = sentence.rfind("; ", 0, 400)
-                sentence = sentence[:cut] if cut > 0 else sentence[:400]
-            if (_find_match(sentence, decisions) is None
-                    and _find_match(sentence, tombstoned) is None):
-                entry = _new_decision_entry(sentence, session_id, "architecture", created_by="scan")
-                if repo_source:
-                    entry["repo_source"] = repo_source
-                data["entries"].append(entry)
-                decisions.append(entry)
-                new_approved.append(entry["id"])
-                changed = True
-            else:
-                skipped += 1
-
-        # Mined conventions/patterns, one decision each. Appended to both `data["entries"]`
-        # and the local `decisions` list so later items in this same batch dedup against
-        # earlier ones (e.g. two near-identical mined stats never both get stored).
-        for item in mined:
-            if (_find_match(item["content"], decisions) is not None
-                    or _find_match(item["content"], tombstoned) is not None):
-                skipped += 1
-                continue
-            status = "" if item["tier"] == "high" else "pending_approval"
-            entry = _new_decision_entry(item["content"], session_id, item["subtype"],
-                                        created_by="scan", status=status)
-            if repo_source:
-                entry["repo_source"] = repo_source
-            data["entries"].append(entry)
-            decisions.append(entry)
-            changed = True
-            if item["tier"] == "high":
-                new_approved.append(entry["id"])
-            else:
-                new_pending.append(entry["id"])
-
-        stored, pending = len(new_approved), len(new_pending)
-        if changed:
-            data["entries"] = _keep_top(data["entries"], MAX_ENTRIES, pin_last=True)
-            surviving = {e["id"] for e in data["entries"]}
-            stored = sum(1 for i in new_approved if i in surviving)
-            pending = sum(1 for i in new_pending if i in surviving)
-            save(repo_path, data)
-            if pending:
-                touch_pending_review(repo_path)  # medium-tier items await review (after save)
-
-    return {**result, "stored": stored, "pending": pending, "skipped": skipped}
+    """Compatibility entrypoint: measured facts are context, never approval questions."""
+    from contexer import bootstrap
+    return bootstrap.run(repo_path, session_id, repo_source=repo_source)
 
 
-_MINER_VERIFY_TTL = 86400  # 24h - conventions don't drift fast enough to re-scan every session
-
+_MINER_VERIFY_TTL = 86400
 _SCAN_EVIDENCE_RE = re.compile(r"\s*\(\d{1,3}% of \d+[^)]*\)\s*$")
 
 

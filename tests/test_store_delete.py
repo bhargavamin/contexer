@@ -634,36 +634,25 @@ class TestResurrectionGuard:
         assert captured.out == ""
         assert captured.err == ""
 
-    def test_miner_bootstrap_does_not_resurrect(self, tmp_repo):
-        # Through bootstrap_apply, which is the miner's only write path.
+    def test_bootstrap_does_not_resurrect_deleted_observed_fact(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "mod.py").write_text(_snake_file(25), encoding="utf-8")
+        (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nrequires-python = ">=3.12"\n')
         store.bootstrap_apply(tmp_repo, SESSION)
-        mined = next(e for e in store.load(tmp_repo)["entries"]
-                     if "snake_case" in e["content"])
-
-        store.delete_decision(tmp_repo, mined["id"])
-
+        entry = store.load(tmp_repo)["entries"][0]
+        store.delete_decision(tmp_repo, entry["id"])
         result = store.bootstrap_apply(tmp_repo, SESSION)
-        assert result["stored"] == 0
-        assert result["skipped"] >= 1
-        assert not any("snake_case" in e["content"]
-                       for e in store.load(tmp_repo)["entries"])
+        assert result["outcomes"][0]["outcome"] == "protected_deleted"
+        assert not store.load(tmp_repo)["entries"]
 
-    def test_miner_bootstrap_does_not_resurrect_the_stack_entry(self, tmp_repo):
+
+    def test_legacy_deleted_stack_is_not_recreated_by_new_bootstrap(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "widgets-api"\nrequires-python = ">=3.12"\n'
-            'dependencies = ["fastapi", "sqlalchemy", "boto3"]\n', encoding="utf-8")
+        stored, did = store.update_decision(tmp_repo, "Stack: Python and FastAPI.", SESSION, created_by="scan")
+        assert stored
+        store.delete_decision(tmp_repo, did)
         store.bootstrap_apply(tmp_repo, SESSION)
-        stack = next(e for e in store.load(tmp_repo)["entries"]
-                     if e["content"].startswith("Stack: "))
+        assert not store.load(tmp_repo)["entries"]
 
-        store.delete_decision(tmp_repo, stack["id"])
-        store.bootstrap_apply(tmp_repo, SESSION)
-
-        assert not any(e["content"].startswith("Stack: ")
-                       for e in store.load(tmp_repo)["entries"])
 
     def test_unrelated_content_still_stores(self, tmp_repo):
         store.delete_decision(tmp_repo, _store_one(tmp_repo, CACHE_DECISION))

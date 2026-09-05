@@ -42,27 +42,21 @@ That third track is a recovery net, not complete capture.
 Contexer cannot see the agent's answers, so a reported conclusion is what the agent chose to report rather than something Contexer observed; it sees no test results and no diffs at all; and on Cursor it sees your prompts but not your file edits.
 `contexer status` prints a `coverage:` line per connected tool saying exactly this, stating a capability rather than a count so a missing hook can never look like a quiet session.
 
-## Bootstrap: establishing trusted knowledge
+## Bootstrap: useful context without an approval interview
 
-When Contexer is used on a repository for the first time, it analyzes the project — measuring real conventions from configs, source statistics, and git history — and proposes a small set of engineering questions only a human can answer.
+Bootstrap scans code/configuration and Markdown together, saves observed facts automatically,
+and asks the host agent to submit grounded interpretations with exact source excerpts.
+AI-inferred context is usable in later sessions, clearly labeled provisional and scoped; it
+cannot override human decisions, enforce checks, or qualify as human-approved automatic sharing.
 
-Examples:
+Only concrete material conflicts require clarification. The agent shows both sides with
+evidence; otherwise it lists what was saved and offers an optional correction invitation.
+An explicit correction versions the original capture rather than creating a disconnected copy.
 
-- Should infrastructure always be deployed with Terraform?
-- Is PostgreSQL the standard database?
-- Are deployments multi-cloud?
-
-Developers confirm or refine the answers. These approved decisions become the initial engineering knowledge for the repository.
-
-The offer is a numbered list of at most four options, asked as an interactive multiple-choice question where the host has one (Claude Code's `AskUserQuestion`) and as plain numbered text elsewhere. Answer with the number or with the keyword. Which options lead adapts to how well you know the repo, judged from its git history:
-
-- The repo has commits from you → **quick** (one question) and **full** (guided setup) lead, with **scan** kept for "I'm actually new to this repo" (scan plus one short question).
-- No commits from your git email (e.g. a freshly cloned project) → **scan** leads: it reads the code and docs to propose decisions, and asks one short question — what you plan to do here — instead of quizzing you on a repo you may not know.
-- Can't tell → it simply asks how well you know the repo, and its **scan** row ("I didn't build it, or it's my first time") asks up to two short questions: what you plan to do here, and what the repo does.
-
-The questions in guided setup are asked the same way: one at a time, each ending in an option to skip that one. A question leads with the scan's assumption to confirm only where that assumption actually answers it, and offers alternatives only where there are distinct ones to offer — otherwise it is simply asked openly.
-
-**Resumed sessions** (Claude Code's `--resume` / `--continue`) don't repeat any of this. The context is already in the conversation. If you installed Contexer mid-project, resuming an old session makes the agent mine that conversation for decisions already made and store them, no questions asked.
+The scan stays incomplete until the host submits its interpretation report. Changed evidence,
+unsupported hypotheses and historical documents cannot silently become current policy. External
+Markdown is read only from user-authorized locations. See [Bootstrap](bootstrap_context.md) for
+the source contract, bounded coverage, completion semantics and limitations.
 
 ## At session start
 
@@ -82,7 +76,7 @@ Before editing a file, an assistant can also ask Contexer which of your decision
 
 ## Trust and review
 
-AI-proposed architecture and constraint decisions — and any change to a decision you have already approved — are held for your review instead of being trusted automatically. They are stored, but not replayed into AI sessions until you approve them (`contexer review`).
+Outside the explicitly labeled bootstrap-context lane, AI-proposed architecture and constraint decisions — and any change to a decision you have already approved — are held for your review instead of being trusted automatically. They are stored, but not replayed into AI sessions until you approve them (`contexer review`).
 
 Approved decisions are versioned: a change never overwrites the previous value — it creates a new revision and the full history is preserved. AI sessions always replay the latest approved revision.
 
