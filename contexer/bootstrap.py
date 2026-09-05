@@ -470,7 +470,9 @@ def _human(entry: dict) -> bool:
 
 def _heads(entries: list[dict]) -> dict[str, str]:
     """Bind interpretation to policy/content, including legacy in-place approval changes."""
-    return {e["id"]: _digest([revisions.current_revision(e), store.entry_status(e),
+    # Applicability is a projection, not a decision mutation. Preserve the legacy
+    # missing-status default without making freshness bookkeeping invalidate reports.
+    return {e["id"]: _digest([revisions.current_revision(e), e.get("status", "approved"),
                               e.get("approved_by"), e.get("proposed_revision"),
                               e.get("proposed_lifecycle")]) for e in entries}
 
