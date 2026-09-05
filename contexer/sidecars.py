@@ -130,7 +130,7 @@ KINDS: tuple[Kind, ...] = (
     Kind("reconcile_log",    ".reconcile_{slug}.jsonl",    SESSION,   "per-repo reconciliation receipt log, tail-capped"),
     Kind("bootstrap_offered", ".bootstrap_offered_{slug}", SESSION,   "once-per-session offer flag"),
     Kind("edited_files",     ".edited_{slug}.json",        SESSION,   "recent edits; freshness window is 30 min"),
-    Kind("resume_mining",    ".resume_mining",             SESSION,   "consumed on the first prompt"),
+    Kind("resume_mining",    ".resume_mining",             SESSION,   "legacy resume marker; no producer, retained for GC"),
     Kind("pending_capture",  ".pending_capture",           SESSION,   "post-write flag; consumed by the next prompt"),
     Kind("gemini_capture",   ".gemini_pending_capture",     SESSION,   "Gemini's own post-write flag, namespaced "
                                                                       "so it cannot collide with Claude's"),
@@ -151,7 +151,7 @@ KINDS: tuple[Kind, ...] = (
     Kind("team_seen",        ".team_seen_{slug}_{consumer}.json", COLD_REPO,
                                                                      "per-consumer high-water mark; re-inits to head"),
     Kind("memory_synced",    ".memory_synced_{slug}",      COLD_REPO, "memory-import fingerprint; one re-import"),
-    Kind("insight",          ".insight_{slug}",            COLD_REPO, "git-insight cache; ~6 git calls to rebuild"),
+    Kind("insight",          ".insight_{slug}",            COLD_REPO, "legacy familiarity cache; no producer, retained for GC"),
     Kind("anchor_verify",    ".anchor_verify_{slug}",      COLD_REPO, "anchor-verification TTL stamp"),
     Kind("miner_verify",     ".miner_verify_{slug}",       COLD_REPO, "scan-convention TTL stamp"),
     Kind("spool_maintained", ".spool_maintained_{slug}",   COLD_REPO, "spool retention/orphan-sweep TTL "

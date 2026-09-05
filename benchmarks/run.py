@@ -69,7 +69,9 @@ def _condition_b_setup(repo: str, home: Path, seed_decision: str, source: Path =
     src = source or Path(__file__).resolve().parent.parent
     subprocess.run(["uv", "run", "contexer", "install"], env=env, check=True,
                    capture_output=True, cwd=src)
-    code = f"from contexer import store\nstore.bootstrap_apply({repo!r}, 'bench-seed')\n"
+    # Use the stable tool surface so campaigns can also target pre-redesign versions.
+    code = (f"from contexer import server, store\n"
+            f"server.bootstrap_context(repo_path={repo!r})\n")
     if seed_decision:
         code += (f"store.update_decision({repo!r}, {seed_decision!r}, 'bench-seed', "
                  "'constraint', created_by='human')\n")

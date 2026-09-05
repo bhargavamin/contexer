@@ -134,7 +134,7 @@ class TestClassification:
         "reconcile_log":    (None, {"slug": None}),          # reconcile builds through filename
         "bootstrap_offered": ("store._offer_flag", {"slug": None}),
         "edited_files":     ("store._edited_files_path", {"slug": None}),
-        "resume_mining":    (None, {}),                      # built inline at two session-start sites
+        "resume_mining":    (None, {}),                      # legacy GC-only marker
         "pending_capture":  (None, {}),                      # adapters/claude.py touches it
         "gemini_capture":   (None, {}),                      # adapters/gemini.py marker helper
         "gemini_reload":    (None, {}),
@@ -143,7 +143,7 @@ class TestClassification:
         "team_cache":       ("team_context._cache_path", {"slug": None}),
         "team_seen":        ("team_context._seen_path", {"slug": None, "consumer": "claude"}),
         "memory_synced":    (None, {"slug": None}),          # adapters/claude.py sync_memory
-        "insight":          ("store._insight_cache_path", {"slug": None}),
+        "insight":          (None, {"slug": None}),
         "anchor_verify":    ("anchors._anchor_verify_stamp_path", {"slug": None}),
         "miner_verify":     ("store._miner_verify_stamp_path", {"slug": None}),
         "spool_maintained": ("spool._maintenance_stamp", {"slug": None}),

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from contexer import store
+from contexer import bootstrap, store
 from tests.conftest import redirect_store_dir
 from contexer import cli
 
@@ -37,36 +37,6 @@ def tmp_repo(tmp_path, monkeypatch):
     """Redirects STORE_DIR to a temp path and returns a fake repo path."""
     redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     return str(tmp_path / "myrepo")
-
-
-@pytest.fixture
-def git_repo(tmp_path, monkeypatch):
-    """Real git repo with global/system git config isolated; returns its path."""
-    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
-    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
-    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
-    repo = tmp_path / "gitrepo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-    return str(repo)
-
-
-ME = "me@test.local"
-OTHER = "other@test.local"
-
-
-def _git_commit(repo: str, email: str, n: int = 1) -> None:
-    for i in range(n):
-        (Path(repo) / f"{email.split('@')[0]}-{i}.txt").write_text(f"{email}-{i}")
-        subprocess.run(["git", "add", "."], cwd=repo, check=True)
-        subprocess.run(
-            ["git", "-c", f"user.email={email}", "-c", "user.name=T",
-             "-c", "commit.gpgsign=false", "commit", "-q", "-m", f"c-{i}"],
-            cwd=repo, check=True)
-
-
-def _set_me(repo: str) -> None:
-    subprocess.run(["git", "config", "user.email", ME], cwd=repo, check=True)
 
 
 SESSION = "e2e-session"
@@ -372,121 +342,7 @@ class TestBootstrapInstructions:
         assert "incomplete until that report is saved" in text
 
 
-# ── 4d. Offer variants by detected insight ────────────────────────────────────
-
-class TestOfferVariants:
-
-
-
-
-
-
-
-
-
-
-
-    def test_gap_options_are_optional_when_the_hint_names_no_candidates(self):
-        """Half the real hints are one comma-list or a restatement of the question; forcing two
-        middle options out of them produces junk choices."""
-        guide = store.GAP_ASK_GUIDE
-        assert "ONLY if the gap's `hint` names distinct candidate answers" in guide
-        assert "lists one answer's parts" in guide, \
-            "a comma-list belonging to one answer must not be split into rival options"
-        assert "stands complete without them" in guide, \
-            "zero middle options must be a valid rendering"
-
-
-    def test_gap_questions_are_asked_one_at_a_time_as_pickers(self):
-        guide = store.GAP_ASK_GUIDE
-        assert "ONE question at a time, never batched" in guide, \
-            "batching gaps would skip the re-evaluation that drops later gaps"
-        assert "Skip this one" in guide and "Never more than 4 options" in guide
-        assert "ANSWERS THE QUESTION" in guide, \
-            "storing the assumption's own wording answers a different question than the gap asked"
-        assert "never the assumption's own wording" in guide
-
-    def test_correct_option_is_gated_on_the_assumption_answering_the_question(self):
-        """Most assumptions are scan observations that answer their gap. A gap no repo signal
-        can pre-answer now ships with no assumption at all, so the rule reduces to: no
-        assumption, no 'Correct' option."""
-        guide = store.GAP_ASK_GUIDE
-        assert "ONLY when that assumption actually answers the gap's question" in guide
-        assert "no assumption" in guide
-
-    def test_guide_directs_the_model_to_read_the_enumerated_context_files(self):
-        """Docs shape the QUESTION, never the store. A rule file that already answers a gap
-        turns it from an open question into confirm-or-correct - and only the developer's
-        confirmed answer is stored, never the quoted line."""
-        guide = store.GAP_ASK_GUIDE
-        assert "`context_docs`" in guide, \
-            "must name the doc-only list, not existing_context_files - that one holds lockfiles" \
-            " and literal glob strings like '.eslintrc*' the model cannot read"
-        assert "confirm or correct" in guide
-        assert "never the quote" in guide
-
-    def test_guide_allows_exactly_one_added_question_the_contradiction(self):
-        """The no-added-questions rule and the doc-vs-measurement check collided: a
-        contradiction question is by definition not one of the returned gaps, so it IS an
-        addition. The guide must carve it out explicitly or the model picks a rule at random."""
-        guide = store.GAP_ASK_GUIDE
-        assert "ONE addition" in guide and "only this one" in guide
-        assert "`measured_conventions`" in guide, \
-            "the check is unexecutable unless the measurements ride the same payload"
-
-    def test_measured_conventions_ride_the_bootstrap_result(self, tmp_repo):
-        """bootstrap_apply mined these for gap suppression and threw them away; the guide's
-        contradiction check needs both sides in one payload."""
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        mined = [{"content": "Functions use type hints (61% of 556 functions)",
-                  "subtype": "convention", "tier": "medium"}]
-        result = store.bootstrap_scan(tmp_repo, insight="high", mined=mined)
-        assert result["measured_conventions"] == ["Functions use type hints (61% of 556 functions)"]
-
-
-
-
-
-
-
-# ── 4f. Deterministic newcomer-question detection ─────────────────────────────
-
 class TestNewcomerQuestionDetection:
-    @pytest.mark.parametrize("prompt", [
-        "what is this repo doing?",
-        "what is repo doing?",          # article-less - the reported miss
-        "what does project do",         # article-less
-        "What does this project do?",
-        "explain this codebase",
-        "tell me about this repo",
-        "how does this code work",
-        "walk me through this codebase please",
-        "give me an overview of this project",
-        "whats this repo about",
-        # summarize variants - the original misfiring report
-        "summarize this repo",
-        "summarize the codebase",
-        "summarize this project",
-        "can you summarize this repo?",
-        "please summarize the code",
-        "summary of this repo",
-        "give me a summary of this project",
-    ])
-    def test_newcomer_questions_match(self, prompt):
-        assert store._is_newcomer_question(prompt) is True
-
-    @pytest.mark.parametrize("prompt", [
-        "fix the bug in store.py",
-        "add a logout endpoint to the api",
-        "why did we choose uv over pip?",
-        "what is this function doing",  # code-element question, not repo-level
-        "refactor the elevator scheduling logic",
-        "summarize the changes in the last commit",  # not repo-level
-        "",
-    ])
-    def test_other_prompts_do_not_match(self, prompt):
-        assert store._is_newcomer_question(prompt) is False
-
     def test_newcomer_prompt_overrides_menu(self, tmp_repo):
         ctx = store.bootstrap_prompt_payload(tmp_repo, "summarize this repo")["context"]
         assert "Continue the user's task" in ctx
@@ -642,99 +498,6 @@ class TestResumeSessionStart:
 
 # ── 4h. Reaction-matrix invariants ────────────────────────────────────────────
 
-class TestReactionMatrix:
-    """Every combination of repo state × insight must keep the conversation sane:
-    bounded question counts, well-formed gaps, and a handler for every advertised option."""
-
-    def _repo_states(self, tmp_path):
-        bare = tmp_path / "bare"
-        bare.mkdir()
-        simple = tmp_path / "simple"
-        simple.mkdir()
-        (simple / "main.py").write_text("print('hi')\n")
-        rich = tmp_path / "rich"
-        rich.mkdir()
-        (rich / "pyproject.toml").write_text(
-            '[project]\nname = "x"\ndependencies = ["fastapi", "stripe", "boto3", '
-            '"httpx", "pydantic", "sqlalchemy"]\n')
-        missing = tmp_path / "never-created"
-        return [str(bare), str(simple), str(rich), str(missing)]
-
-    def test_gap_invariants_hold_for_all_combinations(self, tmp_path, monkeypatch):
-        redirect_store_dir(monkeypatch, tmp_path / ".contexer")
-        for repo in self._repo_states(tmp_path):
-            for insight in ["low", "medium", "high", "", "banana"]:
-                result = store.bootstrap_scan(repo, insight=insight)
-                gaps = result["gaps"]
-                label = f"{Path(repo).name} × insight={insight!r}"
-                assert 1 <= len(gaps) <= 8, f"{label}: {len(gaps)} gaps"
-                assert result["insight"] in {"low", "medium", "high"}, label
-                for g in gaps:
-                    assert g["question"].rstrip().endswith("?"), f"{label}: {g['question']!r}"
-                    assert g["subtype"] in {"architecture", "constraint", "pattern", "convention"}, label
-                    assert g["min_insight"] in {"low", "medium", "high"}, label
-                    assert g["hint"], label
-                    # assumption is optional (the goal gap has none); an empty one would
-                    # render as a blank "Correct" option, so present means non-empty.
-                    assert g.get("assumption", "x"), label
-
-    def test_every_repository_state_scans_without_familiarity_gate(self, tmp_path, monkeypatch):
-        redirect_store_dir(monkeypatch, tmp_path / ".contexer")
-        for repo in self._repo_states(tmp_path):
-            text = "\n".join(store._build_bootstrap_context(repo))
-            assert "call bootstrap_context now" in text
-            assert "without asking setup permission or familiarity" in text
-            assert "How well do you know" not in text
-            assert repo in text
-
-
-# ── 4e. Insight detection from git signals ────────────────────────────────────
-
-class TestInsightDetection:
-    def test_plain_dir_without_git_is_ambiguous(self, tmp_repo):
-        assert store._detect_insight(tmp_repo) == ("low", False)
-
-    def test_no_user_email_is_ambiguous_never_high(self, git_repo):
-        """The --author='' trap: empty email must not match every commit."""
-        _git_commit(git_repo, OTHER, 6)
-        assert store._detect_insight(git_repo) == ("low", False)
-
-    def test_empty_repo_with_email_is_creator(self, git_repo):
-        _set_me(git_repo)
-        assert store._detect_insight(git_repo) == ("high", True)
-
-    def test_first_commit_author_is_high_regardless_of_count(self, git_repo):
-        _git_commit(git_repo, ME, 1)
-        _git_commit(git_repo, OTHER, 6)
-        _set_me(git_repo)
-        assert store._detect_insight(git_repo) == ("high", True)
-
-    def test_five_own_commits_is_high_decisive(self, git_repo):
-        _git_commit(git_repo, OTHER, 1)
-        _git_commit(git_repo, ME, 5)
-        _set_me(git_repo)
-        assert store._detect_insight(git_repo) == ("high", True)
-
-    def test_few_commits_is_medium_nondecisive(self, git_repo):
-        _git_commit(git_repo, OTHER, 1)
-        _git_commit(git_repo, ME, 2)
-        _set_me(git_repo)
-        assert store._detect_insight(git_repo) == ("medium", False)
-
-    def test_zero_commits_in_local_repo_is_ambiguous(self, git_repo):
-        """Could be an email mismatch in the user's own repo - must ask, not conclude."""
-        _git_commit(git_repo, OTHER, 3)
-        _set_me(git_repo)
-        assert store._detect_insight(git_repo) == ("low", False)
-
-    def test_fresh_clone_is_low_decisive(self, git_repo, tmp_path):
-        _git_commit(git_repo, OTHER, 3)
-        clone = tmp_path / "clone"
-        subprocess.run(["git", "clone", "-q", git_repo, str(clone)], check=True)
-        subprocess.run(["git", "config", "user.email", ME], cwd=clone, check=True)
-        assert store._detect_insight(str(clone)) == ("low", True)
-
-
 # ── 5. Constraint capture ─────────────────────────────────────────────────────
 
 class TestConstraintCapture:
@@ -886,18 +649,6 @@ class TestPatternPromotion:
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert entry["subtype"] == "architecture"
         assert entry.get("occurrence_count") == 2
-
-    def test_bootstrap_scan_no_longer_produces_pattern_gap_for_web_framework_repo(self, tmp_repo):
-        # Validation-placement and error-handling were the only "pattern" gaps, and both
-        # were deleted (bootstrap redesign): they're now measured by the miner instead
-        # of asked. A web-framework repo must no longer produce a pattern gap.
-        Path(tmp_repo).mkdir()
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "api"\ndependencies = ["fastapi", "boto3", "stripe"]\n'
-        )
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        pattern_gaps = [g for g in result["gaps"] if g["subtype"] == "pattern"]
-        assert not pattern_gaps, "validation/error-handling gaps were removed in favor of mining"
 
     def test_distinct_session_ids_tracked(self, tmp_repo):
         """Each hit from a new session is recorded; same session is not double-listed."""
@@ -1134,102 +885,13 @@ class TestRationaleInjection:
         assert result == "", f"Expected silence for: {prompt!r}"
 
 
-# ── 10. Bootstrap scan ────────────────────────────────────────────────────────
-
-class TestBootstrapScan:
-    def test_returns_dict_with_inferred_and_gaps(self, tmp_repo):
-        result = store.bootstrap_scan(tmp_repo)
-        assert isinstance(result, dict)
-        assert "inferred" in result
-        assert "gaps" in result
-
-    def test_inferred_and_gaps_are_lists(self, tmp_repo):
-        result = store.bootstrap_scan(tmp_repo)
-        assert isinstance(result["inferred"], list)
-        assert isinstance(result["gaps"], list)
-
-    def test_insight_auto_detected_when_not_given(self, tmp_repo):
-        result = store.bootstrap_scan(tmp_repo)
-        assert result["insight_source"] == "auto"
-        assert result["insight"] == "low" and result["decisive"] is False  # no .git → ambiguous
-
-    def test_invalid_insight_triggers_auto_detect(self, tmp_repo):
-        result = store.bootstrap_scan(tmp_repo, insight="banana")
-        assert result["insight_source"] == "auto"
-
-    def test_user_supplied_insight_is_decisive(self, tmp_repo):
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        assert result["insight_source"] == "user" and result["decisive"] is True
-
-    def test_low_insight_gets_single_goal_question(self, tmp_repo):
-        """First-timers can't answer insider questions - only their own goal is askable."""
-        result = store.bootstrap_scan(tmp_repo, insight="low")
-        assert len(result["gaps"]) == 1
-        assert "planning to do" in result["gaps"][0]["question"]
-
-    def test_medium_insight_gets_goal_and_purpose_only(self, tmp_repo):
-        result = store.bootstrap_scan(tmp_repo, insight="medium")
-        questions = [g["question"] for g in result["gaps"]]
-        assert len(questions) == 2
-        assert any("planning to do" in q for q in questions)
-        assert any("What does this repo do" in q for q in questions)
-
-    def test_high_insight_gets_no_goal_question(self, tmp_repo):
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        assert not any("planning to do" in g["question"] for g in result["gaps"])
-
-    def test_low_insight_gets_no_insider_questions(self, tmp_repo):
-        """Questions about conventions, compliance, CI, or exclusions assume repo authorship."""
-        Path(tmp_repo).mkdir()
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "big-app"\ndependencies = ["fastapi", "sqlalchemy", '
-            '"boto3", "stripe", "httpx", "pydantic"]\n'
-        )
-        high = store.bootstrap_scan(tmp_repo, insight="high")
-        low = store.bootstrap_scan(tmp_repo, insight="low")
-        assert len(high["gaps"]) > 1, "high insight should get intent questions for a production-signal repo"
-        assert len(low["gaps"]) == 1, "low insight must never get insider questions"
-
-    def test_low_insight_still_infers_facts_from_code(self, tmp_repo):
-        Path(tmp_repo).mkdir()
-        (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "some-lib"\n')
-        result = store.bootstrap_scan(tmp_repo, insight="low")
-        assert any("some-lib" in f for f in result["inferred"])
-
-    def test_full_on_bare_repo_still_interviews(self, tmp_repo):
-        """'full' is explicit opt-in to an interview - a simple repo must not collapse it
-        to a single question; the author's head holds decisions no scan can reach.
-        Floor is 3 (not 4): the generic "conventions" filler is redundant once mining
-        measures conventions directly, so the un-mined bootstrap_scan() path here still
-        gets it, but the guaranteed minimum itself dropped by one."""
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        assert len(result["gaps"]) >= 3
-        subtypes = {g["subtype"] for g in result["gaps"]}
-        assert {"architecture", "convention"} <= subtypes
-
-    def test_signal_rich_repo_gets_no_interview_padding(self, tmp_repo):
-        Path(tmp_repo).mkdir()
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "big-app"\ndependencies = ["fastapi", "sqlalchemy", '
-            '"boto3", "stripe", "httpx", "pydantic"]\n'
-        )
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        assert len(result["gaps"]) >= 4
-        assert not any("aren't visible in it" in g["question"] for g in result["gaps"]), \
-            "signal-rich repos have real questions - generic interview padding not needed"
-
-    def test_interview_floor_not_applied_below_high(self, tmp_repo):
-        assert len(store.bootstrap_scan(tmp_repo, insight="low")["gaps"]) == 1
-        assert len(store.bootstrap_scan(tmp_repo, insight="medium")["gaps"]) == 2
-
-
-# ── 10b. bootstrap_apply flow (bootstrap redesign - core wiring) ─────────────
+# ── 10b. Bootstrap persistence flow (bootstrap redesign - core wiring) ─────────────
 
 class TestBootstrapApplyFlow:
     def test_session_after_scan_has_inferred_context_and_completion_directive(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nrequires-python = ">=3.12"\n')
-        store.bootstrap_apply(tmp_repo, "sess-flow")
+        bootstrap.run(tmp_repo, "sess-flow")
         ctx = store.session_start_payload(tmp_repo)["context"]
         assert "Python requirement is >=3.12" in ctx
         assert "not human-approved policy" in ctx

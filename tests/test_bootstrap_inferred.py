@@ -584,6 +584,41 @@ def disputed_rules(project):
 
 
 @pytest.mark.parametrize("first", [None, 0, 1])
+def test_range_counterpart_links_both_rules_across_batches(project, first):
+    scan, rows = disputed_rules(project)
+    rows[0]["sources"][-1] = ref(project, "ARCHITECTURE.md", 2, 3)
+    if first is not None:
+        scan = bootstrap.run(str(project), "test", snapshot_id=scan["snapshot_id"], findings=[rows[first]])
+    receipt = finish(project, scan, [r for i, r in enumerate(rows) if i != first])
+    assert len(receipt["clarifications"]) == 1
+    assert len(receipt["clarifications"][0]["decisions"]) == 2
+    entries = store.load(str(project))["entries"]
+    assert next(e for e in entries if "Never log" in e["content"])["status"] == "suggested"
+
+
+def test_ambiguous_range_requires_explicit_counterpart_not_unrelated_rule(project):
+    scan, rows = disputed_rules(project)
+    rows[0]["sources"][-1] = ref(project, "ARCHITECTURE.md", 2, 4)
+    before = store.load(str(project))
+    with pytest.raises(ValueError, match="Ambiguous counterpart"):
+        finish(project, scan, rows)
+    assert store.load(str(project)) == before
+    rows[0]["against_candidate_ids"] = [rows[1]["candidate_id"]]
+    receipt = finish(project, scan, rows)
+    assert len(receipt["clarifications"][0]["decisions"]) == 2
+    entries = store.load(str(project))["entries"]
+    assert next(e for e in entries if "Never log" in e["content"])["status"] == "suggested"
+
+
+@pytest.mark.parametrize("selected", ["bad", [], ["nonexistent"], [1]])
+def test_invalid_counterpart_selection_rejected(project, selected):
+    scan, rows = disputed_rules(project)
+    rows[0]["against_candidate_ids"] = selected
+    with pytest.raises(ValueError, match="against_candidate_ids"):
+        finish(project, scan, rows)
+
+
+@pytest.mark.parametrize("first", [None, 0, 1])
 def test_document_dispute_keeps_both_prescriptions_pending_in_any_batch_order(project, first):
     scan, rows = disputed_rules(project)
     if first is not None:

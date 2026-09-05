@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from contexer import memory_sync, revisions, store
+from contexer import bootstrap, memory_sync, revisions, store
 
 SESSION = "test-delete-session"
 
@@ -25,12 +25,6 @@ def _store_one(repo: str, content: str, **kwargs) -> str:
 
 def _live_ids(repo: str) -> list[str]:
     return [e["id"] for e in store.load(repo)["entries"] if e["type"] == "decision"]
-
-
-def _snake_file(n_snake: int) -> str:
-    """A Python module of snake_case functions — enough for the miner to measure a
-    naming convention at the high tier (mirrors test_store.py's helper)."""
-    return "\n".join(f"def fn_snake_{i}():\n    pass\n" for i in range(n_snake))
 
 
 @pytest.fixture
@@ -637,10 +631,10 @@ class TestResurrectionGuard:
     def test_bootstrap_does_not_resurrect_deleted_observed_fact(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nrequires-python = ">=3.12"\n')
-        store.bootstrap_apply(tmp_repo, SESSION)
+        bootstrap.run(tmp_repo, SESSION)
         entry = store.load(tmp_repo)["entries"][0]
         store.delete_decision(tmp_repo, entry["id"])
-        result = store.bootstrap_apply(tmp_repo, SESSION)
+        result = bootstrap.run(tmp_repo, SESSION)
         assert result["outcomes"][0]["outcome"] == "protected_deleted"
         assert not store.load(tmp_repo)["entries"]
 
@@ -650,7 +644,7 @@ class TestResurrectionGuard:
         stored, did = store.update_decision(tmp_repo, "Stack: Python and FastAPI.", SESSION, created_by="scan")
         assert stored
         store.delete_decision(tmp_repo, did)
-        store.bootstrap_apply(tmp_repo, SESSION)
+        bootstrap.run(tmp_repo, SESSION)
         assert not store.load(tmp_repo)["entries"]
 
 

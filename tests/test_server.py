@@ -640,13 +640,15 @@ def test_bootstrap_context_delegates_grounded_report(monkeypatch):
     assert calls[0][1]["findings"] is None
 
 
-def test_bootstrap_preview_does_not_apply(monkeypatch):
+@pytest.mark.parametrize("source_paths", [None, ["billing.py"]])
+def test_bootstrap_preview_does_not_apply(monkeypatch, source_paths):
     from contexer import bootstrap
     calls = []
     monkeypatch.setattr(server.store, "resolve_repo_verbose", lambda p: ("/repo/x", "argument"))
     monkeypatch.setattr(bootstrap, "run", lambda *a, **k: calls.append(k) or {})
-    server.bootstrap_context("/repo/x", apply=False)
-    assert calls == [{"apply": False, "snapshot_id": "", "findings": None, "finish": False, "external_paths": None, "repo_source": "argument"}]
+    server.bootstrap_context("/repo/x", apply=False, source_paths=source_paths)
+    assert calls == [{"apply": False, "snapshot_id": "", "findings": None, "finish": False,
+                     "external_paths": None, "source_paths": source_paths, "repo_source": "argument"}]
 
 
 # ── capture_lint: bounce narrative-shaped AI captures ───────────────────────

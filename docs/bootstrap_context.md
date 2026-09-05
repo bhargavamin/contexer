@@ -26,7 +26,8 @@ guarantee execution by a host agent that ignores tool instructions or has disabl
 4. Only concrete material discrepancies enter clarification. Both sides and one focused question
    are shown; unrelated findings remain usable. Agreement with code is not human approval.
    Conflicting documented prescriptions stay pending together, even if code supports one.
-   Exact counterpart citations link them into one evidence-backed choice in `clarifications`;
+   Exact excerpts containing the counterpart line link them into one evidence-backed choice in `clarifications`;
+   ambiguous multi-candidate ranges require explicit `against_candidate_ids`;
    unchanged disputes are not asked again. A human answer is applied explicitly to each affected
    decision, never inferred from which implementation happens to exist.
 5. The agent lists what was actually saved, with evidence links and an optional “Anything to change?”
@@ -61,7 +62,8 @@ deliberately ignored/deleted decision.
 Source fingerprints include uncommitted changes. A scan with changed/added/removed sources,
 or changed decision revisions, cannot accept an old interpretation report. Rescanning withholds
 old inferred context whose evidence changed, disappeared, or left the authorized scope. A valid
-re-analysis can reactivate it; human decisions are never silently withdrawn by this mechanism.
+re-analysis or exact restoration of all original source fingerprints can reactivate evidence-stale
+context. Historical/unsupported findings and human dismissals never auto-reactivate; human decisions are never silently withdrawn by this mechanism.
 Session start checks applicability before rendering inferred claims and persists derived
 withholding for later prompt retrieval. It does not wait for a busy store lock; unavailable
 freshness or an unwritable store produces a conservative withheld rendering, not stale guidance.
@@ -88,8 +90,24 @@ comparison currently supports an unambiguous root Ruff line-length rule; other s
 comparisons are the host agent's evidence-backed interpretation. Citation validation proves
 the cited text exists, not that every interpretation of it is correct.
 
-Budgets: 160 files, 100 KB/file, 2 MB source text, 20 nominated document rules, 40 findings/batch
+Automatic facts currently cover Python requirements/dependencies, Node requirements/dependencies,
+and Ruff line length. Unlike the previous bootstrap, this path does **not** run the convention
+miner's AST percentages, import/test patterns or commit-style measurements. These require host
+inspection/reporting; no equivalent deterministic coverage is claimed. The miner remains for
+re-verifying eligible legacy scan records, with an early return before mining when none exist.
+There is no automatic promotion of new inferences to human-approved rules.
+
+Budgets: 160 files, normally 100 KB/file, 2 MB total source text, 20 nominated document rules, 40 findings/batch
 and 80 findings/scan. Evidence excerpts are at most 20 lines/2000 characters, eight per finding.
+For focused recovery, start a new scan with `source_paths=["contexer/store.py"]` (up to 20
+repository-relative paths). These files receive priority and may be up to 2 MB each, still
+within the total snapshot budget. Focus is remembered; [] clears it. Files larger than 2 MB
+remain outside supported citation coverage. Changing focus starts a new interpretation snapshot.
+Discovery limits are not proof that old evidence disappeared: prior citations get an independent
+bounded fingerprint recheck. If that separate 2 MB budget is exhausted, existing context is
+labeled freshness-unverified, not silently withdrawn or declared current. Focused scans can
+recheck and re-analyze skipped sources; actual changes, deletion, symlinks or revoked external
+authorization still withhold affected inferences.
 Dependency/build trees, symlinks, generated documents and unsupported file formats are skipped.
 Coverage and omissions are returned explicitly. Existing decision previews are capped; the
 agent retrieves full relevant decisions through `get_context`.
@@ -101,7 +119,7 @@ by an earlier successful scan remain saved.
 ## API
 
 `bootstrap_context(repo_path=..., apply=false)` previews without saving decisions or consuming
-the external-document invitation. The legacy `insight` argument remains accepted but never gates
-discovery or starts familiarity questions. No additional model account or background LLM is
+the external-document invitation. The obsolete `insight` parameter and familiarity questionnaire
+are removed; callers should omit it. No additional model account or background LLM is
 required: the connected host agent performs interpretation. A host that does not execute the
 requested tool workflow cannot complete semantic bootstrap; Contexer keeps that work incomplete.
