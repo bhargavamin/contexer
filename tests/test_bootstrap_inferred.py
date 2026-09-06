@@ -150,15 +150,19 @@ def test_fabricated_or_invalid_evidence_is_rejected_atomically(project, mutate):
     assert store.load(str(project)) == before
 
 
-def test_uncommitted_source_change_rejects_report_and_marks_existing_inference_stale(project):
+def test_uncommitted_source_change_defers_report_and_marks_existing_inference_stale(project):
     scan = scan_rule(project)
     row = finding(project, scan)
     finish(project, scan, [row])
     scan = bootstrap.run(str(project), "again")
     (project / "billing.py").write_text("def charge(db, amount):\n    db.send_email()\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="Snapshot changed"):
-        finish(project, scan, [row])
-    assert "Evidence changed or disappeared" in store.get_context(str(project), query="outbox")
+    receipt = finish(project, scan, [row])
+    assert len(receipt["deferred"]) == 1 and not receipt["outcomes"]
+    assert receipt["stage"] == "reported_complete"
+    assert "deferred_evidence" in receipt["candidate_receipts"].values()
+    old = next(e for e in store.load(str(project))["entries"] if e.get("bootstrap", {}).get("candidate_id"))
+    assert old["bootstrap_withheld_reason"] == "evidence"
+    assert "Evidence changed or disappeared" in " ".join(bootstrap.render(old, str(project)))
 
 
 def test_human_edit_during_analysis_rejects_report(project):
@@ -326,11 +330,15 @@ def test_inferred_capture_cannot_enforce_or_be_automatically_shared(project):
     assert not store.entry_by_id(store.load(str(project))["entries"], did).get("guard")
 
 
-def test_new_file_during_analysis_invalidates_snapshot(project):
+def test_new_file_during_analysis_accepts_capture_with_inventory_caveat(project):
     scan = scan_rule(project)
     (project / "direct_email.py").write_text("send_synchronously()\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="Snapshot changed"):
-        finish(project, scan, [finding(project, scan)])
+    receipt = finish(project, scan, [finding(project, scan)])
+    assert receipt["stage"] == "reported_complete"
+    assert receipt["inventory_delta"]["id"]
+    old = store.entry_by_id(store.load(str(project))["entries"], receipt["outcomes"][0]["id"])
+    assert old["bootstrap_unchecked"]["inventory_unassessed"]
+    assert not old.get("bootstrap_withheld")
 
 
 def test_new_files_after_empty_bootstrap_trigger_next_session_analysis(project):
@@ -778,7 +786,9 @@ def test_startup_freshness_fails_closed_without_writable_bookkeeping(project, mo
 
     monkeypatch.setattr(store, "store_lock" if failure == "lock" else "save", denied)
     view = bootstrap.refresh_for_session(str(project), data)
-    assert store.entry_status(store.entry_by_id(view["entries"], did)) == "ignored"
+    old = store.entry_by_id(view["entries"], did)
+    assert store.entry_status(old) == ("suggested" if failure == "lock" else "ignored")
+    assert bool(old.get("bootstrap_check_unavailable")) == (failure == "lock")
     assert "call bootstrap_context now" in bootstrap.directive(str(project), view)
     assert not store.entry_by_id(data["entries"], did).get("bootstrap_withheld")
 
@@ -887,7 +897,8 @@ def test_new_sources_persist_rescan_request_without_withholding_unchanged_facts(
     assert "call bootstrap_context now" in store.bootstrap_prompt_payload(str(project))["context"]
     fresh = bootstrap.run(str(project), "test")
     assert fresh["stage"] == "interpreting"
-    finish(project, fresh, [])
+    bootstrap.run(str(project), "assess", snapshot_id=fresh["snapshot_id"], findings=[], finish=True,
+                  assessed_delta=fresh["inventory_delta"]["id"])
     assert not bootstrap.directive(str(project))
 
 

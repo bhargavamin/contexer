@@ -56,8 +56,21 @@ explicit answer to each affected ID individually. Do not approve either by infer
 If a human decision is involved, set against_decision_id and cite the implementation discrepancy;
 do not replace that decision. If updating your own previous inference, set replaces to its ID.
 Submit findings using bootstrap_context(snapshot_id=..., findings=[...], finish=true).
-Use finish=false for batches; every candidate must be accounted for before finishing. A rejected
-or stale report is NOT saved: correct it or rescan, never claim success. Report omitted coverage.
+Use finish=false for batches; every candidate must be accounted for before finishing. Invalid
+report structure rejects the batch. Changed citations defer only their finding: inspect deferred
+and missing_candidates, keep saved outcomes, and rescan affected sources. Report omitted coverage.
+snapshot_id binds a monotonic analysis generation, inventory, authorized paths and local/global
+decision heads. Always use the latest receipt token; SessionStart freshness does not supersede it.
+Uncited edits do not reject capture. inventory_delta identifies bounded changes whose implications
+remain unassessed: examine current code and retained inferences against current human decisions,
+report any conflicts/corrections, then submit assessed_delta=<that exact id> with snapshot_id.
+Only that matching assessment clears inventory caveats; reading a new scan does not.
+A new candidate_id is an observation version, not a decision identity. For reworded or superseded
+rules use replaces=<existing decision UUID> explicitly. Withheld entries remain in decision previews;
+never replay a removed rule. Omitted sources are unknown, not proof of deletion.
+If recheck_worklist is present, revalidate ALL members before asking the conflict question. Never
+ask a narrowed question just because a stale peer was hidden. Capture completion is separate from
+current applicability: report saved progress even if a finding still needs rechecking.
 After the receipt, show ONLY what was actually saved, in a compact list labeled observed/inferred
 with evidence links. Ask clarification only for material conflicts, grouping them in one response.
 Otherwise end with optional 'Anything to change?' and continue the user's task without waiting.
@@ -67,6 +80,10 @@ For a user-requested correction call approve_decision(action='edit', entry_id=..
 This creates a human-directed revision of that same bootstrap decision; silence approves nothing.
 Inferred guidance never overrides human policy and never authorizes enforcement or external sharing.
 """
+
+
+class EvidenceChanged(ValueError):
+    """A validly addressed citation no longer matches its analysis-time source."""
 
 
 def _digest(value: object) -> str:
@@ -341,9 +358,13 @@ def _validate_sources(scan: dict, sources: object) -> list[dict]:
             raise ValueError("Evidence quote must be nonempty and at most 2000 characters")
         if line < 1 or end < line or end - line >= 20:
             raise ValueError("Evidence must span 1–20 lines")
-        text = _text(_source_path(scan, file))
+        path = _source_path(scan, file)
+        try:
+            text = _text(path)
+        except (OSError, ValueError, UnicodeError) as exc:
+            raise EvidenceChanged("Evidence cannot be checked; rescan " + file) from exc
         if _digest(text) != scan["files"][file]["sha256"]:
-            raise ValueError("Snapshot changed; rescan before interpreting " + file)
+            raise EvidenceChanged("Snapshot changed; rescan before interpreting " + file)
         actual = "\n".join(text.splitlines()[line - 1:end])
         if actual != quote:
             raise ValueError("Evidence quote does not match its source lines")
@@ -451,7 +472,7 @@ def validate_findings(scan: dict, findings: list[dict]) -> list[dict]:
             if (revisions.normalize_content(row["content"]) != revisions.normalize_content(deterministic["content"])
                     or row["kind"] != "observed" or row["assessment"] != "supported"):
                 raise ValueError("A model report cannot rewrite a parsed configuration fact")
-            valid.append({**deterministic, "key": key,
+            valid.append({**deterministic, "key": key, "origin": "parser",
                           "sources": _validate_sources(scan, deterministic["sources"])})
             continue
         historical = bool(candidate_id and candidates[candidate_id]["historical"])
@@ -475,6 +496,24 @@ def _heads(entries: list[dict]) -> dict[str, str]:
     return {e["id"]: _digest([revisions.current_revision(e), e.get("status", "approved"),
                               e.get("approved_by"), e.get("proposed_revision"),
                               e.get("proposed_lifecycle")]) for e in entries}
+
+
+def _retained_reports(scan: dict) -> dict:
+    """Retain observation versions only with current evidence; never replay vanished rules.
+
+    Decision UUIDs survive independently in the store. Rewording creates a new candidate
+    version: the host must explicitly use replaces=<UUID>, never an automatic text merge.
+    Omitted files are not declared deleted; they simply cannot attest to retained reports.
+    """
+    candidates = {c["candidate_id"] for c in scan["candidates"]}
+    rows = {}
+    for key, row in scan.get("reported", {}).items():
+        if row.get("candidate_id") and row["candidate_id"] not in candidates:
+            continue
+        if all(scan["files"].get(r["file"], {}).get("sha256") == r["sha256"]
+               for r in row["sources"]):
+            rows[key] = copy.deepcopy(row)
+    return rows
 
 
 def _link_disputes(scan: dict, valid: list[dict]) -> dict[str, dict]:
@@ -522,6 +561,13 @@ def _persist_findings(data: dict, rows: list[dict], session_id: str,
                for e in deleted or []):
             outcomes.append({"key": key, "outcome": "protected_deleted"})
             continue
+        superseding = next((e for e in entries if e.get("bootstrap")
+                            and e["bootstrap"].get("key") != key and any(
+                                (r.get("bootstrap") or {}).get("key") == key
+                                for r in e.get("revisions", []))), None)
+        if superseding and not row.get("replaces"):
+            outcomes.append({"key": key, "outcome": "superseded", "id": superseding["id"]})
+            continue
         old = next((e for e in entries if (e.get("bootstrap") or {}).get("key") == key), None)
         if row.get("replaces"):
             old = store.entry_by_id(entries, row["replaces"])
@@ -563,11 +609,13 @@ def _persist_findings(data: dict, rows: list[dict], session_id: str,
             metadata["standing_decision"] = {"id": against["id"], "content": against["content"],
                                                "revision_id": against["current_revision_id"]}
         if old:
+            recovered = bool(old.get("bootstrap_withheld") or _unchecked(old))
             old.pop("bootstrap_withheld", None)
             old.pop("bootstrap_withheld_reason", None)
-            old.pop("bootstrap_unchecked", None)
+            _clear_unchecked(old, "citation_budget", "legacy")
             if old.get("bootstrap") == metadata and old.get("content") == revisions.normalize_content(row["content"]):
-                outcomes.append({"key": key, "outcome": "unchanged", "id": old["id"]})
+                outcomes.append({"key": key, "outcome": "unchanged", "id": old["id"],
+                                 "requires_clarification": recovered and status == "pending_approval"})
                 continue
             revision = revisions.append_revision(old, row["content"], "ai")
             entry = old
@@ -592,12 +640,18 @@ def _persist_findings(data: dict, rows: list[dict], session_id: str,
     return outcomes
 
 
-def _clarifications(entries: list[dict], outcomes: list[dict]) -> list[dict]:
-    """One evidence-backed choice per connected dispute, only when it changed."""
+def _clarification_groups(entries: list[dict], outcomes: list[dict]) -> list[dict]:
+    """Derive complete dispute groups, including withheld peers, without storing a worklist."""
     pending = {e["bootstrap"]["key"]: e for e in entries
-               if e.get("bootstrap") and store.entry_status(e) == "pending_approval"}
-    changed = {r["key"] for r in outcomes if r.get("requires_clarification")
-               and r["outcome"] in {"stored", "updated"}}
+               if e.get("bootstrap") and e.get("status", "approved") == "pending_approval"
+               and not _human(e)}
+    changed = {r["key"] for r in outcomes if r.get("requires_clarification")}
+    adjacency = {key: set() for key in pending}
+    for key, entry in pending.items():
+        for peer in entry["bootstrap"].get("disputed_by", []):
+            if peer in pending:
+                adjacency[key].add(peer)
+                adjacency[peer].add(key)
     groups, visited = [], set()
     for key in pending:
         if key in visited:
@@ -605,26 +659,37 @@ def _clarifications(entries: list[dict], outcomes: list[dict]) -> list[dict]:
         todo, component = [key], set()
         while todo:
             current = todo.pop()
-            if current in component or current not in pending:
+            if current in component:
                 continue
             component.add(current)
-            todo.extend(pending[current]["bootstrap"].get("disputed_by", []))
+            todo.extend(adjacency[current])
         visited.update(component)
-        if not component & changed:
-            continue
         peers = [pending[k] for k in sorted(component)]
-        groups.append({"question": peers[0]["bootstrap"]["question"],
+        blocked = any(e.get("bootstrap_withheld") or _unchecked(e)
+                      or e.get("bootstrap_check_unavailable") for e in peers)
+        if not blocked and not component & changed:
+            continue
+        groups.append({"state": "recheck" if blocked else "ready",
+                       "question": "" if blocked else peers[0]["bootstrap"]["question"],
                        "decisions": [{"id": e["id"], "content": e["content"],
-                                      "sources": e["bootstrap"]["sources"]} for e in peers]})
+                                      "sources": e["bootstrap"]["sources"],
+                                      "withheld": e.get("bootstrap_withheld", ""),
+                                      "unchecked": _unchecked(e),
+                                      "check_unavailable": e.get("bootstrap_check_unavailable", "")}
+                                     for e in peers]})
     return groups
+
+
+def _clarifications(entries: list[dict], outcomes: list[dict]) -> list[dict]:
+    return [g for g in _clarification_groups(entries, outcomes) if g["state"] == "ready"]
 
 
 def run(repo_path: str, session_id: str, *, apply: bool = True, snapshot_id: str = "",
         findings: list[dict] | None = None, finish: bool = False,
         external_paths: list[str] | None = None, source_paths: list[str] | None = None,
-        repo_source: str = "") -> dict:
+        repo_source: str = "", assessed_delta: str = "") -> dict:
     """Start/inspect a scan or submit grounded findings through the existing bootstrap tool."""
-    if findings is not None or finish:
+    if findings is not None or finish or assessed_delta:
         if not apply or external_paths is not None or source_paths is not None:
             raise ValueError("Reports require apply=true; configure sources in a separate scan")
         with store.store_lock(store.repo_slug(repo_path)):
@@ -635,36 +700,78 @@ def run(repo_path: str, session_id: str, *, apply: bool = True, snapshot_id: str
             if scan.get("checkout") != os.path.abspath(repo_path):
                 raise ValueError("Snapshot belongs to a different checkout")
             current = snapshot(repo_path, scan["external_paths"], scan.get("source_paths", []))
-            if current["files"] != scan["files"]:
-                raise ValueError("Snapshot changed (including added/removed files); rescan")
-            # Validate ALL scanned sources, not just citations: evidence against a rule may
-            # have changed in a file the model did not cite. Uncommitted edits count too.
-            for file, info in scan["files"].items():
-                if _digest(_text(_source_path(scan, file))) != info["sha256"]:
-                    raise ValueError("Snapshot changed; rescan before saving findings")
             heads = _heads(data["entries"])
             if heads != scan["heads"]:
                 raise ValueError("A decision changed during interpretation; rescan")
             globals_ = store.load_global().get("entries", [])
             if _heads(globals_) != scan.get("global_heads", {}):
                 raise ValueError("Global decisions changed during interpretation; rescan")
-            valid = validate_findings(scan, findings or [])
+            delta = _inventory_delta(scan, current)
+            if assessed_delta and assessed_delta != delta.get("id"):
+                raise ValueError("Inventory delta changed or was already assessed; inspect the current delta")
+            if findings is not None and (not isinstance(findings, list) or len(findings) > MAX_FINDINGS):
+                raise ValueError("Submit at most 40 findings per batch")
+            valid, deferred, submitted = [], [], set()
+            for index, row in enumerate(findings or []):
+                if isinstance(row, dict):
+                    identity = (_digest(["doc", row["candidate_id"]]) if row.get("candidate_id")
+                                else _digest(["code", row.get("topic"), row.get("scope")]))
+                    if identity in submitted:
+                        raise ValueError("Duplicate finding in batch")
+                    submitted.add(identity)
+                try:
+                    valid.extend(validate_findings(scan, [row]))
+                except EvidenceChanged as exc:
+                    deferred.append({"index": index, "candidate_id": row.get("candidate_id", ""),
+                                     "topic": row.get("topic", ""), "outcome": "deferred_evidence",
+                                     "reason": str(exc)})
             if len(set(scan["reported"]) | {r["key"] for r in valid}) > 80:
                 raise ValueError("Scan finding budget reached; retain remaining investigation as incomplete")
-            reports = _link_disputes(scan, valid)
+            retained = _retained_reports({**scan, "files": current["files"], "candidates": current["candidates"]})
+            # An invalid peer cannot be persisted as current, but its unresolved dispute
+            # must not disappear merely because this batch rechecks the other member.
+            context = dict(retained)
+            for entry in data["entries"]:
+                meta = entry.get("bootstrap") or {}
+                if meta and entry.get("status") == "pending_approval" and not _human(entry):
+                    context.setdefault(meta["key"], {**meta, "content": entry["content"],
+                                                     "subtype": entry.get("subtype", "architecture")})
+            linked = _link_disputes({**scan, "reported": context}, valid)
+            live = set(retained) | {r["key"] for r in valid}
+            reports = {key: row for key, row in linked.items() if key in live}
             outcomes = _persist_findings(data, list(reports.values()), session_id,
                                          store.load_deleted(repo_path).get("entries", []), repo_source, globals_)
+            # Receipts account for attempted capture independently of current applicability.
+            # They are bounded to nominated observation versions, not retained source blobs.
+            receipts = dict(scan.get("candidate_receipts", {}))
+            for key in scan["reported"]:
+                if key.startswith("doc:") and key not in reports:
+                    receipts[key[4:]] = "needs_recheck"
+            for row in valid:
+                if row.get("candidate_id"):
+                    receipts[row["candidate_id"]] = next(r["outcome"] for r in outcomes if r["key"] == row["key"])
+            for row in deferred:
+                if row["candidate_id"]:
+                    receipts[row["candidate_id"]] = "deferred_evidence"
+            for result in outcomes:
+                if result["outcome"] == "superseded":
+                    reports.pop(result["key"], None)
+                    if result["key"].startswith("doc:"):
+                        receipts[result["key"][4:]] = "superseded"
             scan["reported"] = reports
+            scan["candidate_receipts"] = receipts
             missing = [c["candidate_id"] for c in scan["candidates"]
-                       if "doc:" + c["candidate_id"] not in scan["reported"]]
-            if finish and missing:
+                       if "doc:" + c["candidate_id"] not in scan["reported"] and c["candidate_id"] not in receipts]
+            if finish and missing and not deferred:
                 raise ValueError("Unaccounted document candidates: " + ", ".join(missing))
-            scan["stage"] = "reported_complete" if finish else "interpreting"
-            if finish:
-                scan.pop("refresh_needed", None)
+            scan["stage"] = "reported_complete" if finish and not missing else "interpreting"
+            if assessed_delta:
+                scan["assessed_inventory"] = delta["current_fingerprint"]
+            _apply_inventory(data["entries"], scan, current)
+            _refresh_entries(data["entries"], current)
             scan["heads"] = _heads(data["entries"])
-            scan["snapshot_id"] = _digest([scan["checkout"], scan["files"], scan["heads"], scan["external_paths"], scan.get("source_paths", []), scan["global_heads"]])
-            store.save(repo_path, data)
+            _advance_analysis(scan, scan)
+            store.save(repo_path, _persistable_view(data))
             if any(r.get("requires_clarification") and r["outcome"] in {"stored", "updated"}
                    for r in outcomes):
                 try:
@@ -673,6 +780,9 @@ def run(repo_path: str, session_id: str, *, apply: bool = True, snapshot_id: str
                     pass  # optional nudge failure cannot turn a committed report into 'not saved'
             return {"stage": scan["stage"], "snapshot_id": scan["snapshot_id"], "outcomes": outcomes,
                     "clarifications": _clarifications(data["entries"], outcomes),
+                    "recheck_worklist": [g for g in _clarification_groups(data["entries"], outcomes) if g["state"] == "recheck"],
+                    "inventory_delta": scan.get("inventory_delta", {}), "deferred": deferred,
+                    "candidate_receipts": scan["candidate_receipts"],
                     "missing_candidates": missing, "coverage": scan["coverage"],
                     "omitted": scan["omitted"], "guide": GUIDE}
 
@@ -683,12 +793,12 @@ def run(repo_path: str, session_id: str, *, apply: bool = True, snapshot_id: str
         data = store.load_for_update(repo_path)
         previous = data.get("bootstrap_scan") or {}
         roots = (_external_paths(external_paths) if external_paths is not None
-                 else _external_paths(previous.get("external_paths", [])))
+                 else previous.get("external_paths", []))
         focus = _source_paths(source_paths if source_paths is not None else previous.get("source_paths", []))
         scan = snapshot(repo_path, roots, focus)
         outcomes = []
         if apply:
-            facts = [{**f, "key": "code:" + f["topic"] + ":" + f["scope"]} for f in scan["facts"]]
+            facts = [{**f, "origin": "parser", "key": "code:" + f["topic"] + ":" + f["scope"]} for f in scan["facts"]]
             for fact in facts:
                 fact["sources"] = _validate_sources(scan, fact["sources"])
             outcomes = _persist_findings(data, facts, session_id, store.load_deleted(repo_path).get("entries", []), repo_source)
@@ -696,25 +806,39 @@ def run(repo_path: str, session_id: str, *, apply: bool = True, snapshot_id: str
         scan["heads"] = _heads(data["entries"])
         globals_ = store.load_global().get("entries", [])
         scan["global_heads"] = _heads(globals_)
-        scan["snapshot_id"] = _digest([scan["checkout"], scan["files"], scan["heads"], roots, focus, scan["global_heads"]])
-        previous = data.get("bootstrap_scan") or {}
-        if previous.get("snapshot_id") == scan["snapshot_id"]:
-            scan["reported"] = previous.get("reported", {})
-            scan["stage"] = previous.get("stage", "interpreting")
+        scan["assessed_inventory"] = previous.get("assessed_inventory", _inventory_fingerprint(previous)) if previous else _inventory_fingerprint(scan)
+        scan["reported"] = previous.get("reported", {})
+        scan["inventory_delta"] = previous.get("inventory_delta", {})
+        candidates = {c["candidate_id"] for c in scan["candidates"]}
+        scan["candidate_receipts"] = {key: value for key, value in previous.get("candidate_receipts", {}).items()
+                                      if key in candidates}
+        scan["stage"] = previous.get("stage", "interpreting")
+        same_basis = bool(previous) and _analysis_basis(previous) == _analysis_basis(scan)
+        if same_basis:
+            scan["generation"] = previous.get("generation", 0)
+            scan["snapshot_id"] = previous["snapshot_id"]
         else:
-            scan["reported"], scan["stage"] = {}, "interpreting"
+            scan["reported"] = _retained_reports(scan)
+            for key in previous.get("reported", {}):
+                if key.startswith("doc:") and key[4:] in candidates and key not in scan["reported"]:
+                    scan["candidate_receipts"][key[4:]] = "needs_recheck"
+            scan["stage"] = "interpreting"
+            _advance_analysis(scan, previous)
+        _apply_inventory(data["entries"], scan, scan)
         ask_external = not previous.get("external_docs_offered") and external_paths is None
         scan["external_docs_offered"] = True if apply else previous.get("external_docs_offered", False)
         if apply:
             data["bootstrap_scan"] = scan
-            store.save(repo_path, data)
-        active = [e for e in data["entries"] + globals_ if e.get("type") == "decision" and store.entry_status(e) != "ignored"]
+            store.save(repo_path, _persistable_view(data))
+        active = [e for e in data["entries"] + globals_ if e.get("type") == "decision" and e.get("status", "approved") != "ignored"]
         active.sort(key=lambda e: (not _human(e), e.get("timestamp", "")))
         decisions = [{"id": e["id"], "content": e.get("content", "")[:1000], "status": e.get("status"),
-                      "human_confirmed": _human(e), "bootstrap": bool(e.get("bootstrap"))}
+                      "human_confirmed": _human(e), "bootstrap": bool(e.get("bootstrap")),
+                      "withheld": e.get("bootstrap_withheld", ""), "unchecked": _unchecked(e)}
                      for e in active[:50]]
     public = {k: v for k, v in scan.items() if k not in {"heads", "global_heads", "reported", "external_docs_offered"}}
     return {**public, "reported_keys": list(scan["reported"]), "outcomes": outcomes,
+            "recheck_worklist": [g for g in _clarification_groups(data["entries"], []) if g["state"] == "recheck"],
             "decisions": decisions, "decisions_omitted": max(0, len(active) - 50), "guide": GUIDE,
             "external_docs_question": "Any shared Markdown rules outside this repository to include? "
             "Provide a specific path now or later; this is optional." if ask_external else ""}
@@ -725,16 +849,86 @@ def _no_lock():
     return nullcontext()
 
 
-def _refresh_entries(entries: list[dict], scan: dict, *, unavailable: bool = False) -> None:
-    """Inventory omission is unknown, not proof of deletion or changed evidence.
+def _unchecked(entry: dict) -> dict:
+    """Read legacy strings without dropping their warning or borrowing another owner's clear."""
+    value = entry.get("bootstrap_unchecked", {})
+    if isinstance(value, str):
+        owner = "citation_budget" if value.startswith("Evidence exceeded the recheck budget") else "legacy"
+        return {owner: value} if value else {}
+    return dict(value) if isinstance(value, dict) else {}
 
-    Recheck prior citations independently, with a separate bounded byte budget. Never
-    follow symlinks or revoked external roots. Only fingerprint-based withholding can
-    recover automatically; historical, unsupported and user-dismissed records cannot.
-    """
+
+def _clear_unchecked(entry: dict, *reasons: str) -> None:
+    value = _unchecked(entry)
+    for reason in reasons:
+        value.pop(reason, None)
+    if value:
+        entry["bootstrap_unchecked"] = value
+    else:
+        entry.pop("bootstrap_unchecked", None)
+
+
+def _set_unchecked(entry: dict, reason: str, value: object) -> None:
+    entry["bootstrap_unchecked"] = {**_unchecked(entry), reason: value}
+
+
+def _inventory_fingerprint(scan: dict) -> str:
+    return _digest([scan["checkout"], scan["files"], scan["external_paths"], scan.get("source_paths", [])])
+
+
+def _inventory_delta(scan: dict, current: dict) -> dict:
+    """Bounded applicability data, separate from the analysis generation and citation checker."""
+    before = scan.get("assessed_inventory", _inventory_fingerprint(scan))
+    after = _inventory_fingerprint(current)
+    if before == after:
+        return {}
+    paths = sorted(set(scan["files"]) | set(current["files"]))
+    changed = sorted(set(scan.get("inventory_delta", {}).get("paths_to_assess", []))
+                     | {p for p in paths if scan["files"].get(p) != current["files"].get(p)})
+    return {"id": _digest([before, after]), "current_fingerprint": after,
+            "paths_to_assess": changed[:40], "paths_omitted": max(0, len(changed) - 40),
+            "coverage": "bounded inventory; compare retained inferences with current code and human decisions"}
+
+
+def _apply_inventory(entries: list[dict], scan: dict, current: dict) -> dict:
+    delta = _inventory_delta(scan, current)
+    scan["inventory_delta"] = delta
+    if delta:
+        scan["refresh_needed"] = True
+    else:
+        scan.pop("refresh_needed", None)
+    for entry in entries:
+        if not entry.get("bootstrap") or _human(entry) or entry.get("status") == "ignored":
+            continue
+        if delta and entry["bootstrap"].get("origin") != "parser":
+            _set_unchecked(entry, "inventory_unassessed", {
+                "delta_id": delta["id"],
+                "message": "Repository inventory changed; its effect on this inference has not been assessed."})
+        else:
+            _clear_unchecked(entry, "inventory_unassessed")
+    return delta
+
+
+def _analysis_basis(scan: dict) -> str:
+    return _digest([scan["checkout"], scan["files"], scan["heads"], scan["external_paths"],
+                    scan.get("source_paths", []), scan["global_heads"], scan["candidates"], scan["facts"]])
+
+
+def _advance_analysis(scan: dict, previous: dict) -> None:
+    # A counter prevents A -> B -> A from revalidating a superseded token. SessionStart
+    # never calls this: derived applicability has no authority over analysis concurrency.
+    scan["generation"] = previous.get("generation", 0) + 1
+    scan["snapshot_id"] = _digest([scan["generation"], _analysis_basis(scan),
+                                    scan["reported"], scan.get("candidate_receipts", {}), scan["stage"],
+                                    scan.get("assessed_inventory")])
+
+
+def _refresh_entries(entries: list[dict], scan: dict, *, unavailable: bool = False) -> None:
+    """Check citations only. Missing/changed/revoked is invalid; failed checks are uncertainty."""
     cache, remaining = {}, MAX_FOCUSED_BYTES
     root = Path(scan["checkout"])
     for entry in entries:
+        entry.pop("bootstrap_check_unavailable", None)  # render-only, never a stored reason
         if not entry.get("bootstrap") or _human(entry) or entry.get("status") == "ignored":
             continue
         states = []
@@ -745,32 +939,40 @@ def _refresh_entries(entries: list[dict], scan: dict, *, unavailable: bool = Fal
                 authorized = (not Path(file).is_absolute() and ".." not in Path(file).parts
                               or any(path == Path(p) or Path(p) in path.parents
                                      for p in scan["external_paths"]))
-                digest = None
-                if not authorized or unavailable:
-                    digest = "unavailable"
+                digest, state = None, "budget"
+                if not authorized:
+                    state = "stale"  # revocation is known even when no reads are possible
+                elif unavailable:
+                    state = "unavailable"
                 elif file in scan["files"]:
-                    digest = scan["files"][file]["sha256"]
+                    digest, state = scan["files"][file]["sha256"], "checked"
                 else:
                     try:
                         if any(p.is_symlink() for p in (path, *path.parents)):
-                            raise ValueError("symlink evidence")
-                        size = path.stat().st_size
-                        if size <= remaining:
-                            remaining -= size
-                            digest = _digest(_text(path, size))
+                            state = "stale"  # rejected source, not an I/O failure
+                        else:
+                            size = path.stat().st_size
+                            if size <= remaining:
+                                remaining -= size
+                                digest, state = _digest(_text(path, size)), "checked"
+                    except (FileNotFoundError, NotADirectoryError):
+                        state = "stale"
                     except (OSError, ValueError, UnicodeError):
-                        digest = "unavailable"
-                cache[file] = digest
-            digest = cache[file]
-            states.append("unknown" if digest is None else "current" if digest == ref["sha256"] else "stale")
-        if "unknown" in states:
-            entry["bootstrap_unchecked"] = "Evidence exceeded the recheck budget; use a focused source_paths scan."
-        else:
-            entry.pop("bootstrap_unchecked", None)
+                        state = "unavailable"
+                cache[file] = digest, state
+            digest, state = cache[file]
+            states.append(("current" if digest == ref["sha256"] else "stale") if state == "checked" else state)
+        if "budget" in states:
+            _set_unchecked(entry, "citation_budget",
+                           "Evidence exceeded the recheck budget; use a focused source_paths scan.")
+        elif states and all(s == "current" for s in states):
+            _clear_unchecked(entry, "citation_budget", "legacy")
+        if "unavailable" in states:
+            entry["bootstrap_check_unavailable"] = "Evidence could not be checked in this session; freshness is unverified."
         reason = entry.get("bootstrap_withheld_reason")
         stale_only = reason == "evidence" or (reason is None and entry.get("bootstrap_withheld", "").startswith("Evidence "))
         if "stale" in states and (not entry.get("bootstrap_withheld") or stale_only):
-            entry["bootstrap_withheld"] = "Evidence changed, disappeared, or could not be checked; re-analysis required"
+            entry["bootstrap_withheld"] = "Evidence changed, disappeared, or authorization was revoked; re-analysis required"
             entry["bootstrap_withheld_reason"] = "evidence"
         elif states and all(s == "current" for s in states) and stale_only:
             entry.pop("bootstrap_withheld", None)
@@ -778,43 +980,47 @@ def _refresh_entries(entries: list[dict], scan: dict, *, unavailable: bool = Fal
 
 
 def freshness_view(repo_path: str, data: dict, *, unavailable: bool = False) -> dict:
-    """Read-only applicability projection; only exact evidence restoration recovers stale claims."""
+    """Read-only projection. Unknown checks never suppress or revive a finding."""
     if not data.get("bootstrap_scan"):
         return data
     result = copy.deepcopy(data)
     scan = result["bootstrap_scan"]
-    files = {}
+    current = {**scan, "files": {}, "checkout": os.path.abspath(repo_path)}
     if not unavailable:
         try:
-            files = snapshot(repo_path, _external_paths(scan["external_paths"]), scan.get("source_paths", []))["files"]
+            # Previously authorized roots may disappear: let citations classify absence
+            # rather than rejecting all checks because an external file no longer exists.
+            current = snapshot(repo_path, scan["external_paths"], scan.get("source_paths", []))
         except (OSError, ValueError, UnicodeError, KeyError, TypeError):
             unavailable = True
-    if unavailable or files != scan["files"]:
-        # Latched until bootstrap rebuilds the snapshot. New files can require analysis
-        # without invalidating any existing citation; that request must reach prompt hooks.
-        scan["refresh_needed"] = True
-    _refresh_entries(result["entries"], {**scan, "files": files, "checkout": os.path.abspath(repo_path)},
-                     unavailable=unavailable)
+    if not unavailable:
+        _apply_inventory(result["entries"], scan, current)
+    _refresh_entries(result["entries"], current, unavailable=unavailable)
+    return result
+
+
+def _persistable_view(view: dict) -> dict:
+    """Unavailability belongs only to the current rendering, including under lock contention."""
+    result = copy.deepcopy(view)
+    for entry in result["entries"]:
+        entry.pop("bootstrap_check_unavailable", None)
     return result
 
 
 def refresh_for_session(repo_path: str, data: dict) -> dict:
-    """Withhold before startup rendering; persist suppression for later read-only prompt hooks.
-
-    SessionStart never waits for another store writer. If freshness cannot be persisted,
-    the returned projection still fails closed instead of injecting an obsolete claim.
-    """
+    """Do not block startup. Persist known applicability; project check failures only."""
     if not data.get("bootstrap_scan"):
         return data
     try:
         with store.store_lock(store.repo_slug(repo_path), blocking=False):
             current = store.load_for_update(repo_path)
             view = freshness_view(repo_path, current)
-            if view != current:
+            persisted = _persistable_view(view)
+            if persisted != current:
                 try:
-                    store.save(repo_path, view)
+                    store.save(repo_path, persisted)
                 except OSError:
-                    pass  # read-only stores still receive the safe rendering projection
+                    pass  # a proven stale citation stays withheld in this rendering
             return view
     except (OSError, ValueError):
         return freshness_view(repo_path, data, unavailable=True)
@@ -824,7 +1030,7 @@ def directive(repo_path: str, data: dict | None = None, *, check_freshness: bool
     data = data if data is not None else store.load(repo_path)
     scan = data.get("bootstrap_scan") or {}
     needs_refresh = scan.get("refresh_needed") or any(
-        e.get("bootstrap_withheld") and not _human(e) and e.get("status") != "ignored"
+        (e.get("bootstrap_withheld") or e.get("bootstrap_check_unavailable")) and not _human(e) and e.get("status") != "ignored"
         and e.get("bootstrap_withheld_reason") not in {"historical", "unsupported"}
         for e in data.get("entries", []))
     if scan.get("stage") == "reported_complete" and not needs_refresh:
@@ -835,6 +1041,11 @@ def directive(repo_path: str, data: dict | None = None, *, check_freshness: bool
                 return ""
         except (OSError, ValueError, UnicodeError):
             pass  # report incomplete work, never turn a failed check into assurance
+    if scan.get("stage") == "reported_complete":
+        return (f"Contexer bootstrap capture is complete for {repo_path}; call bootstrap_context now "
+                "to assess changed or unchecked evidence. Retain saved progress; do not restart setup. "
+                "Inspect inventory_delta, recheck affected inferences and acknowledge assessed_delta only "
+                "after assessment. Ask only about concrete conflicts, not routine facts. Continue the user's task.")
     return (f"Contexer bootstrap for {repo_path}: call bootstrap_context now without asking setup "
             "permission or familiarity. Follow its guide to scan code and Markdown, save observed "
             "facts and grounded AI-inferred context, and finish the interpretation report. "
@@ -848,8 +1059,10 @@ def render(entry: dict, repo_path: str = "") -> list[str]:
         return []
     lines = [f"[{meta['kind']} repository context; {meta['assessment']}; scope: {meta['scope']}. "
              "Not human-approved policy; never overrides human decisions or authorizes enforcement/sharing.]"]
-    if entry.get("bootstrap_unchecked"):
-        lines.append("Freshness unverified: " + entry["bootstrap_unchecked"])
+    for warning in _unchecked(entry).values():
+        lines.append("Freshness unverified: " + (warning["message"] if isinstance(warning, dict) else warning))
+    if entry.get("bootstrap_check_unavailable"):
+        lines.append("Freshness unverified: " + entry["bootstrap_check_unavailable"])
     if entry.get("bootstrap_withheld"):
         lines.append("WITHHELD, not usable guidance: " + entry["bootstrap_withheld"])
     if meta.get("assessment") == "contradicted" or meta.get("disputed_by"):

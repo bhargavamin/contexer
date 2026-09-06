@@ -100,7 +100,7 @@ def test_inventory_cap_does_not_withhold_unchanged_citation_and_focus_recovers(p
     scan = bootstrap.run(str(project), "budget")
     assert "billing.py" not in scan["files"]
     assert not entry(project, did).get("bootstrap_withheld")
-    assert not entry(project, did).get("bootstrap_unchecked")
+    assert set(bootstrap._unchecked(entry(project, did))) == {"inventory_unassessed"}
     focused = bootstrap.run(str(project), "focus", source_paths=["billing.py"])
     assert set(focused["files"]) == {"billing.py"}
     assert capture(project) == did  # remembered focus allows re-report
@@ -126,7 +126,8 @@ def test_budget_unknown_is_labeled_not_withheld_and_focus_rechecks(project, monk
     monkeypatch.setattr(bootstrap, "MAX_FOCUSED_BYTES", 2_000_000)
     monkeypatch.setattr(bootstrap, "MAX_FILES", 160)
     bootstrap.run(str(project), "focus", source_paths=["billing.py"])
-    assert not entry(project, did).get("bootstrap_unchecked")
+    assert "citation_budget" not in bootstrap._unchecked(entry(project, did))
+    assert "inventory_unassessed" in bootstrap._unchecked(entry(project, did))
 
 
 def test_large_file_focused_capture_uses_full_hash_not_just_excerpt(project):

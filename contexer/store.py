@@ -407,6 +407,17 @@ def load_for_update(repo_path: str) -> dict:
         if (any(not isinstance(scan.get(k), t) for k, t in shapes.items())
                 or scan.get("stage") not in {"interpreting", "reported_complete"}):
             raise ValueError("Malformed bootstrap state; refusing to overwrite it")
+        if (type(scan.get("generation", 0)) is not int or scan.get("generation", 0) < 0
+                or not isinstance(scan.get("candidate_receipts", {}), dict)
+                or len(scan.get("candidate_receipts", {})) > 20
+                or any(not isinstance(v, str) or v not in {
+                           "stored", "updated", "unchanged", "protected", "protected_deleted",
+                           "historical", "unverified", "needs_recheck", "deferred_evidence", "superseded"}
+                       for v in scan.get("candidate_receipts", {}).values())
+                or not isinstance(scan.get("inventory_delta", {}), dict)
+                or ("assessed_inventory" in scan
+                    and not re.fullmatch(r"[a-f0-9]{64}", str(scan["assessed_inventory"])))):
+            raise ValueError("Malformed bootstrap analysis/applicability state; refusing to overwrite it")
     _migrate_entries(data)
     return data
 

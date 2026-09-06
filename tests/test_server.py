@@ -648,7 +648,8 @@ def test_bootstrap_preview_does_not_apply(monkeypatch, source_paths):
     monkeypatch.setattr(bootstrap, "run", lambda *a, **k: calls.append(k) or {})
     server.bootstrap_context("/repo/x", apply=False, source_paths=source_paths)
     assert calls == [{"apply": False, "snapshot_id": "", "findings": None, "finish": False,
-                     "external_paths": None, "source_paths": source_paths, "repo_source": "argument"}]
+                     "external_paths": None, "source_paths": source_paths, "repo_source": "argument",
+                     "assessed_delta": ""}]
 
 
 # ── capture_lint: bounce narrative-shaped AI captures ───────────────────────

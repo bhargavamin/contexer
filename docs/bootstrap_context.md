@@ -59,17 +59,54 @@ capture was only inferred. The original text and evidence remain in revision his
 content edits have the same semantics. Rescanning cannot undo a human correction or revive a
 deliberately ignored/deleted decision.
 
-Source fingerprints include uncommitted changes. A scan with changed/added/removed sources,
-or changed decision revisions, cannot accept an old interpretation report. Rescanning withholds
-old inferred context whose evidence changed, disappeared, or left the authorized scope. A valid
-re-analysis or exact restoration of all original source fingerprints can reactivate evidence-stale
-context. Historical/unsupported findings and human dismissals never auto-reactivate; human decisions are never silently withdrawn by this mechanism.
-Session start checks applicability before rendering inferred claims and persists derived
-withholding for later prompt retrieval. It does not wait for a busy store lock; unavailable
-freshness or an unwritable store produces a conservative withheld rendering, not stale guidance.
-This check does not approve, revise or delete a decision. Initial scans serialize authorization,
-snapshot construction and persistence under the store lock so older work cannot restore revoked
-external paths or replace newer interpretation progress.
+Source fingerprints include uncommitted changes. Unrelated file edits no longer reject the
+whole report: each finding validates its own exact citations against its analysis-time file
+fingerprints and current disk. Changed citations are returned in `deferred`; valid peers
+commit together with their receipts. Malformed report structure still rejects the batch.
+
+Capture completion and current applicability are separate. Changed, missing, symlinked or
+no-longer-authorized evidence withholds the affected inference. Exact evidence restoration or
+a fresh grounded report can lift evidence withholding, but cannot revive historical,
+unsupported or human-dismissed decisions. Human-approved decisions are never silently withdrawn.
+
+Uncited inventory drift adds an `inventory_unassessed` caveat to model-reported context.
+Unchanged source-local parsed facts stay available without that caveat. This is uncertainty,
+not proof of contradiction: inferred context remains non-authoritative and visible. Budget
+warnings and inventory caveats have separate owners. Rechecking citations clears only citation
+warnings, never an unassessed inventory change.
+
+The returned `inventory_delta` includes an exact fingerprint and up to 40 paths to assess
+(with bounded coverage explicitly disclosed). After examining its effect on retained inferences
+and current human decisions, the agent submits `assessed_delta=<id>` with the current
+`snapshot_id`. A second change invalidates the old delta acknowledgment. A matching assessment
+clears the inventory caveat durably across session starts; it does not approve decisions or
+lift known-invalid citation withholding. Merely opening a new scan does not count as assessment.
+An exact return to the assessed inventory also clears that caveat.
+
+Session start checks applicability without waiting for a busy store lock. Contention or a failed
+read produces a **render-only freshness caveat**, not new withholding, and does not reactivate an
+already-known stale finding. No contention state is written or migrated. If a check succeeds but
+saving its bookkeeping fails, known-invalid evidence remains withheld in that session's view.
+
+`snapshot_id` binds a monotonic analysis generation, checkout, bounded file map, authorized
+paths, reported observations/receipts and local/global decision heads. Decision heads use raw
+status with the legacy `approved` default, not derived freshness withholding. Thus human
+corrections invalidate an old report, while SessionStart cannot supersede its analysis token.
+Even an A → B → A analysis transition cannot reuse an old token. A second agent with a stale
+token must rescan; there is no automatic merge of competing interpretations.
+
+A candidate hash identifies an **observation version**, not a stable decision. Rewording or
+superseding a documented rule requires explicit `replaces=<decision UUID>` to revise that same
+record. Old observation versions cannot be replayed to recreate superseded decisions.
+Vanished/changed observations leave active report replay; their stored decisions and history
+remain inspectable, with invalid evidence withheld. Inventory omission alone does not establish
+deletion. Pending conflict groups include withheld members: if any member needs checking, the
+whole automatic question is deferred and a `recheck_worklist` is derived in the tool response.
+The worklist is not another persisted artifact.
+
+Scans still serialize source authorization, snapshot construction and persistence under the
+store lock. No full source blobs are retained: current disk must support a quote, and rendering
+continues to warn when the captured file/line no longer supports it.
 
 Parsed JSON evidence is located by its object-member path, not by the first matching word.
 Escaped keys, duplicate keys (last value wins), and multiline values are handled consistently
@@ -80,7 +117,9 @@ fact and leaves it for host inspection rather than attaching an incomplete quote
 
 The first tool call returns `stage="interpreting"`, not “complete.” The host submits findings
 using the returned `snapshot_id`, then `finish=true` once every nominated document candidate
-is accounted for. Each batch returns the current snapshot ID for the next call. Interrupted
+is accounted for. Candidate receipts distinguish actual save/protection outcomes from deferred, superseded and
+needs-recheck observations; completion does not claim deferred findings were saved as decisions. Each batch
+returns the current snapshot ID for the next call. Interrupted
 analysis is requested again in a later session; identical completed scans do not create copies
 or increase confidence.
 
