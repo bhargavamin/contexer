@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.46.0](https://github.com/bhargavamin/contexer/compare/v0.45.4...v0.46.0) (2026-09-06)
+
+
+### Features
+
+* **bootstrap:** capture evidence-backed inferred repository context ([5d3bc9a](https://github.com/bhargavamin/contexer/commit/5d3bc9a8a7ee4a0eec325c76d67d501dbe466118))
+* **bootstrap:** capture evidence-backed inferred repository context ([50099a5](https://github.com/bhargavamin/contexer/commit/50099a529214fe82f4a5877acbc1e4f1195aceaa))
+
+
+### Bug Fixes
+
+* **bootstrap:** exclude freshness projections from decision heads ([75704e2](https://github.com/bhargavamin/contexer/commit/75704e2edbf6479c908178e8a165c4595eeda514))
+* **bootstrap:** preserve capture across repository edits ([6b30421](https://github.com/bhargavamin/contexer/commit/6b30421adc2fbbb7130e5307600a95cc5d4fb38c))
+* **bootstrap:** preserve freshness and serialize scan authorization ([3a799e9](https://github.com/bhargavamin/contexer/commit/3a799e9d0d926b8a6926e0c20c674d727e9cc2ec))
+* **bootstrap:** recover bounded evidence and remove stale questionnaires ([0780f36](https://github.com/bhargavamin/contexer/commit/0780f3651eecfb511695fce56819503e304a16b0))
+
 ## [0.45.4](https://github.com/bhargavamin/contexer/compare/v0.45.3...v0.45.4) (2026-09-04)
 
 
