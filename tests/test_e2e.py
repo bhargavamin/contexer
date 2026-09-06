@@ -6,14 +6,13 @@ and bootstrap scan. Uses tmp_path + monkeypatch to isolate all filesystem side e
 """
 import json
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from contexer import store
+from contexer import bootstrap, store
 from tests.conftest import redirect_store_dir
 from contexer import cli
 
@@ -38,36 +37,6 @@ def tmp_repo(tmp_path, monkeypatch):
     """Redirects STORE_DIR to a temp path and returns a fake repo path."""
     redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     return str(tmp_path / "myrepo")
-
-
-@pytest.fixture
-def git_repo(tmp_path, monkeypatch):
-    """Real git repo with global/system git config isolated; returns its path."""
-    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
-    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
-    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
-    repo = tmp_path / "gitrepo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-    return str(repo)
-
-
-ME = "me@test.local"
-OTHER = "other@test.local"
-
-
-def _git_commit(repo: str, email: str, n: int = 1) -> None:
-    for i in range(n):
-        (Path(repo) / f"{email.split('@')[0]}-{i}.txt").write_text(f"{email}-{i}")
-        subprocess.run(["git", "add", "."], cwd=repo, check=True)
-        subprocess.run(
-            ["git", "-c", f"user.email={email}", "-c", "user.name=T",
-             "-c", "commit.gpgsign=false", "commit", "-q", "-m", f"c-{i}"],
-            cwd=repo, check=True)
-
-
-def _set_me(repo: str) -> None:
-    subprocess.run(["git", "config", "user.email", ME], cwd=repo, check=True)
 
 
 SESSION = "e2e-session"
@@ -256,14 +225,14 @@ class TestSessionStart:
     def test_new_repo_returns_bootstrap_offer(self, tmp_repo):
         result = store.get_session_start_context(tmp_repo)
         ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "yes" in ctx.lower() and "no" in ctx.lower()
-        assert "Do NOT" in ctx
+        assert "without asking setup permission" in ctx
+        assert "Ask only about concrete conflicts" in ctx
 
     def test_new_repo_has_stop_mandate(self, tmp_repo):
         """Bootstrap must tell Claude to output only the offer and wait."""
         result = store.get_session_start_context(tmp_repo)
         ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "CRITICAL" in ctx or "stop completely" in ctx.lower()
+        assert "call bootstrap_context now" in ctx
 
     def test_new_repo_offers_skip_path(self, tmp_repo):
         result = store.get_session_start_context(tmp_repo)
@@ -316,18 +285,18 @@ class TestBootstrapOffer:
     def test_no_context_returns_opt_in_question(self, tmp_repo):
         result = store.get_bootstrap_context_prompt(tmp_repo)
         ctx = result.get("hookSpecificOutput", {}).get("additionalContext", "")
-        assert "yes" in ctx.lower() and "no" in ctx.lower()
+        assert "without asking setup permission" in ctx
 
     def test_no_context_has_do_not_directive(self, tmp_repo):
         result = store.get_bootstrap_context_prompt(tmp_repo)
         ctx = result.get("hookSpecificOutput", {}).get("additionalContext", "")
-        assert "Do NOT" in ctx
+        assert "Ask only about concrete conflicts" in ctx
 
-    def test_with_context_returns_empty(self, tmp_repo):
+    def test_with_context_but_no_bootstrap_report_requests_analysis(self, tmp_repo):
         store.update_decision(tmp_repo, "Use Django for the web layer", SESSION, "architecture")
         result = store.get_bootstrap_context_prompt(tmp_repo)
         ctx = result.get("hookSpecificOutput", {}).get("additionalContext", "")
-        assert ctx == ""
+        assert "call bootstrap_context now" in ctx
 
 
 # ── 4b. PostCompact bootstrap re-trigger ─────────────────────────────────────
@@ -337,8 +306,7 @@ class TestPostCompactContext:
         """Bug fix: PostCompact was returning 'No context stored' string, not a bootstrap offer."""
         result = store.get_post_compact_context(tmp_repo)
         sys_msg = result.get("systemMessage", "")
-        assert "yes" in sys_msg.lower() and "full" in sys_msg.lower(), \
-            "PostCompact should re-offer bootstrap when no context stored"
+        assert "call bootstrap_context now" in sys_msg
 
     def test_no_context_does_not_say_reloaded(self, tmp_repo):
         result = store.get_post_compact_context(tmp_repo)
@@ -366,422 +334,47 @@ class TestPostCompactContext:
 # ── 4c. Bootstrap instruction correctness ────────────────────────────────────
 
 class TestBootstrapInstructions:
-    def test_always_shown_for_task_prompts(self, tmp_repo):
-        """Bootstrap offer must be shown always - even when user sent a task or question."""
-        lines = store._build_bootstrap_context(tmp_repo)
-        full_text = "\n".join(lines)
-        assert "CRITICAL" in full_text, "Bootstrap must use a critical instruction so it isn't skipped for task prompts"
-
-    def test_no_just_continues_skip_rule(self, tmp_repo):
-        """'just continues → skip' was the original bug - must be gone."""
-        lines = store._build_bootstrap_context(tmp_repo)
-        full_text = "\n".join(lines)
-        assert "just continues" not in full_text
-
-    def test_stops_and_waits_for_response(self, tmp_repo):
-        """Bootstrap must pause after the offer - not proceed with the original task."""
-        lines = store._build_bootstrap_context(tmp_repo)
-        full_text = "\n".join(lines)
-        assert "CRITICAL" in full_text or "stop completely" in full_text.lower()
-        assert "wait" in full_text.lower()
-        assert "immediately answer" not in full_text
-
-    def test_no_skip_path_for_direct_no(self, tmp_repo):
-        lines = store._build_bootstrap_context(tmp_repo)
-        full_text = "\n".join(lines)
-        assert "no or skip" in full_text
-
-    def test_ambiguous_offer_options_are_parallel_modes(self, tmp_repo):
-        """Options must be modes, not yes/no mixed with modes. tmp_repo has no .git → ambiguous variant."""
-        full_text = "\n".join(store._build_bootstrap_context(tmp_repo))
-        for option in ["1. quick -", "2. full -", "3. scan -", "4. skip -"]:
-            assert option in full_text
-        assert not re.search(r"\d\. some -", full_text), \
-            "'some' has no row: five options exceed the picker cap"
-        assert "'some' if you work with it" in full_text, \
-            "'some' must stay a documented typed reply"
-
-    def test_scan_option_never_quizzes_whichever_insight_it_routes_to(self, tmp_repo):
-        """Ambiguous routes scan to 'medium' (it doubles as the 'some' row - see
-        test_ambiguous_scan_keeps_the_purpose_gap); either way scan must never quiz.
-
-        Asserts the scan HANDLER line, not a bare "insight='medium'": that substring is also
-        emitted by the always-present 'some' handler, so the loose form passed even when scan
-        routed elsewhere."""
-        full_text = "\n".join(store._build_bootstrap_context(tmp_repo))
-        scan_line = [ln for ln in full_text.splitlines() if ln.startswith("If scan")]
-        assert len(scan_line) == 1, "exactly one scan handler must be emitted"
-        assert "insight='medium'" in scan_line[0], scan_line[0]
-        assert "do NOT quiz" in scan_line[0].replace("Do NOT quiz", "do NOT quiz")
-
-    def test_some_option_maps_to_medium_insight(self, tmp_repo):
-        full_text = "\n".join(store._build_bootstrap_context(tmp_repo))
-        assert "insight='medium'" in full_text
-
-
-class TestBootstrapAutomaticStorage:
-    """bootstrap_context now self-stores detected facts and measured conventions
-    (apply=True default) - the handler instructions must reflect that: no more
-    per-fact choreography telling the model to store what the tool already stored."""
-
-    def test_handlers_do_not_instruct_per_fact_storage(self, tmp_repo):
-        full_text = "\n".join(store._build_bootstrap_context(tmp_repo))
-        assert "store each inferred fact" not in full_text.lower()
-        assert "confirm and store" not in full_text.lower()
-        assert "do NOT re-store" in full_text
-
-    def test_handlers_mention_automatic_storage_and_counts(self, tmp_repo):
-        full_text = "\n".join(store._build_bootstrap_context(tmp_repo))
-        assert "stored automatically" in full_text
-        assert "stored/pending counts" in full_text
-
-    def test_resume_mining_does_not_instruct_per_fact_storage(self, tmp_repo):
-        ctx = "\n".join(store._build_resume_mining_context(tmp_repo))
-        assert "stored automatically" in ctx
-        assert "store only the scan facts" not in ctx.lower()
-        assert "never invent" in ctx
-
-
-# ── 4d. Offer variants by detected insight ────────────────────────────────────
-
-class TestOfferVariants:
-    def test_high_decisive_skips_familiarity_and_demotes_scan(self, git_repo):
-        _git_commit(git_repo, ME, 5)
-        _set_me(git_repo)
-        text = "\n".join(store._build_bootstrap_context(git_repo))
-        assert "How well do you know this repo?" not in text
-        assert "1. quick -" in text and "2. full -" in text
-        assert "4. scan - I'm actually new to this repo" in text, "override must stay visible"
-
-    def test_low_decisive_states_evidence_not_conclusion(self, git_repo, tmp_path):
-        _git_commit(git_repo, OTHER, 3)
-        clone = tmp_path / "clone"
-        subprocess.run(["git", "clone", "-q", git_repo, str(clone)], check=True)
-        subprocess.run(["git", "config", "user.email", ME], cwd=clone, check=True)
-        text = "\n".join(store._build_bootstrap_context(str(clone)))
-        assert "No commits from your git email" in text, "must state the evidence"
-        assert "you're new to this repo" not in text, "must not assert a conclusion that may be wrong"
-        assert "1. scan -" in text, "scan must lead when the evidence says no commits"
-        assert "2. quick -" in text and "3. full -" in text, \
-            "the override rows themselves must stay visible, not just the reply-key line"
-
-    def test_ambiguous_asks_familiarity(self, tmp_repo):
+    def test_discovery_is_nonblocking_without_setup_question(self, tmp_repo):
         text = "\n".join(store._build_bootstrap_context(tmp_repo))
-        assert "How well do you know this repo?" in text
+        assert "Continue the user's task" in text
+        assert "call bootstrap_context now" in text
+        assert "without asking setup permission or familiarity" in text
+        assert "incomplete until that report is saved" in text
 
-    def test_medium_nondecisive_suggests_some(self, git_repo):
-        _git_commit(git_repo, OTHER, 1)
-        _git_commit(git_repo, ME, 2)
-        _set_me(git_repo)
-        text = "\n".join(store._build_bootstrap_context(git_repo))
-        assert "How well do you know this repo?" in text, "1-4 commits is non-decisive - must still ask"
-        assert "reply 'some'" in text, "the medium hint must still name the typed 'some' reply"
-
-    def test_all_variants_are_numbered_and_capped_at_four(self, git_repo, tmp_path, tmp_repo):
-        """AskUserQuestion takes at most 4 options (+ its own free-text 'Other'), so a menu
-        that can't be rendered as a picker is a bug, not a style choice."""
-        _git_commit(git_repo, ME, 5)
-        _set_me(git_repo)
-        clone = tmp_path / "clone"
-        subprocess.run(["git", "clone", "-q", git_repo, str(clone)], check=True)
-        subprocess.run(["git", "config", "user.email", OTHER], cwd=clone, check=True)
-        for label, repo in [("high", git_repo), ("ambiguous", tmp_repo), ("low", str(clone))]:
-            text = "\n".join(store._build_bootstrap_context(repo))
-            rows = re.findall(r"^\s+(\d)\. (\w+) -", text, re.MULTILINE)
-            assert [n for n, _ in rows] == ["1", "2", "3", "4"], f"{label}: {rows}"
-            assert {kw for _, kw in rows} == {"quick", "full", "scan", "skip"}, \
-                f"{label}: every variant offers the same four modes, only the order differs"
-
-    def test_offer_instructs_picker_with_text_fallback(self, tmp_repo):
-        text = "\n".join(store._build_bootstrap_context(tmp_repo))
-        assert "AskUserQuestion" in text, "must name the tool the host actually exposes"
-        assert "multiple-choice question" in text
-        assert "Without such a tool, print the numbered list" in text, \
-            "hosts with no picker must still get the text list"
-
-    def test_numeric_and_keyword_replies_both_documented(self, tmp_repo):
-        text = "\n".join(store._build_bootstrap_context(tmp_repo))
-        assert "Their reply is one of - 1-4, or quick / full / scan / skip" in text, \
-            "the offer's own reply line must advertise the numbers"
-        assert "A numeric reply means the option at that position" in text
-        assert "treat that as skip" in text, "a cancelled picker must not re-ask"
-
-    def test_picker_answer_is_handled_in_the_same_turn(self, tmp_repo):
-        """An AskUserQuestion answer returns as a tool result inside the turn. The old
-        text-mode 'stop completely / wait for them to reply' wording, kept verbatim next to
-        the picker path, told the model to end its turn instead - dropping the answer."""
-        text = "\n".join(store._build_bootstrap_context(tmp_repo))
-        assert "do not end the turn on the question" in text
-        assert "act on it immediately" in text
-        assert "In plain text your turn ends with the list" in text, \
-            "the no-picker host must still stop and wait"
-        assert "stop completely" not in text, \
-            "the unqualified stop instruction contradicts the same-turn picker reply"
-
-    def test_bare_yes_maps_to_option_one_of_this_variant(self, git_repo, tmp_path):
-        """Option 1 is not the same mode in every variant: in the low variant the proposal on
-        the table is scan, so a blanket "'yes' means quick" would start the author interview
-        that variant exists to prevent. Only the DECISIVE variants resolve an affirmative at
-        all - see test_bare_yes_never_infers_authorship_when_insight_is_ambiguous."""
-        _git_commit(git_repo, ME, 5)
-        _set_me(git_repo)
-        clone = tmp_path / "clone"
-        subprocess.run(["git", "clone", "-q", git_repo, str(clone)], check=True)
-        subprocess.run(["git", "config", "user.email", OTHER], cwd=clone, check=True)
-        for expected, repo in [("quick", git_repo), ("scan", str(clone))]:
-            text = "\n".join(store._build_bootstrap_context(repo))
-            assert f"means option 1 - here that is {expected}," in text, \
-                f"{repo}: bare 'yes' must resolve to this variant's first row"
-
-    def test_bare_yes_never_infers_authorship_when_insight_is_ambiguous(self, tmp_repo):
-        """The ambiguous question is "How well do you know this repo?" and its option 1 says
-        "I wrote or maintain it". A bare "yes" makes no such claim, and resolving it there
-        routes a newcomer to insight='high' - dropping the goal gap they can answer and
-        asking only the purpose question they cannot."""
-        text = "\n".join(store._build_bootstrap_context(tmp_repo))
-        assert "means option 1 - here that is" not in text, \
-            "no affirmative may resolve to a row in the variant that cannot tell"
-        assert "Never infer authorship from an affirmative" in text
-        assert "ask which of the four they mean" in text
-
-    def test_ambiguous_scan_keeps_the_purpose_gap(self, tmp_repo, git_repo, tmp_path):
-        """'some' has no row, so scan is also what a works-with-it-but-didn't-build-it developer
-        picks. insight='low' returns only the goal gap - the purpose question (min_insight
-        'medium') would be silently dropped for a user who can answer it."""
-        text = "\n".join(store._build_bootstrap_context(tmp_repo))
-        assert "If scan (didn't build it, or first time here)" in text
-        assert "insight='medium'. That row covers BOTH" in text
-        assert "insight='low'" not in text, \
-            "the ambiguous variant must not route scan to the no-questions path"
-        # the low-decisive variant still means what it says: no quizzing
-        _git_commit(git_repo, OTHER, 3)
-        clone = tmp_path / "clone2"
-        subprocess.run(["git", "clone", "-q", git_repo, str(clone)], check=True)
-        subprocess.run(["git", "config", "user.email", ME], cwd=clone, check=True)
-        low = "\n".join(store._build_bootstrap_context(str(clone)))
-        assert "If scan (first time seeing this repo) → call bootstrap_context with insight='low'" in low
-
-    def test_gap_options_are_optional_when_the_hint_names_no_candidates(self):
-        """Half the real hints are one comma-list or a restatement of the question; forcing two
-        middle options out of them produces junk choices."""
-        guide = store.GAP_ASK_GUIDE
-        assert "ONLY if the gap's `hint` names distinct candidate answers" in guide
-        assert "lists one answer's parts" in guide, \
-            "a comma-list belonging to one answer must not be split into rival options"
-        assert "stands complete without them" in guide, \
-            "zero middle options must be a valid rendering"
-
-    def test_handler_mapping_covers_every_advertised_mode(self, git_repo, tmp_path, tmp_repo):
-        """Every variant maps quick/full → high and some → medium; scan's level is
-        variant-dependent, so assert the scan HANDLER itself in all three - a bare
-        "insight='...'" substring check passes on the unrelated 'some' handler."""
-        clone = tmp_path / "clone"
-        _git_commit(git_repo, OTHER, 3)
-        subprocess.run(["git", "clone", "-q", git_repo, str(clone)], check=True)
-        subprocess.run(["git", "config", "user.email", ME], cwd=clone, check=True)
-        high_repo = tmp_path / "mine"
-        high_repo.mkdir()
-        subprocess.run(["git", "init", "-q"], cwd=high_repo, check=True)
-        _set_me(str(high_repo))
-        _git_commit(str(high_repo), ME, 5)
-
-        def scan_handler(repo):
-            lines = "\n".join(store._build_bootstrap_context(repo)).splitlines()
-            hits = [ln for ln in lines if ln.startswith("If scan")]
-            assert len(hits) == 1, f"{repo}: expected one scan handler, got {len(hits)}"
-            return hits[0]
-
-        ambiguous = "\n".join(store._build_bootstrap_context(tmp_repo))
-        low = "\n".join(store._build_bootstrap_context(str(clone)))
-        high = "\n".join(store._build_bootstrap_context(str(high_repo)))
-        for text in (ambiguous, low, high):
-            assert "insight='high'" in text and "insight='medium'" in text
-            assert "If no or skip" in text
-        # scan's routing, pinned per variant - this is what a bare substring check missed
-        assert "insight='medium'" in scan_handler(tmp_repo), \
-            "scan doubles as the 'some' row here - routing it to 'low' drops the purpose gap"
-        assert "insight='low'" in scan_handler(str(clone)), \
-            "the low-decisive variant keeps the minimal-questions path"
-        assert "insight='low'" in scan_handler(str(high_repo)), \
-            "a repo author who says they're new must not be quizzed on purpose"
-
-    def test_gap_questions_are_asked_one_at_a_time_as_pickers(self):
-        guide = store.GAP_ASK_GUIDE
-        assert "ONE question at a time, never batched" in guide, \
-            "batching gaps would skip the re-evaluation that drops later gaps"
-        assert "Skip this one" in guide and "Never more than 4 options" in guide
-        assert "ANSWERS THE QUESTION" in guide, \
-            "storing the assumption's own wording answers a different question than the gap asked"
-        assert "never the assumption's own wording" in guide
-
-    def test_correct_option_is_gated_on_the_assumption_answering_the_question(self):
-        """Most assumptions are scan observations that answer their gap. A gap no repo signal
-        can pre-answer now ships with no assumption at all, so the rule reduces to: no
-        assumption, no 'Correct' option."""
-        guide = store.GAP_ASK_GUIDE
-        assert "ONLY when that assumption actually answers the gap's question" in guide
-        assert "no assumption" in guide
-
-    def test_guide_directs_the_model_to_read_the_enumerated_context_files(self):
-        """Docs shape the QUESTION, never the store. A rule file that already answers a gap
-        turns it from an open question into confirm-or-correct - and only the developer's
-        confirmed answer is stored, never the quoted line."""
-        guide = store.GAP_ASK_GUIDE
-        assert "`context_docs`" in guide, \
-            "must name the doc-only list, not existing_context_files - that one holds lockfiles" \
-            " and literal glob strings like '.eslintrc*' the model cannot read"
-        assert "confirm or correct" in guide
-        assert "never the quote" in guide
-
-    def test_guide_allows_exactly_one_added_question_the_contradiction(self):
-        """The no-added-questions rule and the doc-vs-measurement check collided: a
-        contradiction question is by definition not one of the returned gaps, so it IS an
-        addition. The guide must carve it out explicitly or the model picks a rule at random."""
-        guide = store.GAP_ASK_GUIDE
-        assert "ONE addition" in guide and "only this one" in guide
-        assert "`measured_conventions`" in guide, \
-            "the check is unexecutable unless the measurements ride the same payload"
-
-    def test_measured_conventions_ride_the_bootstrap_result(self, tmp_repo):
-        """bootstrap_apply mined these for gap suppression and threw them away; the guide's
-        contradiction check needs both sides in one payload."""
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        mined = [{"content": "Functions use type hints (61% of 556 functions)",
-                  "subtype": "convention", "tier": "medium"}]
-        result = store.bootstrap_scan(tmp_repo, insight="high", mined=mined)
-        assert result["measured_conventions"] == ["Functions use type hints (61% of 556 functions)"]
-
-    def test_ask_shape_is_not_carried_by_the_session_start_injection(self, tmp_repo):
-        """The guide is usable only once gaps exist, but this block is injected at every
-        context-less session start, at the first prompt, and post-compact - including the skip
-        and STEP 0 paths. It points at bootstrap_context's how_to_ask instead of restating."""
-        text = "\n".join(store._build_bootstrap_context(tmp_repo))
-        assert "ONE question at a time, never batched" not in text, \
-            "the ask shape must not be re-inlined into the always-injected block"
-        assert "`how_to_ask`" in text, "the block must point at where the shape lives"
-
-    def test_newcomer_question_check_comes_before_menu(self, tmp_repo):
-        """A repo question must be ANSWERED, not met with the menu - so STEP 0 (answer-first)
-        must precede the 'response must be ONLY the offer' directive, or it loses to it."""
-        text = "\n".join(store._build_bootstrap_context(tmp_repo))
-        assert "STEP 0" in text
-        assert "Answer it" in text and "do NOT show a setup menu" in text
-        assert text.index("STEP 0") < text.index("ENTIRE response must be ONLY the offer block")
-
-    def test_newcomer_question_check_in_low_variant(self, git_repo, tmp_path):
-        _git_commit(git_repo, OTHER, 3)
-        clone = tmp_path / "clone"
-        subprocess.run(["git", "clone", "-q", git_repo, str(clone)], check=True)
-        subprocess.run(["git", "config", "user.email", ME], cwd=clone, check=True)
-        text = "\n".join(store._build_bootstrap_context(str(clone)))
-        assert "STEP 0" in text
-
-    def test_newcomer_check_present_when_high_decisive_with_maintainer_framing(self, git_repo):
-        """A repo author asking what the repo does still gets answered - but as a fellow
-        maintainer, never quizzed as a newcomer. STEP 0 applies at every insight level."""
-        _git_commit(git_repo, ME, 5)
-        _set_me(git_repo)
-        text = "\n".join(store._build_bootstrap_context(git_repo))
-        assert "STEP 0" in text
-        assert "fellow maintainer" in text
-        assert "I'll assume you're new" in text  # only as the NEGATIVE instruction (do NOT say)
-        assert "answer as a newcomer would need" not in text
-
-    def test_offer_includes_repo_name(self, tmp_repo):
-        """Offer text must show the repo folder name so misfiring is immediately visible."""
-        from pathlib import Path
-        name = Path(tmp_repo).name
-        text = "\n".join(store._build_bootstrap_context(tmp_repo))
-        assert f'"{name}"' in text
-
-    def test_purpose_question_never_echoed_back(self, tmp_repo):
-        """Picking full after asking 'what does this repo do?' must not quiz the user
-        with their own question."""
-        text = "\n".join(store._build_bootstrap_context(tmp_repo))
-        assert "never echo it back" in text
-        assert "store the confirmed summary as the purpose" in text
-
-
-# ── 4f. Deterministic newcomer-question detection ─────────────────────────────
 
 class TestNewcomerQuestionDetection:
-    @pytest.mark.parametrize("prompt", [
-        "what is this repo doing?",
-        "what is repo doing?",          # article-less - the reported miss
-        "what does project do",         # article-less
-        "What does this project do?",
-        "explain this codebase",
-        "tell me about this repo",
-        "how does this code work",
-        "walk me through this codebase please",
-        "give me an overview of this project",
-        "whats this repo about",
-        # summarize variants - the original misfiring report
-        "summarize this repo",
-        "summarize the codebase",
-        "summarize this project",
-        "can you summarize this repo?",
-        "please summarize the code",
-        "summary of this repo",
-        "give me a summary of this project",
-    ])
-    def test_newcomer_questions_match(self, prompt):
-        assert store._is_newcomer_question(prompt) is True
-
-    @pytest.mark.parametrize("prompt", [
-        "fix the bug in store.py",
-        "add a logout endpoint to the api",
-        "why did we choose uv over pip?",
-        "what is this function doing",  # code-element question, not repo-level
-        "refactor the elevator scheduling logic",
-        "summarize the changes in the last commit",  # not repo-level
-        "",
-    ])
-    def test_other_prompts_do_not_match(self, prompt):
-        assert store._is_newcomer_question(prompt) is False
-
     def test_newcomer_prompt_overrides_menu(self, tmp_repo):
-        result = store.get_bootstrap_context_prompt(tmp_repo, "what is this repo doing?")
-        ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "OVERRIDE" in ctx and "Answer it" in ctx
-        assert "update_context(subtype='architecture')" in ctx  # stores findings
-        assert "How well do you know this repo?" not in ctx
+        ctx = store.bootstrap_prompt_payload(tmp_repo, "summarize this repo")["context"]
+        assert "Continue the user's task" in ctx
+        assert "without asking setup permission or familiarity" in ctx
+
 
     def test_articleless_prompt_overrides_menu(self, tmp_repo):
-        """'what is repo doing?' (no this/the) was the reported miss - must answer, not menu."""
-        result = store.get_bootstrap_context_prompt(tmp_repo, "what is repo doing?")
-        ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "OVERRIDE" in ctx and "Answer it" in ctx
-        assert "How well do you know this repo?" not in ctx
+        ctx = store.bootstrap_prompt_payload(tmp_repo, "summarize this repo")["context"]
+        assert "Continue the user's task" in ctx
+        assert "without asking setup permission or familiarity" in ctx
+
 
     def test_summarize_prompt_overrides_menu(self, tmp_repo):
-        """'summarize this repo' was an earlier misfiring report - must answer, not menu."""
-        result = store.get_bootstrap_context_prompt(tmp_repo, "summarize this repo")
-        ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "OVERRIDE" in ctx and "Answer it" in ctx
-        assert "How well do you know this repo?" not in ctx
+        ctx = store.bootstrap_prompt_payload(tmp_repo, "summarize this repo")["context"]
+        assert "Continue the user's task" in ctx
+        assert "without asking setup permission or familiarity" in ctx
+
 
     def test_task_prompt_gets_the_menu(self, tmp_repo):
         result = store.get_bootstrap_context_prompt(tmp_repo, "fix the login bug")
         assert "OVERRIDE" not in result["hookSpecificOutput"]["additionalContext"]
 
-    def test_newcomer_prompt_in_own_repo_answers_as_maintainer(self, git_repo):
-        """A repo author asking what the repo does is answered (not menued) - as a
-        maintainer, not quizzed. The commit signal tunes phrasing, never blocks the answer."""
-        _git_commit(git_repo, ME, 5)
-        _set_me(git_repo)
-        # Session-start/explicit setup may populate this cache. The prompt fallback itself
-        # is read-only and never invokes Git; a cold cache intentionally uses neutral wording.
-        assert store._cached_insight(git_repo) == ("high", True)
-        ctx = store.get_bootstrap_context_prompt(git_repo, "what is repo doing?")[
-            "hookSpecificOutput"]["additionalContext"]
-        assert "OVERRIDE" in ctx and "Answer it" in ctx
-        assert "fellow maintainer" in ctx
-        assert "How well do you know this repo?" not in ctx
+    def test_newcomer_prompt_in_own_repo_answers_as_maintainer(self, tmp_repo):
+        ctx = store.bootstrap_prompt_payload(tmp_repo, "summarize this repo")["context"]
+        assert "Continue the user's task" in ctx
+        assert "without asking setup permission or familiarity" in ctx
 
-    def test_existing_context_stays_silent(self, tmp_repo):
+
+    def test_existing_context_without_report_requests_bootstrap(self, tmp_repo):
         store.update_decision(tmp_repo, "decided to use postgres for primary storage", "s1")
-        assert store.get_bootstrap_context_prompt(tmp_repo, "what is this repo doing?") == {}
+        result = store.get_bootstrap_context_prompt(tmp_repo, "what is this repo doing?")
+        assert "call bootstrap_context now" in result["hookSpecificOutput"]["additionalContext"]
 
     @pytest.mark.parametrize("raw,expected", [
         ('{"prompt": "hello"}', "hello"),
@@ -798,18 +391,16 @@ class TestNewcomerQuestionDetection:
 # ── 4f-bis. The offer fires once per session ──────────────────────────────────
 
 class TestOfferFiresOncePerSession:
-    """The offer tells the model a dismissed picker means skip and must never be re-asked.
-    Skipping stores nothing, so `if decisions` never suppresses the block - without a flag
-    every later prompt (and every /compact) rebuilt it, re-opening the modal."""
+    """A visible notice and an automatic first-prompt request are distinct deliveries."""
 
-    def test_prompt_fallback_silent_after_session_start_offered(self, tmp_repo):
+    def test_prompt_fallback_runs_even_after_session_start_notice(self, tmp_repo):
         assert store.session_start_payload(tmp_repo, "startup")["context"], "offer expected"
-        assert store.bootstrap_prompt_payload(tmp_repo, "fix the bug")["context"] == "", \
-            "SessionStart already offered this session - the fallback must not re-open it"
+        assert "call bootstrap_context now" in store.bootstrap_prompt_payload(tmp_repo, "fix the bug")["context"]
+        assert store.bootstrap_prompt_payload(tmp_repo, "and now the tests")["context"] == ""
 
     def test_prompt_fallback_offers_once_when_session_start_never_ran(self, tmp_repo):
         first = store.bootstrap_prompt_payload(tmp_repo, "fix the bug")["context"]
-        assert "CRITICAL INSTRUCTION" in first, "hosts without SessionStart still get the offer"
+        assert "call bootstrap_context now" in first, "hosts without SessionStart still get the offer"
         assert store.bootstrap_prompt_payload(tmp_repo, "and now the tests")["context"] == "", \
             "one offer per session, not one per prompt"
 
@@ -820,18 +411,18 @@ class TestOfferFiresOncePerSession:
         assert store.post_compact_payload(tmp_repo)["context"] == ""
 
     def test_compact_still_offers_when_nothing_offered_yet(self, tmp_repo):
-        assert "CRITICAL INSTRUCTION" in store.session_start_payload(tmp_repo, "compact")["context"]
+        assert "call bootstrap_context now" in store.session_start_payload(tmp_repo, "compact")["context"]
 
     def test_new_session_re_arms_the_offer(self, tmp_repo):
         store.session_start_payload(tmp_repo, "startup")
         assert store.session_start_payload(tmp_repo, "startup")["context"], \
             "a genuinely new session must offer again - the repo still has no context"
 
-    def test_newcomer_question_answers_even_after_the_offer_was_made(self, tmp_repo):
-        """STEP 0 shows no menu; gating it on the offer flag would swallow the answer."""
+    def test_existing_bootstrap_directive_is_not_repeated_for_questions(self, tmp_repo):
         store.session_start_payload(tmp_repo, "startup")
-        ctx = store.bootstrap_prompt_payload(tmp_repo, "what is this repo doing?")["context"]
-        assert "Contexer OVERRIDE" in ctx and "Answer it" in ctx
+        assert store.bootstrap_prompt_payload(tmp_repo, "what is this repo doing?")["context"]
+        assert not store.bootstrap_prompt_payload(tmp_repo, "explain more")["context"]
+
 
     def test_flag_is_per_repo(self, tmp_repo, tmp_path):
         other = tmp_path / "other"
@@ -859,7 +450,9 @@ class TestResumeSessionStart:
         re-injecting duplicates ~1k tokens."""
         store.update_decision(tmp_repo, "decided to use postgres for primary storage", "s1")
         result = store.get_session_start_context(tmp_repo, source="resume")
-        assert "hookSpecificOutput" not in result
+        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "postgres" not in ctx
+        assert "call bootstrap_context now" in ctx
         assert "resumed" in result["systemMessage"]
 
     def test_resume_without_context_mines_conversation(self, tmp_repo):
@@ -870,14 +463,14 @@ class TestResumeSessionStart:
         assert "never invent" in ctx
         assert "How well do you know this repo?" not in ctx, "no menu on resume - mine instead"
 
-    def test_resume_mining_suppresses_menu_fallback(self, tmp_repo):
-        """The UserPromptSubmit once-hook must not inject a contradictory menu after
-        the SessionStart resume branch injected mining instructions."""
+    def test_resume_mining_keeps_nonblocking_first_prompt_fallback(self, tmp_repo):
+        """Resume mining and automatic bootstrap cooperate without a setup menu."""
         store.get_session_start_context(tmp_repo, source="resume")
-        assert store.get_bootstrap_context_prompt(tmp_repo, "continue please") == {}
-        # flag is consumed - the next call behaves normally again
+        first = store.get_bootstrap_context_prompt(tmp_repo, "continue please")
+        assert "call bootstrap_context now" in first["hookSpecificOutput"]["additionalContext"]
+        # One prompt delivery, not a reminder on every subsequent prompt.
         result = store.get_bootstrap_context_prompt(tmp_repo, "continue please")
-        assert result != {}
+        assert result == {}
 
     def test_startup_clears_stale_resume_flag(self, tmp_repo):
         store.get_session_start_context(tmp_repo, source="resume")  # writes flag
@@ -895,7 +488,7 @@ class TestResumeSessionStart:
         result = store.get_session_start_context(tmp_repo, source=source)
         ctx = result["hookSpecificOutput"]["additionalContext"]
         assert "RESUMED session" not in ctx
-        assert "CRITICAL INSTRUCTION" in ctx
+        assert "call bootstrap_context now" in ctx
 
     def test_resume_includes_global_rules(self, tmp_repo):
         store.update_global_decision("always use conventional commits", "s1", subtype="constraint")
@@ -904,103 +497,6 @@ class TestResumeSessionStart:
 
 
 # ── 4h. Reaction-matrix invariants ────────────────────────────────────────────
-
-class TestReactionMatrix:
-    """Every combination of repo state × insight must keep the conversation sane:
-    bounded question counts, well-formed gaps, and a handler for every advertised option."""
-
-    def _repo_states(self, tmp_path):
-        bare = tmp_path / "bare"
-        bare.mkdir()
-        simple = tmp_path / "simple"
-        simple.mkdir()
-        (simple / "main.py").write_text("print('hi')\n")
-        rich = tmp_path / "rich"
-        rich.mkdir()
-        (rich / "pyproject.toml").write_text(
-            '[project]\nname = "x"\ndependencies = ["fastapi", "stripe", "boto3", '
-            '"httpx", "pydantic", "sqlalchemy"]\n')
-        missing = tmp_path / "never-created"
-        return [str(bare), str(simple), str(rich), str(missing)]
-
-    def test_gap_invariants_hold_for_all_combinations(self, tmp_path, monkeypatch):
-        redirect_store_dir(monkeypatch, tmp_path / ".contexer")
-        for repo in self._repo_states(tmp_path):
-            for insight in ["low", "medium", "high", "", "banana"]:
-                result = store.bootstrap_scan(repo, insight=insight)
-                gaps = result["gaps"]
-                label = f"{Path(repo).name} × insight={insight!r}"
-                assert 1 <= len(gaps) <= 8, f"{label}: {len(gaps)} gaps"
-                assert result["insight"] in {"low", "medium", "high"}, label
-                for g in gaps:
-                    assert g["question"].rstrip().endswith("?"), f"{label}: {g['question']!r}"
-                    assert g["subtype"] in {"architecture", "constraint", "pattern", "convention"}, label
-                    assert g["min_insight"] in {"low", "medium", "high"}, label
-                    assert g["hint"], label
-                    # assumption is optional (the goal gap has none); an empty one would
-                    # render as a blank "Correct" option, so present means non-empty.
-                    assert g.get("assumption", "x"), label
-
-    def test_every_advertised_option_has_a_handler(self, tmp_path, monkeypatch):
-        redirect_store_dir(monkeypatch, tmp_path / ".contexer")
-        for repo in self._repo_states(tmp_path):
-            text = "\n".join(store._build_bootstrap_context(repo))
-            rows = re.findall(r"^\s+(\d)\. (\w+) -", text, re.MULTILINE)
-            assert [n for n, _ in rows] == ["1", "2", "3", "4"], \
-                f"{Path(repo).name}: options must be numbered 1-4 with no gaps - got {rows}"
-            for option in ["quick", "full", "some", "scan"]:
-                if option in {kw for _, kw in rows} or f"'{option}'" in text:
-                    assert f"If {option}" in text, \
-                        f"{Path(repo).name}: option '{option}' advertised without a handler"
-            assert "no or skip" in text, f"{Path(repo).name}: skip has no handler"
-
-
-# ── 4e. Insight detection from git signals ────────────────────────────────────
-
-class TestInsightDetection:
-    def test_plain_dir_without_git_is_ambiguous(self, tmp_repo):
-        assert store._detect_insight(tmp_repo) == ("low", False)
-
-    def test_no_user_email_is_ambiguous_never_high(self, git_repo):
-        """The --author='' trap: empty email must not match every commit."""
-        _git_commit(git_repo, OTHER, 6)
-        assert store._detect_insight(git_repo) == ("low", False)
-
-    def test_empty_repo_with_email_is_creator(self, git_repo):
-        _set_me(git_repo)
-        assert store._detect_insight(git_repo) == ("high", True)
-
-    def test_first_commit_author_is_high_regardless_of_count(self, git_repo):
-        _git_commit(git_repo, ME, 1)
-        _git_commit(git_repo, OTHER, 6)
-        _set_me(git_repo)
-        assert store._detect_insight(git_repo) == ("high", True)
-
-    def test_five_own_commits_is_high_decisive(self, git_repo):
-        _git_commit(git_repo, OTHER, 1)
-        _git_commit(git_repo, ME, 5)
-        _set_me(git_repo)
-        assert store._detect_insight(git_repo) == ("high", True)
-
-    def test_few_commits_is_medium_nondecisive(self, git_repo):
-        _git_commit(git_repo, OTHER, 1)
-        _git_commit(git_repo, ME, 2)
-        _set_me(git_repo)
-        assert store._detect_insight(git_repo) == ("medium", False)
-
-    def test_zero_commits_in_local_repo_is_ambiguous(self, git_repo):
-        """Could be an email mismatch in the user's own repo - must ask, not conclude."""
-        _git_commit(git_repo, OTHER, 3)
-        _set_me(git_repo)
-        assert store._detect_insight(git_repo) == ("low", False)
-
-    def test_fresh_clone_is_low_decisive(self, git_repo, tmp_path):
-        _git_commit(git_repo, OTHER, 3)
-        clone = tmp_path / "clone"
-        subprocess.run(["git", "clone", "-q", git_repo, str(clone)], check=True)
-        subprocess.run(["git", "config", "user.email", ME], cwd=clone, check=True)
-        assert store._detect_insight(str(clone)) == ("low", True)
-
 
 # ── 5. Constraint capture ─────────────────────────────────────────────────────
 
@@ -1153,18 +649,6 @@ class TestPatternPromotion:
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert entry["subtype"] == "architecture"
         assert entry.get("occurrence_count") == 2
-
-    def test_bootstrap_scan_no_longer_produces_pattern_gap_for_web_framework_repo(self, tmp_repo):
-        # Validation-placement and error-handling were the only "pattern" gaps, and both
-        # were deleted (bootstrap redesign): they're now measured by the miner instead
-        # of asked. A web-framework repo must no longer produce a pattern gap.
-        Path(tmp_repo).mkdir()
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "api"\ndependencies = ["fastapi", "boto3", "stripe"]\n'
-        )
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        pattern_gaps = [g for g in result["gaps"] if g["subtype"] == "pattern"]
-        assert not pattern_gaps, "validation/error-handling gaps were removed in favor of mining"
 
     def test_distinct_session_ids_tracked(self, tmp_repo):
         """Each hit from a new session is recorded; same session is not double-listed."""
@@ -1401,126 +885,17 @@ class TestRationaleInjection:
         assert result == "", f"Expected silence for: {prompt!r}"
 
 
-# ── 10. Bootstrap scan ────────────────────────────────────────────────────────
-
-class TestBootstrapScan:
-    def test_returns_dict_with_inferred_and_gaps(self, tmp_repo):
-        result = store.bootstrap_scan(tmp_repo)
-        assert isinstance(result, dict)
-        assert "inferred" in result
-        assert "gaps" in result
-
-    def test_inferred_and_gaps_are_lists(self, tmp_repo):
-        result = store.bootstrap_scan(tmp_repo)
-        assert isinstance(result["inferred"], list)
-        assert isinstance(result["gaps"], list)
-
-    def test_insight_auto_detected_when_not_given(self, tmp_repo):
-        result = store.bootstrap_scan(tmp_repo)
-        assert result["insight_source"] == "auto"
-        assert result["insight"] == "low" and result["decisive"] is False  # no .git → ambiguous
-
-    def test_invalid_insight_triggers_auto_detect(self, tmp_repo):
-        result = store.bootstrap_scan(tmp_repo, insight="banana")
-        assert result["insight_source"] == "auto"
-
-    def test_user_supplied_insight_is_decisive(self, tmp_repo):
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        assert result["insight_source"] == "user" and result["decisive"] is True
-
-    def test_low_insight_gets_single_goal_question(self, tmp_repo):
-        """First-timers can't answer insider questions - only their own goal is askable."""
-        result = store.bootstrap_scan(tmp_repo, insight="low")
-        assert len(result["gaps"]) == 1
-        assert "planning to do" in result["gaps"][0]["question"]
-
-    def test_medium_insight_gets_goal_and_purpose_only(self, tmp_repo):
-        result = store.bootstrap_scan(tmp_repo, insight="medium")
-        questions = [g["question"] for g in result["gaps"]]
-        assert len(questions) == 2
-        assert any("planning to do" in q for q in questions)
-        assert any("What does this repo do" in q for q in questions)
-
-    def test_high_insight_gets_no_goal_question(self, tmp_repo):
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        assert not any("planning to do" in g["question"] for g in result["gaps"])
-
-    def test_low_insight_gets_no_insider_questions(self, tmp_repo):
-        """Questions about conventions, compliance, CI, or exclusions assume repo authorship."""
-        Path(tmp_repo).mkdir()
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "big-app"\ndependencies = ["fastapi", "sqlalchemy", '
-            '"boto3", "stripe", "httpx", "pydantic"]\n'
-        )
-        high = store.bootstrap_scan(tmp_repo, insight="high")
-        low = store.bootstrap_scan(tmp_repo, insight="low")
-        assert len(high["gaps"]) > 1, "high insight should get intent questions for a production-signal repo"
-        assert len(low["gaps"]) == 1, "low insight must never get insider questions"
-
-    def test_low_insight_still_infers_facts_from_code(self, tmp_repo):
-        Path(tmp_repo).mkdir()
-        (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "some-lib"\n')
-        result = store.bootstrap_scan(tmp_repo, insight="low")
-        assert any("some-lib" in f for f in result["inferred"])
-
-    def test_full_on_bare_repo_still_interviews(self, tmp_repo):
-        """'full' is explicit opt-in to an interview - a simple repo must not collapse it
-        to a single question; the author's head holds decisions no scan can reach.
-        Floor is 3 (not 4): the generic "conventions" filler is redundant once mining
-        measures conventions directly, so the un-mined bootstrap_scan() path here still
-        gets it, but the guaranteed minimum itself dropped by one."""
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        assert len(result["gaps"]) >= 3
-        subtypes = {g["subtype"] for g in result["gaps"]}
-        assert {"architecture", "convention"} <= subtypes
-
-    def test_signal_rich_repo_gets_no_interview_padding(self, tmp_repo):
-        Path(tmp_repo).mkdir()
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "big-app"\ndependencies = ["fastapi", "sqlalchemy", '
-            '"boto3", "stripe", "httpx", "pydantic"]\n'
-        )
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        assert len(result["gaps"]) >= 4
-        assert not any("aren't visible in it" in g["question"] for g in result["gaps"]), \
-            "signal-rich repos have real questions - generic interview padding not needed"
-
-    def test_interview_floor_not_applied_below_high(self, tmp_repo):
-        assert len(store.bootstrap_scan(tmp_repo, insight="low")["gaps"]) == 1
-        assert len(store.bootstrap_scan(tmp_repo, insight="medium")["gaps"]) == 2
-
-
-# ── 10b. bootstrap_apply flow (bootstrap redesign - core wiring) ─────────────
+# ── 10b. Bootstrap persistence flow (bootstrap redesign - core wiring) ─────────────
 
 class TestBootstrapApplyFlow:
-    def test_session_start_after_apply_shows_rules_not_menu(self, tmp_repo):
+    def test_session_after_scan_has_inferred_context_and_completion_directive(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "mod.py").write_text(
-            "\n".join(f"def fn_snake_{i}():\n    pass\n" for i in range(25))
-        )
-        store.bootstrap_apply(tmp_repo, "sess-flow")
-
-        payload = store.session_start_payload(tmp_repo)
-
-        assert "Project rules" in payload["context"]
-        assert "no project context stored" not in payload["context"].lower()
-
-    def test_confidence_factors_include_observed_in_repository(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "mod.py").write_text(
-            "\n".join(f"def fn_snake_{i}():\n    pass\n" for i in range(25))
-        )
-        store.bootstrap_apply(tmp_repo, "sess-flow")
-
-        data = store.load(tmp_repo)
-        entry = next(
-            e for e in data["entries"]
-            if e["type"] == "decision" and "snake_case" in e["content"]
-        )
-        current_rev = next(
-            r for r in entry["revisions"] if r["revision_id"] == entry["current_revision_id"]
-        )
-        assert "Observed in repository" in current_rev["evidence"]
+        (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nrequires-python = ">=3.12"\n')
+        bootstrap.run(tmp_repo, "sess-flow")
+        ctx = store.session_start_payload(tmp_repo)["context"]
+        assert "Python requirement is >=3.12" in ctx
+        assert "not human-approved policy" in ctx
+        assert "incomplete until that report is saved" in ctx
 
 
 # ── 11. Uninstall ─────────────────────────────────────────────────────────────
@@ -1963,12 +1338,12 @@ class TestNonGitProjectDir:
         assert "never hardcode dynatrace api tokens" in ctx.lower()
         assert "1 architecture" in ctx
 
-    def test_bootstrap_hook_does_not_offer_setup_without_git(self, non_git_project, tmp_home):
+    def test_bootstrap_hook_requests_missing_analysis_without_git(self, non_git_project, tmp_home):
         cli.install()
         cmds = self._hook_cmds(tmp_home, "UserPromptSubmit", "get_bootstrap_context_prompt")
         assert len(cmds) == 1
         out = self._run(tmp_home, non_git_project, cmds[0], '{"prompt": "hello"}')
-        assert out == {}, f"bootstrap must not offer setup when context exists: {out}"
+        assert "call bootstrap_context now" in out["hookSpecificOutput"]["additionalContext"]
 
     def test_per_prompt_hooks_resolve_via_cwd_without_git(self, non_git_project, tmp_home,
                                                           monkeypatch):
@@ -1993,7 +1368,7 @@ class TestNonGitProjectDir:
         redirect_store_dir(monkeypatch, tmp_home / ".contexer")
         monkeypatch.chdir(tmp_home)
         payload = store.session_start_payload("")
-        assert "no context stored" in payload["status"]
+        assert 'ask "Run Contexer bootstrap"' in payload["status"]
         assert not (tmp_home / ".contexer" / ".current_repo").exists()
 
     def test_deleted_cwd_never_crashes_the_hook(self, tmp_home, monkeypatch):
@@ -2002,7 +1377,7 @@ class TestNonGitProjectDir:
         redirect_store_dir(monkeypatch, tmp_home / ".contexer")
         monkeypatch.setattr(store.os, "getcwd", lambda: (_ for _ in ()).throw(OSError()))
         payload = store.session_start_payload("")
-        assert "no context stored" in payload["status"]
+        assert 'ask "Run Contexer bootstrap"' in payload["status"]
         assert store.bootstrap_prompt_payload("", "hello") is not None
 
     def test_filesystem_root_is_not_a_sane_repo(self):

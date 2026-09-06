@@ -39,6 +39,8 @@ def derive_title(content: str) -> str:
 
 def compute_confidence(entry: dict) -> tuple[int, list[str]]:
     """Compute a confidence score from a decision's aggregate evidence."""
+    if entry.get("bootstrap") and entry.get("approved_by") != "human":
+        return 30, ["Source-backed bootstrap context; repetition is not independent confirmation"]
     score = 30
     factors: list[str] = []
 

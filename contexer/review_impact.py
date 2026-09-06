@@ -411,7 +411,9 @@ def review_impact(repo_path: str, entry: dict, context: dict | None = None) -> d
     # block exists to prevent. The standing origin is kept beside it, never replaced by it.
     standing = _origin_label(entry.get("created_by"))
     proposed = _origin_label(prop.get("source")) if prop else ""
+    from contexer import bootstrap
     return {
+        "bootstrap_evidence": bootstrap.render(entry, repo_path),
         "identity": {
             "id": str(entry.get("id") or ""),
             "title": one_line(prop.get("title") or entry.get("title") or ""),
@@ -508,6 +510,7 @@ def impact_lines(impact: dict, seen_coverage: set | None = None) -> list[str]:
         lines.append(f"Review priority: {score} - "
                      "ranking only, not a probability that this is correct")
 
+    lines.extend(one_line(line) for line in impact.get("bootstrap_evidence", []))
     evidence = impact.get("evidence") or {}
     # Three headings for three tiers. "Supporting" is not "Confirmed": a test run and an edit
     # that merely followed a directive corroborate it, they do not witness it.

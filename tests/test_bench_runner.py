@@ -42,6 +42,21 @@ def _make_stub(tmp_path, content):
     return str(p)
 
 
+def test_bootstrap_setup_uses_stable_tool_surface(tmp_path, monkeypatch):
+    from benchmarks import run
+    from contexer import server, store
+
+    commands, captures = [], []
+    monkeypatch.setattr(run.subprocess, "run", lambda args, **kwargs: commands.append(args))
+    run._condition_b_setup(str(tmp_path), tmp_path / "isolated", "Keep billing idempotent.")
+    code = commands[-1][-1]
+    monkeypatch.setattr(server, "bootstrap_context", lambda **kwargs: captures.append(kwargs))
+    monkeypatch.setattr(store, "update_decision", lambda *args, **kwargs: captures.append((args, kwargs)))
+    exec(compile(code, "<benchmark-bootstrap>", "exec"), {})
+    assert captures[0] == {"repo_path": str(tmp_path)}
+    assert captures[1][1] == {"created_by": "human"}  # only explicit campaign seed is policy
+
+
 def _run_stubbed_campaign(*args, **kwargs):
     """Run the benchmark harness against a local test stub."""
     return run_campaign(*args, **kwargs, wait_for_otel=False)

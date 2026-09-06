@@ -2,7 +2,6 @@
 import contextlib
 import json
 import os
-import subprocess
 import time
 import uuid
 from datetime import datetime, timezone
@@ -10,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from contexer import sidecars
+from contexer import bootstrap, sidecars
 from tests.conftest import redirect_store_dir
 from contexer import miner as miner_mod
 from contexer import retrieval, review, revisions
@@ -471,18 +470,13 @@ class TestRepoSourceStamp:
         monkeypatch.setattr(store, "_SESSION_REPO", session)
         assert store._hook_repo_verbose(str(Path.home() / ".claude")) == (session, "session")
 
-    def test_bootstrap_stamps_its_bulk_write(self, tmp_repo, monkeypatch):
-        # The largest bulk write in the system — a misroute here plants the most content in
-        # the wrong store, so it is the write that most needs its branch recorded.
-        monkeypatch.setattr(store, "bootstrap_scan",
-                            lambda *a, **k: {"inferred": ["Python 3.12", "uv"], "gaps": []})
-        monkeypatch.setattr("contexer.miner.mine_conventions",
-                            lambda *a, **k: [{"content": "Functions use snake_case (98% of 412)",
-                                              "subtype": "convention", "tier": "high"}])
-        store.bootstrap_apply(tmp_repo, "s1", "high", repo_source="pointer")
-
+    def test_bootstrap_records_only_observed_context_without_human_stamp(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nrequires-python = ">=3.12"\n')
+        bootstrap.run(tmp_repo, "s1", repo_source="pointer")
         entries = store.load(tmp_repo)["entries"]
-        assert entries and all(e["repo_source"] == "pointer" for e in entries)
+        assert entries and all(e["created_by"] == "ai" and "approved_by" not in e for e in entries)
+
 
     def test_constraint_capture_stamps_too(self, tmp_repo):
         # The hook-driven surface: no MCP server binding of its own, so it is the path most
@@ -499,17 +493,14 @@ class TestGetSessionStartContext:
     def test_empty_repo_offers_bootstrap(self, tmp_repo):
         result = store.get_session_start_context(tmp_repo)
         assert "bootstrap" in result["hookSpecificOutput"]["additionalContext"].lower()
-        assert "no context stored" in result["systemMessage"].lower()
+        assert 'ask "run contexer bootstrap"' in result["systemMessage"].lower()
 
-    def test_empty_repo_directive_stops_and_waits(self, tmp_repo):
-        # Bootstrap offer must pause Claude — it waits for yes/full/no before doing anything
-        result = store.get_session_start_context(tmp_repo)
-        ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "CRITICAL" in ctx or "stop completely" in ctx.lower()
-        assert "yes" in ctx.lower()
-        assert "skip" in ctx.lower()
-        # Hard constraint: Claude must not call bootstrap_context before hearing yes
-        assert "do not" in ctx.lower() or "don't" in ctx.lower()
+    def test_empty_repo_scans_without_stopping_for_confirmation(self, tmp_repo):
+        ctx = store.get_session_start_context(tmp_repo)["hookSpecificOutput"]["additionalContext"]
+        assert "call bootstrap_context now" in ctx
+        assert "without asking setup" in ctx
+        assert "Continue the user's task" in ctx
+
 
     def test_empty_repo_directive_includes_repo_path(self, tmp_repo):
         result = store.get_session_start_context(tmp_repo)
@@ -547,24 +538,19 @@ class TestGetBootstrapContextPrompt:
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
         result = store.get_bootstrap_context_prompt(tmp_repo)
         ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "no project context" in ctx.lower()
-        assert "update_context" in ctx
-
-    def test_populated_repo_returns_empty_dict(self, populated_repo):
-        result = store.get_bootstrap_context_prompt(populated_repo)
-        assert result == {}
-
-    def test_directive_tells_claude_to_call_bootstrap_tool(self, tmp_repo):
-        # Opt-in: Claude asks first, calls bootstrap_context only after user says yes
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "uv.lock").write_text("")
-        result = store.get_bootstrap_context_prompt(tmp_repo)
-        ctx = result["hookSpecificOutput"]["additionalContext"]
+        assert "bootstrap" in ctx.lower()
         assert "bootstrap_context" in ctx
-        assert "CRITICAL" in ctx or "stop completely" in ctx.lower()
-        assert "yes" in ctx.lower()
-        assert "skip" in ctx.lower()
-        assert "do not" in ctx.lower() or "don't" in ctx.lower()
+
+    def test_populated_repo_without_report_requests_bootstrap(self, populated_repo):
+        result = store.get_bootstrap_context_prompt(populated_repo)
+        assert "call bootstrap_context now" in result["hookSpecificOutput"]["additionalContext"]
+
+    def test_directive_scans_before_asking_questions(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        ctx = store.get_bootstrap_context_prompt(tmp_repo)["hookSpecificOutput"]["additionalContext"]
+        assert "call bootstrap_context now" in ctx
+        assert "without asking setup permission or familiarity" in ctx
+
 
     def test_directive_includes_repo_path(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
@@ -572,702 +558,10 @@ class TestGetBootstrapContextPrompt:
         ctx = result["hookSpecificOutput"]["additionalContext"]
         assert tmp_repo in ctx
 
-    def test_directive_includes_update_context_instruction(self, tmp_repo):
+    def test_directive_requires_grounded_report_not_per_fact_choreography(self, tmp_repo):
         Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        result = store.get_bootstrap_context_prompt(tmp_repo)
-        ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "update_context" in ctx
-
-
-# ── bootstrap_scan ────────────────────────────────────────────────────────────
-
-def _gap_questions(result: dict) -> list[str]:
-    return [g["question"] for g in result["gaps"]]
-
-
-class TestBootstrapScan:
-    # ── gap structure ──────────────────────────────────────────────────────────
-
-    def test_gaps_are_dicts_with_required_keys(self, tmp_repo):
-        """`assumption` is optional — a gap no repo signal can pre-answer omits it rather
-        than shipping an unrelated statement the guide then has to teach the model to
-        discard. When present it must be non-empty."""
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        for gap in result["gaps"]:
-            assert "question" in gap
-            assert "hint" in gap
-            if "assumption" in gap:
-                assert gap["assumption"]
-
-    def test_always_asks_primary_purpose(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        assert any("what does this repo do" in q.lower() for q in _gap_questions(result))
-
-    def test_team_context_asked_when_architecture_signals_present(self, tmp_repo):
-        # Team conventions gap is conditional — only when architecture signals suggest collaboration
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        src = Path(tmp_repo) / "src"
-        (src / "api").mkdir(parents=True)
-        (src / "services").mkdir(parents=True)
-        (src / "models").mkdir(parents=True)
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        assert any("branch" in q.lower() or "team" in q.lower() or "pr" in q.lower() for q in _gap_questions(result))
-
-    def test_exclusions_asked_when_dep_choices_exist(self, tmp_repo):
-        # Exclusions gap only fires when dep tree has meaningful choices (>5 deps or ORM detected)
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "api"\nrequires-python = ">=3.12"\n'
-            'dependencies = ["sqlalchemy>=2.0","httpx","pydantic","redis","celery","stripe"]\n'
-        )
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        assert any("exclusion" in q.lower() or "intentionally" in q.lower() for q in _gap_questions(result))
-
-    def test_constraints_asked_when_production_signals_present(self, tmp_repo):
-        # Constraints gap only fires when production signals exist (auth, cloud, infra, container)
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "api"\nrequires-python = ">=3.12"\ndependencies = ["boto3>=1.0"]\n'
-        )
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        assert any("constraint" in q.lower() for q in _gap_questions(result))
-
-    def test_purpose_assumption_ignores_readme_prose(self, tmp_repo):
-        """The README's first non-heading line is as often markup as a tagline — on this very
-        repo it is '<p align="center">', which shipped as the purpose the developer was asked
-        to confirm. Name-derived inference is deterministic and never junk; the model reads the
-        README itself (STEP 0 and the purpose-question rule both tell it to)."""
-        root = Path(tmp_repo)
-        root.mkdir(parents=True, exist_ok=True)
-        (root / "pyproject.toml").write_text('[project]\nname = "my-api-service"\n', encoding="utf-8")
-        (root / "README.md").write_text('<p align="center"><img src="logo.png"></p>\n', encoding="utf-8")
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        purpose_gap = next(g for g in result["gaps"] if "what does this repo do" in g["question"].lower())
-        assert "<p align" not in purpose_gap["assumption"]
-        assert "api" in purpose_gap["assumption"].lower() or "service" in purpose_gap["assumption"].lower()
-
-    def test_goal_gap_carries_no_assumption(self, tmp_repo):
-        """The goal gap asks what the USER plans to do here; the repo's inferred purpose says
-        nothing about that. It shipped anyway, and GAP_ASK_GUIDE spent a paragraph teaching the
-        model to drop it — delete the field, delete the workaround."""
-        root = Path(tmp_repo)
-        root.mkdir(parents=True, exist_ok=True)
-        (root / "pyproject.toml").write_text('[project]\nname = "my-api-service"\n', encoding="utf-8")
-        result = store.bootstrap_scan(tmp_repo, insight="low")
-        goal_gap = next(g for g in result["gaps"] if "planning to do" in g["question"].lower())
-        assert "assumption" not in goal_gap
-
-    # ── context-doc enumeration (docs shape the QUESTION, never the store) ─────
-
-    def test_agent_and_rule_files_are_enumerated(self, tmp_repo):
-        """AGENTS.md, CONTRIBUTING.md and .claude/rules/*.md carry the intent the miner cannot
-        measure, and were invisible to bootstrap entirely. The model can only read what the
-        scan names, so enumeration is the whole mechanism."""
-        root = Path(tmp_repo)
-        root.mkdir(parents=True, exist_ok=True)
-        (root / "AGENTS.md").write_text("# Agents\nNever edit generated/.\n", encoding="utf-8")
-        (root / "CONTRIBUTING.md").write_text("# Contributing\nTrunk-based, squash merges.\n", encoding="utf-8")
-        (root / ".claude" / "rules").mkdir(parents=True)
-        (root / ".claude" / "rules" / "style.md").write_text("Always type-annotate.\n", encoding="utf-8")
-        found = store.bootstrap_scan(tmp_repo, insight="high")["existing_context_files"]
-        assert "AGENTS.md" in found
-        assert "CONTRIBUTING.md" in found
-        assert ".claude/rules/style.md" in found
-
-    def test_a_non_answer_purpose_yields_no_assumption(self, tmp_repo):
-        """_infer_purpose's fallbacks ("Purpose not yet documented", "type not obvious from
-        name alone") are non-answers, but they are TRUTHY, so _gap's omit-when-empty rule let
-        them through and GAP_ASK_GUIDE rendered them as the "Correct" option for 'What does
-        this repo do?'. Clicking Correct then stored a non-answer as the ratified purpose.
-        Before readme_summary was deleted these fired only on repos with no README at all;
-        afterwards they became the common case."""
-        root = Path(tmp_repo)
-        root.mkdir(parents=True, exist_ok=True)
-        (root / "pyproject.toml").write_text('[project]\nname = "contexer"\n', encoding="utf-8")
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        purpose_gap = next(g for g in result["gaps"] if "what does this repo do" in g["question"].lower())
-        assert "assumption" not in purpose_gap
-
-    def test_purpose_inference_matches_name_tokens_not_substrings(self, tmp_repo):
-        """Unanchored `in` matching misreads names: 'rapid-sync' contains 'api', 'webhook'
-        contains 'web', and 'task-manager-ui' hit the worker branch before the ui one. Each
-        was offered to the developer as 'Correct'."""
-        assert store._infer_purpose("rapid-sync") == ""
-        assert store._infer_purpose("webhook-processor") == ""
-        assert "api" in store._infer_purpose("orders-api").lower()
-        assert "cli" in store._infer_purpose("deploy-cli").lower()
-
-    def test_gaps_that_can_be_pre_answered_still_carry_an_assumption(self, tmp_repo):
-        """Paired with test_goal_gap_carries_no_assumption: relaxing both invariants to
-        `assumption` is optional would otherwise pass on a gaps list where EVERY assumption
-        vanished, silently deleting the Correct option from the whole interview."""
-        root = Path(tmp_repo)
-        root.mkdir(parents=True, exist_ok=True)
-        (root / "pyproject.toml").write_text('[project]\nname = "api"\n', encoding="utf-8")
-        gaps = store.bootstrap_scan(tmp_repo, insight="high")["gaps"]
-        deploy_gap = next(g for g in gaps if "where does this run" in g["question"].lower())
-        assert deploy_gap["assumption"]
-
-    def test_contexer_own_generated_rules_file_is_not_offered_as_evidence(self, tmp_repo):
-        """.claude/rules/<x>.md is normally developer-authored, but an earlier Contexer version
-        wrote its OWN auto-generated mirror there (36KB on this repo until it was deleted;
-        header 'Auto-generated. Do not edit manually'), and an install of that vintage still
-        leaves one behind. Enumerating it tells the model to quote Contexer's own stale output
-        back to the developer as evidence to confirm — a decision round-tripping in as if
-        human — so the skip is keyed on the header, not on who wrote the file."""
-        root = Path(tmp_repo)
-        root.mkdir(parents=True, exist_ok=True)
-        rules = root / ".claude" / "rules"
-        rules.mkdir(parents=True)
-        (rules / "contexer.md").write_text(
-            "# Contexer — Live Project Context\n# Auto-generated. Do not edit manually.\n",
-            encoding="utf-8")
-        (rules / "team.md").write_text("Always squash merge.\n", encoding="utf-8")
-        docs = store.bootstrap_scan(tmp_repo, insight="high")["context_docs"]
-        assert ".claude/rules/team.md" in docs
-        assert ".claude/rules/contexer.md" not in docs
-
-    def test_a_rule_doc_about_generated_files_is_still_evidence(self, tmp_repo):
-        """A human-authored rules file that DISCUSSES generated code says the same words a
-        generated banner does. Matching them anywhere in the header dropped the doc — and a
-        "never hand-edit the protos" rule is exactly the kind worth confirming. A banner is a
-        SHORT line in the first few lines; a rule is a sentence."""
-        root = Path(tmp_repo)
-        root.mkdir(parents=True, exist_ok=True)
-        rules = root / ".claude" / "rules"
-        rules.mkdir(parents=True)
-        (rules / "protos.md").write_text(
-            "# Protobuf rules\n\n"
-            "The files under `src/proto` are auto-generated by `make proto`; do not edit them"
-            " manually. Regenerate instead, and never hand-patch the descriptors.\n",
-            encoding="utf-8")
-        (rules / "gen.md").write_text(
-            "# Contexer — Live Project Context\n# Auto-generated. Do not edit manually.\n",
-            encoding="utf-8")
-        docs = store.bootstrap_scan(tmp_repo, insight="high")["context_docs"]
-        assert ".claude/rules/protos.md" in docs, "a rule ABOUT generated files is still a rule"
-        assert ".claude/rules/gen.md" not in docs, "a generated banner is still excluded"
-
-    def test_context_docs_excludes_build_files_and_glob_patterns(self, tmp_repo):
-        """`existing_context_files` is the scan's found-files list — lockfiles, CI dirs, and
-        literal glob strings like '.eslintrc*' that are not readable paths. The guide sends the
-        model to READ what it names, so it gets its own doc-only list."""
-        root = Path(tmp_repo)
-        root.mkdir(parents=True, exist_ok=True)
-        (root / "pyproject.toml").write_text('[project]\nname = "api"\n', encoding="utf-8")
-        (root / "uv.lock").write_text("", encoding="utf-8")
-        (root / ".prettierrc").write_text("{}", encoding="utf-8")
-        (root / "README.md").write_text("# api\n", encoding="utf-8")
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        assert "README.md" in result["context_docs"]
-        for noise in ("uv.lock", "pyproject.toml", ".prettierrc*", ".github/workflows/"):
-            assert noise not in result["context_docs"]
-
-    def test_enumerated_rule_file_does_not_flag_a_simple_repo(self, tmp_repo):
-        """Regression guard, not a red test: enumeration must stay separate from the
-        _SIMPLE_REPO_SIGNALS keyword OR. Feeding these files into it would let a CONTRIBUTING.md
-        that says 'for example' suppress the infra gaps on a real service."""
-        root = Path(tmp_repo)
-        root.mkdir(parents=True, exist_ok=True)
-        (root / "pyproject.toml").write_text('[project]\nname = "api"\n', encoding="utf-8")
-        (root / "CONTRIBUTING.md").write_text("# Contributing\nSee the example below.\n", encoding="utf-8")
-        questions = [g["question"].lower() for g in store.bootstrap_scan(tmp_repo, insight="high")["gaps"]]
-        assert any("where does this run" in q for q in questions)
-
-    def test_purpose_assumption_inferred_from_name(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "my-api-service"\nrequires-python = ">=3.12"\n')
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        purpose_gap = next(g for g in result["gaps"] if "what does this repo do" in g["question"].lower())
-        assert "api" in purpose_gap["assumption"].lower() or "service" in purpose_gap["assumption"].lower()
-
-    def test_max_10_questions(self, tmp_repo):
-        # Even with all gaps triggered, total questions must not exceed 10
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "app"\nrequires-python = ">=3.12"\ndependencies = ["boto3>=1.0","stripe>=2.0"]\n'
-        )
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        assert len(result["gaps"]) <= 10
-
-    # ── language / tooling detection ──────────────────────────────────────────
-
-    def test_detects_python_uv(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "myapp"\nrequires-python = ">=3.12"\n'
-        )
-        (Path(tmp_repo) / "uv.lock").write_text("")
-
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        inferred = " ".join(result["inferred"]).lower()
-        assert "python" in inferred
-        assert "uv" in inferred
-
-    def test_detects_node_typescript_react(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        pkg = {
-            "name": "my-app",
-            "engines": {"node": ">=20"},
-            "dependencies": {"react": "^18.0.0"},
-            "devDependencies": {"typescript": "^5.0.0"},
-        }
-        (Path(tmp_repo) / "package.json").write_text(json.dumps(pkg))
-
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        inferred = " ".join(result["inferred"]).lower()
-        assert "node" in inferred
-        assert "typescript" in inferred
-        assert "react" in inferred
-
-    def test_detects_github_actions(self, tmp_repo):
-        wf_dir = Path(tmp_repo) / ".github" / "workflows"
-        wf_dir.mkdir(parents=True)
-        (wf_dir / "ci.yml").write_text("on: [push]")
-
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        assert any("github actions" in i.lower() for i in result["inferred"])
-
-    # ── deployment detection ───────────────────────────────────────────────────
-
-    def test_detects_dockerfile_suppresses_deployment_gap(self, tmp_repo):
-        # When Dockerfile present, deployment target is known — no need to ask
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "Dockerfile").write_text("FROM python:3.12-slim\n")
-
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        assert any("dockerfile" in i.lower() or "container" in i.lower() for i in result["inferred"])
-        assert not any("where does this run" in g["question"].lower() for g in result["gaps"])
-
-    def test_no_dockerfile_adds_deployment_gap(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        # pyproject.toml marks this as a real code repo — not a simple/docs repo
-        (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "api"\n')
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        env_gap = next(g for g in result["gaps"] if "where does this run" in g["question"].lower())
-        assert "no container" in env_gap["assumption"].lower() or "deployment target" in env_gap["assumption"].lower()
-
-    # ── data layer detection ───────────────────────────────────────────────────
-
-    def test_detects_postgres_dep(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "api"\nrequires-python = ">=3.12"\ndependencies = ["psycopg[binary]>=3.0"]\n'
-        )
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        assert any("postgresql" in i.lower() for i in result["inferred"])
-
-    def test_detects_redis_dep(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        pkg = {"name": "app", "dependencies": {"redis": "^4.0.0"}}
-        (Path(tmp_repo) / "package.json").write_text(json.dumps(pkg))
-
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        assert any("redis" in i.lower() for i in result["inferred"])
-
-    def test_detects_orm_dep(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "api"\nrequires-python = ">=3.12"\ndependencies = ["sqlalchemy>=2.0"]\n'
-        )
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        assert any("sqlalchemy" in i.lower() for i in result["inferred"])
-
-    # ── auth and security-sensitive detection ──────────────────────────────────
-
-    def test_detects_jwt_dep_in_inferred(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "api"\nrequires-python = ">=3.12"\ndependencies = ["python-jose[cryptography]>=3.3"]\n'
-        )
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        assert any("jwt" in i.lower() or "auth" in i.lower() for i in result["inferred"])
-
-    def test_security_sensitive_deps_add_compliance_gap(self, tmp_repo):
-        # Auth or payment deps trigger a compliance question
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "api"\nrequires-python = ">=3.12"\ndependencies = ["stripe>=2.0"]\n'
-        )
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        assert any("compliance" in q.lower() or "security" in q.lower() for q in _gap_questions(result))
-
-    # ── cloud and integration detection ───────────────────────────────────────
-
-    def test_detects_aws_sdk(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "api"\nrequires-python = ">=3.12"\ndependencies = ["boto3>=1.0"]\n'
-        )
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        assert any("aws" in i.lower() for i in result["inferred"])
-
-    def test_detects_stripe_integration(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        pkg = {"name": "app", "dependencies": {"stripe": "^14.0.0"}}
-        (Path(tmp_repo) / "package.json").write_text(json.dumps(pkg))
-
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        assert any("stripe" in i.lower() for i in result["inferred"])
-
-    def test_detects_openai_integration(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "api"\nrequires-python = ">=3.12"\ndependencies = ["openai>=1.0"]\n'
-        )
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        assert any("openai" in i.lower() for i in result["inferred"])
-
-    # ── monorepo detection ─────────────────────────────────────────────────────
-
-    def test_detects_nx_monorepo(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "nx.json").write_text("{}")
-
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        assert any("monorepo" in i.lower() for i in result["inferred"])
-
-    # ── novelty veto ───────────────────────────────────────────────────────────
-
-    def test_skips_inferred_already_in_decisions(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "uv.lock").write_text("")
-        data = store.load(tmp_repo)
-        data["entries"].append({
-            "id": "seed", "type": "decision", "content": "Package manager: uv",
-            "session_id": "seed", "timestamp": "2026-01-01T00:00:00+00:00",
-        })
-        store.save(tmp_repo, data)
-
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        assert not any("uv" in i.lower() for i in result["inferred"])
-
-    # ── is_simple_repo detection ───────────────────────────────────────────────
-
-    def test_empty_repo_is_simple(self, tmp_repo):
-        """No code config + no inferred stack → docs-only → is_simple_repo suppresses infra questions."""
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        # Simple repo: only the purpose gap should appear, no tests/CI/deploy gaps
-        questions = [g["question"].lower() for g in result["gaps"]]
-        assert not any("automated testing" in q for q in questions)
-        assert not any("build or deploy" in q for q in questions)
-        assert not any("where does this run" in q for q in questions)
-
-    def test_readme_portfolio_keyword_suppresses_infra_questions(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "README.md").write_text(
-            "# Interview Submissions\nThis is a portfolio of job interview submissions.\n"
-        )
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        questions = [g["question"].lower() for g in result["gaps"]]
-        assert not any("automated testing" in q for q in questions)
-        assert not any("where does this run" in q for q in questions)
-
-    def test_readme_tutorial_keyword_suppresses_infra_questions(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "README.md").write_text("# Tutorial\nA demo project for learning.\n")
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        questions = [g["question"].lower() for g in result["gaps"]]
-        assert not any("automated testing" in q for q in questions)
-
-    def test_claude_md_portfolio_keyword_suppresses_infra_questions(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "CLAUDE.md").write_text(
-            "This is a portfolio project showcasing interview submissions.\n"
-        )
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        questions = [g["question"].lower() for g in result["gaps"]]
-        assert not any("automated testing" in q for q in questions)
-        assert not any("where does this run" in q for q in questions)
-
-    def test_docs_dir_with_portfolio_keyword_suppresses_infra_questions(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        docs = Path(tmp_repo) / "docs"
-        docs.mkdir()
-        (docs / "overview.md").write_text(
-            "This is a learning exercise and kata for practicing algorithms.\n"
-        )
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        questions = [g["question"].lower() for g in result["gaps"]]
-        assert not any("automated testing" in q for q in questions)
-
-    def test_code_repo_without_portfolio_keywords_gets_infra_questions(self, tmp_repo):
-        """A real code repo (with pyproject.toml, no simple-repo keywords) gets all relevant gaps."""
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "api"\n')
-        result = store.bootstrap_scan(tmp_repo, insight="high")
-        questions = [g["question"].lower() for g in result["gaps"]]
-        assert any("where does this run" in q for q in questions)
-        assert any("automated testing" in q for q in questions)
-
-    def test_claude_md_still_supplies_the_simple_repo_signal(self, tmp_repo):
-        """The summary half of the CLAUDE.md read is gone with readme_summary, but the read
-        itself still earns its place: the keyword scan that suppresses infra gaps on a
-        tutorial/portfolio repo runs off the same text.
-
-        This pins CURRENT behaviour, not an endorsement. _SIMPLE_REPO_SIGNALS is an unanchored
-        substring test, so a production repo whose CLAUDE.md opens "For example, run `make
-        deploy`" also sets is_simple_repo and silently loses its tests/CI/deploy/exclusions
-        gaps. Rule docs were kept out of that scan for exactly this reason; narrowing it for
-        the four grandfathered entries is a separate, behaviour-changing decision."""
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "app"\n', encoding="utf-8")
-        (Path(tmp_repo) / "CLAUDE.md").write_text(
-            "# Project\nThis is a tutorial repo built while learning Python.\n", encoding="utf-8"
-        )
-        questions = [g["question"].lower() for g in store.bootstrap_scan(tmp_repo, insight="high")["gaps"]]
-        assert not any("where does this run" in q for q in questions)
-
-    # ── mined-suppression (bootstrap redesign) ─────────────────────────────────
-
-    def test_mined_test_convention_suppresses_tests_gap(self, tmp_repo):
-        # pyproject.toml (real code repo) + no test config -> tests gap would normally
-        # fire, but a mined test convention makes asking redundant.
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "api"\n')
-        mined = [{"content": "Tests use plain pytest asserts (94% of 61 test functions)",
-                  "subtype": "convention", "tier": "high"}]
-        result = store.bootstrap_scan(tmp_repo, insight="high", mined=mined)
-        assert not any("automated testing" in q.lower() for q in _gap_questions(result))
-
-    def test_mined_test_layout_alone_does_not_suppress_tests_gap(self, tmp_repo):
-        # Layout-only evidence (ad-hoc test files) doesn't prove testing is in scope —
-        # the question must still be asked (Greptile #114).
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "api"\n')
-        mined = [{"content": "Tests live in tests/ (3 test files)",
-                  "subtype": "convention", "tier": "high"}]
-        result = store.bootstrap_scan(tmp_repo, insight="high", mined=mined)
-        assert any("automated testing" in q.lower() for q in _gap_questions(result))
-
-    def test_mined_ci_convention_suppresses_ci_gap(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "api"\n')
-        mined = [{"content": "CI runs: pytest, ruff check (from ci.yml)",
-                  "subtype": "convention", "tier": "high"}]
-        result = store.bootstrap_scan(tmp_repo, insight="high", mined=mined)
-        assert not any("build or deploy" in q.lower() for q in _gap_questions(result))
-
-    def test_mined_three_or_more_suppresses_team_conventions_gap(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        src = Path(tmp_repo) / "src"
-        (src / "api").mkdir(parents=True)
-        (src / "services").mkdir(parents=True)
-        (src / "models").mkdir(parents=True)
-        mined = [
-            {"content": f"Functions use style {i} ({90 + i}% of 100 functions)",
-             "subtype": "convention", "tier": "high"}
-            for i in range(3)
-        ]
-        result = store.bootstrap_scan(tmp_repo, insight="high", mined=mined)
-        assert not any(
-            "branch" in q.lower() or "team" in q.lower() or "pr" in q.lower()
-            for q in _gap_questions(result)
-        )
-
-    def test_mined_config_facts_do_not_suppress_team_conventions_gap(self, tmp_repo):
-        # Config-encoded facts (line length, hook ids) say nothing about branching,
-        # PR flow, or ownership — the team question must survive (Greptile #114).
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        src = Path(tmp_repo) / "src"
-        (src / "api").mkdir(parents=True)
-        (src / "services").mkdir(parents=True)
-        (src / "models").mkdir(parents=True)
-        mined = [
-            {"content": "Line length 100 enforced by ruff (pyproject.toml)",
-             "subtype": "convention", "tier": "high"},
-            {"content": "Pre-commit hooks run: ruff, trailing-whitespace (.pre-commit-config.yaml)",
-             "subtype": "convention", "tier": "high"},
-            {"content": "Mypy strict mode required (pyproject.toml)",
-             "subtype": "convention", "tier": "high"},
-        ]
-        result = store.bootstrap_scan(tmp_repo, insight="high", mined=mined)
-        assert any(
-            "branch" in q.lower() or "team" in q.lower() or "pr" in q.lower()
-            for q in _gap_questions(result)
-        )
-
-    def test_mined_none_behaves_like_today(self, tmp_repo):
-        # mined=None (every existing direct caller) must match mined=[] exactly - no
-        # suppression, identical gap set.
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text('[project]\nname = "api"\n')
-        with_none = store.bootstrap_scan(tmp_repo, insight="high", mined=None)
-        with_empty = store.bootstrap_scan(tmp_repo, insight="high", mined=[])
-        assert _gap_questions(with_none) == _gap_questions(with_empty)
-        assert any("automated testing" in q.lower() for q in _gap_questions(with_none))
-
-
-# ── bootstrap_apply (bootstrap redesign — core wiring) ───────────────────────
-
-SESSION_ID_BA = "test-ba-session"
-
-
-def _snake_file(n_snake: int, n_bad: int = 0) -> str:
-    """A Python module of plain functions - mirrors test_miner.py's `_funcs` helper so
-    the naming-convention stat lands on the same tier boundaries exercised there."""
-    lines = [f"def fn_snake_{i}():\n    pass\n" for i in range(n_snake)]
-    lines += [f"def fnBad{i}():\n    pass\n" for i in range(n_bad)]
-    return "\n".join(lines)
-
-
-class TestBootstrapApply:
-    def test_consolidated_stack_entry_not_per_fact(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "widgets-api"\nrequires-python = ">=3.12"\n'
-            'dependencies = ["fastapi", "sqlalchemy", "boto3", "stripe", "redis"]\n'
-        )
-        result = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
-        decisions = [e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision"]
-        stack_entries = [d for d in decisions if d["content"].startswith("Stack: ")]
-        assert len(stack_entries) == 1
-        inferred_facts = set(result["inferred"])
-        assert not any(d["content"] in inferred_facts for d in decisions)
-
-    def test_high_tier_mined_stored_approved_scan(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=25))
-        result = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
-        entry = next(
-            e for e in store.load(tmp_repo)["entries"]
-            if e["type"] == "decision" and "snake_case" in e["content"]
-        )
-        assert entry["status"] == "approved"
-        assert entry["created_by"] == "scan"
-        assert entry["subtype"] == "convention"
-        assert "%" in entry["content"]
-        assert result["stored"] >= 1
-
-    def test_medium_tier_mined_stored_pending_approval(self, tmp_repo):
-        # NOT 'suggested': suggested entries inject at session start and never surface
-        # in review_pending — a 60-89% signal must wait for the developer instead.
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=14, n_bad=6))
-        result = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
-        entry = next(
-            e for e in store.load(tmp_repo)["entries"]
-            if e["type"] == "decision" and "snake_case" in e["content"]
-        )
-        assert entry["status"] == "pending_approval"
-        assert result["pending"] >= 1
-
-    def test_medium_tier_surfaces_in_review_and_arms_nudge(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=14, n_bad=6))
-        store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
-        pending = store.get_pending_decisions(tmp_repo)
-        assert any("snake_case" in e["content"] for e in pending)
-        assert store._pending_review_flag(tmp_repo).exists()
-
-    def test_single_save_for_batch(self, tmp_repo, monkeypatch):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "widgets-api"\ndependencies = ["fastapi", "boto3"]\n'
-        )
-        (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=25))
-        calls = []
-        real_save = store.save
-
-        def counting_save(repo_path, data):
-            calls.append(1)
-            return real_save(repo_path, data)
-
-        monkeypatch.setattr(store, "save", counting_save)
-        store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
-        assert len(calls) == 1
-
-    def test_second_call_is_noop(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "widgets-api"\ndependencies = ["fastapi", "boto3"]\n'
-        )
-        (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=25))
-        store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
-        before = {e["id"]: e.get("occurrence_count", 1) for e in store.load(tmp_repo)["entries"]}
-
-        result2 = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
-
-        after = {e["id"]: e.get("occurrence_count", 1) for e in store.load(tmp_repo)["entries"]}
-        assert result2["stored"] == 0
-        assert result2["pending"] == 0
-        assert result2["skipped"] > 0
-        assert before == after
-
-    def test_empty_repo_no_crash(self, tmp_repo):
-        result = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
-        assert result["stored"] == 0
-        assert result["pending"] == 0
-        assert result["skipped"] == 0
-
-    def test_return_shape(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        result = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
-        for key in ("inferred", "gaps", "insight", "insight_source", "decisive",
-                    "stored", "pending", "skipped"):
-            assert key in result
-
-    def test_never_stores_constraint_from_mining(self, tmp_repo):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "widgets-api"\n'
-            'dependencies = ["fastapi", "sqlalchemy", "boto3", "stripe", "redis"]\n\n'
-            '[tool.ruff]\nline-length = 100\n\n[tool.mypy]\nstrict = true\n'
-        )
-        (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=25))
-        store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
-        data = store.load(tmp_repo)
-        assert not any(
-            e["type"] == "decision" and e.get("created_by") == "scan" and e.get("subtype") == "constraint"
-            for e in data["entries"]
-        )
-
-    def test_stored_counts_reflect_post_trim_survivors(self, tmp_repo, monkeypatch):
-        # Near MAX_ENTRIES, _keep_top can evict freshly-appended bootstrap entries
-        # (pin_last protects only the final one). The returned counts must reflect
-        # what actually survived, never what was appended (Greptile #114 P1).
-        monkeypatch.setattr(store, "MAX_ENTRIES", 3)
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "widgets-api"\ndependencies = ["fastapi", "boto3"]\n'
-        )
-        (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=25))
-        for i, f in enumerate(["filler decision alpha topic", "filler decision bravo topic",
-                               "filler decision charlie topic"]):
-            store.update_decision(tmp_repo, f, f"seed-{i}")
-
-        result = store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
-
-        data = store.load(tmp_repo)
-        surviving_scan = sum(1 for e in data["entries"]
-                             if e["type"] == "decision" and e.get("created_by") == "scan"
-                             and e.get("status") == "approved")
-        surviving_pending = sum(1 for e in data["entries"]
-                                if e["type"] == "decision" and e.get("created_by") == "scan"
-                                and e.get("status") == "pending_approval")
-        assert result["stored"] == surviving_scan
-        assert result["pending"] == surviving_pending
-        assert len(data["entries"]) <= store.MAX_ENTRIES
-
-    def test_max_entries_respected(self, tmp_repo, monkeypatch):
-        monkeypatch.setattr(store, "MAX_ENTRIES", 5)
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        (Path(tmp_repo) / "pyproject.toml").write_text(
-            '[project]\nname = "widgets-api"\ndependencies = ["fastapi", "boto3"]\n'
-        )
-        (Path(tmp_repo) / "mod.py").write_text(_snake_file(n_snake=25))
-        fillers = ["filler decision alpha topic", "filler decision bravo topic",
-                   "filler decision charlie topic", "filler decision delta topic"]
-        for i, f in enumerate(fillers):
-            store.update_decision(tmp_repo, f, f"seed-{i}")
-
-        store.bootstrap_apply(tmp_repo, SESSION_ID_BA)
-
-        data = store.load(tmp_repo)
-        assert len(data["entries"]) <= store.MAX_ENTRIES
+        ctx = store.get_bootstrap_context_prompt(tmp_repo)["hookSpecificOutput"]["additionalContext"]
+        assert "finish the interpretation report" in ctx
 
 
 # ── session start subtype breakdown (v0.4.0) ─────────────────────────────────
@@ -1953,7 +1247,7 @@ class TestSessionStartPayload:
         from contexer import store
         p = store.session_start_payload(tmp_repo)
         assert "bootstrap" in p["context"].lower()
-        assert "no context stored" in p["status"].lower()
+        assert 'ask "run contexer bootstrap"' in p["status"].lower()
 
     def test_populated_repo_payload_pointer(self, populated_repo):
         from contexer import store
@@ -1961,26 +1255,27 @@ class TestSessionStartPayload:
         assert "get_context" in p["context"]
         assert "on demand" in p["status"]
 
-    def test_resume_with_decisions_has_status_no_context(self, populated_repo):
+    def test_resume_with_legacy_decisions_requests_missing_bootstrap(self, populated_repo):
         from contexer import store
         p = store.session_start_payload(populated_repo, source="resume")
-        assert p["context"] == ""
+        assert "call bootstrap_context now" in p["context"]
         assert "resumed" in p["status"].lower()
 
     def test_get_session_start_context_envelope_unchanged(self, tmp_repo):
         # Back-compat: the Claude dict shape is preserved exactly.
         from contexer import store
         result = store.get_session_start_context(tmp_repo)
-        assert "no context stored" in result["systemMessage"].lower()
+        assert 'ask "run contexer bootstrap"' in result["systemMessage"].lower()
         assert "bootstrap" in result["hookSpecificOutput"]["additionalContext"].lower()
         assert result["hookSpecificOutput"]["hookEventName"] == "SessionStart"
 
 
 class TestBootstrapPromptPayload:
-    def test_decisions_present_payload_empty(self, populated_repo):
+    def test_decisions_without_bootstrap_report_still_request_analysis(self, populated_repo):
         from contexer import store
         p = store.bootstrap_prompt_payload(populated_repo, "anything")
-        assert p == {"status": "", "context": ""}
+        assert p["status"] == ""
+        assert "call bootstrap_context now" in p["context"]
 
     def test_empty_repo_payload_has_context(self, tmp_repo):
         from contexer import store
@@ -2902,8 +2197,8 @@ class TestApproveDecision:
         assert "uv" in before["hookSpecificOutput"]["additionalContext"]
         store.approve_decision(tmp_repo, eid, "ignore")
         after = store.get_session_start_context(tmp_repo)
-        # The lone decision is now ignored -> nothing left to inject at all.
-        assert "hookSpecificOutput" not in after
+        # The ignored decision stays absent; bootstrap itself is still outstanding.
+        assert "call bootstrap_context now" in after["hookSpecificOutput"]["additionalContext"]
         assert "uv" not in json.dumps(after)
 
     def test_approve_action_on_approved_decision_rejected(self, tmp_repo):
@@ -4258,132 +3553,6 @@ class TestShareProjectionSourceFiles:
         assert e["source_files"] == ["a.py"]
         store.clear_source_files(e)
         assert "source_files" not in e and "source_files_total" not in e
-
-
-# ── insight-detection caching (_cached_insight) ───────────────────────────────
-
-class TestInsightCache:
-    """_cached_insight wraps _detect_insight with a per-repo TTL cache file so repeated
-    SessionStart/bootstrap-fallback/bootstrap_scan calls don't re-run ~6 git subprocesses."""
-
-    @pytest.fixture
-    def git_repo(self, tmp_path, monkeypatch):
-        """Real git repo with global/system git config isolated; returns its path."""
-        redirect_store_dir(monkeypatch, tmp_path / ".contexer")
-        monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
-        monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
-        repo = tmp_path / "gitrepo"
-        repo.mkdir()
-        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-        subprocess.run(
-            ["git", "-c", "user.email=me@test.local", "-c", "user.name=T",
-             "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "c"],
-            cwd=repo, check=True)
-        subprocess.run(["git", "config", "user.email", "me@test.local"], cwd=repo, check=True)
-        return str(repo)
-
-    def _counting_git(self, monkeypatch):
-        # Wraps the real store.run_git so call sites still get real answers, just counted.
-        real_git = store.run_git
-        calls = {"n": 0}
-
-        def counting(repo_path, *args):
-            calls["n"] += 1
-            return real_git(repo_path, *args)
-
-        monkeypatch.setattr(store, "run_git", counting)
-        return calls
-
-    def test_cache_hit_skips_git(self, git_repo, monkeypatch):
-        calls = self._counting_git(monkeypatch)
-        first = store._cached_insight(git_repo)
-        assert calls["n"] > 2  # first call is a real detection (~6 git calls)
-        calls["n"] = 0
-        second = store._cached_insight(git_repo)
-        # cache hit = exactly the 2 cheap validation calls (user.email + HEAD),
-        # never a full re-detection
-        assert calls["n"] == 2
-        assert second == first
-
-    def test_changed_email_invalidates_cache(self, git_repo, monkeypatch):
-        store._cached_insight(git_repo)  # warm the cache
-        subprocess.run(["git", "config", "user.email", "someone-else@test.local"],
-                       cwd=git_repo, check=True)
-        seen = {}
-        real_detect = store._detect_insight
-
-        def spying_detect(repo_path):
-            seen["called"] = True
-            return real_detect(repo_path)
-
-        monkeypatch.setattr(store, "_detect_insight", spying_detect)
-        store._cached_insight(git_repo)
-        assert seen.get("called")  # identity changed — cache must not be trusted
-
-    def test_changed_head_invalidates_cache(self, git_repo, monkeypatch):
-        store._cached_insight(git_repo)  # warm the cache
-        subprocess.run(
-            ["git", "-c", "user.email=me@test.local", "-c", "user.name=T",
-             "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "c2"],
-            cwd=git_repo, check=True)
-        seen = {}
-        real_detect = store._detect_insight
-
-        def spying_detect(repo_path):
-            seen["called"] = True
-            return real_detect(repo_path)
-
-        monkeypatch.setattr(store, "_detect_insight", spying_detect)
-        store._cached_insight(git_repo)
-        assert seen.get("called")  # history moved — cache must not be trusted
-
-    def test_expired_cache_redetects(self, git_repo, monkeypatch):
-        path = store._insight_cache_path(git_repo)
-        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-        stale_ts = time.time() - store._INSIGHT_CACHE_TTL - 1
-        path.write_text(json.dumps({"level": "low", "decisive": False, "ts": stale_ts}))
-        calls = self._counting_git(monkeypatch)
-        store._cached_insight(git_repo)
-        assert calls["n"] > 0  # expired entry — falls through to a fresh _detect_insight
-        refreshed = json.loads(path.read_text())
-        assert refreshed["ts"] > stale_ts
-
-    def test_corrupt_cache_fails_soft(self, git_repo):
-        path = store._insight_cache_path(git_repo)
-        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-        path.write_bytes(b"\xff\x00not json")
-        level, decisive = store._cached_insight(git_repo)
-        assert level in store._INSIGHT_ORDER
-        assert isinstance(decisive, bool)
-
-    def test_cache_is_per_repo_slug(self, tmp_path, monkeypatch):
-        redirect_store_dir(monkeypatch, tmp_path / ".contexer")
-        repo_a, repo_b = str(tmp_path / "repo_a"), str(tmp_path / "repo_b")
-        store._cached_insight(repo_a)
-        store._cached_insight(repo_b)
-        path_a, path_b = store._insight_cache_path(repo_a), store._insight_cache_path(repo_b)
-        assert path_a != path_b
-        assert path_a.exists() and path_b.exists()
-
-    def test_bootstrap_scan_uses_cache(self, tmp_repo, monkeypatch):
-        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
-        store.STORE_DIR.mkdir(mode=0o700, exist_ok=True)
-        path = store._insight_cache_path(tmp_repo)
-        # The stored key must match what _insight_cache_key returns at read time or
-        # the cache is (rightly) distrusted. Derive it — `git config user.email`
-        # falls back to global config even outside a repo, so it isn't simply None.
-        email, head = store._insight_cache_key(tmp_repo)
-        path.write_text(json.dumps({"level": "high", "decisive": True, "ts": time.time(),
-                                    "email": email, "head": head}))
-
-        def fail_if_called(repo_path):
-            raise AssertionError("_detect_insight must not run when a fresh cache exists")
-
-        monkeypatch.setattr(store, "_detect_insight", fail_if_called)
-        result = store.bootstrap_scan(tmp_repo, "")
-        assert result["insight"] == "high"
-        assert result["insight_source"] == "auto"
-        assert result["decisive"] is True
 
 
 # ── Retrieval V1 (Part A): topic router — index, BM25, working set, log ────────

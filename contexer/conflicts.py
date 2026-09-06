@@ -86,6 +86,9 @@ def _conflict_view(entry: dict) -> tuple[str, str | None, list[str]]:
     a rebuilt proposal from reviving it."""
     standing_title, standing_body = store.title_and_body(entry)
     if not has_open_conflict(entry):
+        if entry.get("bootstrap"):
+            from contexer import bootstrap
+            return standing_title, standing_body, bootstrap.render(entry)
         return standing_title, standing_body, []
     prop = entry["proposed_revision"]
     prop_date = (prop.get("created_at") or "")[:10]
