@@ -408,10 +408,20 @@ def load_for_update(repo_path: str) -> dict:
                 or scan.get("stage") not in {"interpreting", "reported_complete"}):
             raise ValueError("Malformed bootstrap state; refusing to overwrite it")
         if (type(scan.get("generation", 0)) is not int or scan.get("generation", 0) < 0
+                or ("run_id" in scan and (not isinstance(scan["run_id"], str)
+                                          or len(scan["run_id"]) > 64))
+                or not isinstance(scan.get("run_receipts", {}), dict)
+                or len(scan.get("run_receipts", {})) > 80
+                or any(not isinstance(k, str) or not isinstance(v, str) or v not in {
+                           "stored", "consolidated", "updated", "unchanged", "protected",
+                           "protected_deleted", "superseded", "historical", "unverified",
+                           "deferred_evidence"}
+                       for k, v in scan.get("run_receipts", {}).items())
                 or not isinstance(scan.get("candidate_receipts", {}), dict)
                 or len(scan.get("candidate_receipts", {})) > 20
                 or any(not isinstance(v, str) or v not in {
-                           "stored", "updated", "unchanged", "protected", "protected_deleted",
+                           "stored", "consolidated", "updated", "unchanged", "protected",
+                           "protected_deleted",
                            "historical", "unverified", "needs_recheck", "deferred_evidence", "superseded"}
                        for v in scan.get("candidate_receipts", {}).values())
                 or not isinstance(scan.get("inventory_delta", {}), dict)
@@ -1737,6 +1747,59 @@ _DIRECTIVE_WRAPPER_ONLY = re.compile(
     r"^(?:store\s+this\s+decision|from\s+now\s+on|going\s+forward|henceforth|"
     r"as\s+a\s+rule|rule)\s*[:.!-]?\s*$", re.IGNORECASE)
 
+# A UserPromptSubmit payload is also the developer's task request.  A prohibition inside a
+# multi-step request ("rerun bootstrap ... do not ask ... show the outcomes") governs that
+# operation; it is not a standing repository rule.  Preserve explicitly durable siblings, but
+# remove task-bounded clauses before the ordinary directive detector assigns human authority.
+# This stays deliberately structural: guessing whether an arbitrary sentence is "important"
+# would be a second semantic model in a prompt hook.
+_TASK_SCOPE_MARKER = re.compile(
+    r"\b(?:for|during|in)\s+(?:this|the)\s+(?:run|pass|task|review|test|turn|request|bootstrap)\b"
+    r"|\b(?:this\s+time|right\s+now)\b",
+    re.IGNORECASE,
+)
+_DURABLE_DIRECTIVE = re.compile(
+    r"\b(?:always|never|from\s+now\s+on|going\s+forward|henceforth|every|each|"
+    r"as\s+a\s+rule|make\s+it\s+a\s+rule)\b"
+    r"|^\s*(?:rule|constraint|convention|decision|policy|requirement)\s*[:\-]",
+    re.IGNORECASE,
+)
+_TASK_IMPERATIVE = re.compile(
+    r"^\s*(?:please\s+)?(?:re-?run|run|check|inspect|review|test|fix|implement|show|"
+    r"report|open|install|create|change|update|edit|do\s+not|don['\u2019]t|ensure|"
+    r"make\s+sure|always|never|from\s+now\s+on|going\s+forward)\b",
+    re.IGNORECASE,
+)
+
+
+def _directive_policy_text(text: str) -> str:
+    """Directive-shaped text with one-shot task clauses removed.
+
+    A single ordinary prohibition remains eligible ("Do not log secrets").  We only discard
+    what carries an explicit task scope, or weak directive clauses embedded in a multi-action
+    request.  Strong durable clauses survive that request as independent policy text.
+    """
+    candidate = _directive_candidate_text(text).strip()
+    if not candidate:
+        return ""
+    # Keep the existing pasted-blob refusal load-bearing: task-clause filtering must not
+    # shorten an over-limit document into something that suddenly looks authoritative.
+    if len(candidate) > _MAX_DIRECTIVE_LEN:
+        return candidate
+    fragments = [part.strip(" ,") for part in re.split(
+        r"(?<=[.!?])\s+|\n+|,\s+(?:but|and)\s+|\s+but\s+", candidate,
+        flags=re.IGNORECASE) if part.strip(" ,")]
+    if any(_TASK_SCOPE_MARKER.search(part) for part in fragments):
+        fragments = [part for part in fragments if not _TASK_SCOPE_MARKER.search(part)]
+        if not fragments:
+            return ""
+    task_actions = sum(bool(_TASK_IMPERATIVE.search(part)) for part in fragments)
+    if task_actions < 2:
+        return candidate if not _TASK_SCOPE_MARKER.search(candidate) else ""
+    durable = [part for part in fragments if _DURABLE_DIRECTIVE.search(part)
+               and not _TASK_SCOPE_MARKER.search(part)]
+    return ". ".join(durable)
+
 # Deictic referents point at an object only this conversation can resolve - a strong
 # signal the directive is session-scoped intent, not a standing rule. Still stored
 # (never dropped), just not auto-trusted. Narrowly scoped to avoid v1's false positives:
@@ -1802,7 +1865,7 @@ def _is_prescriptive_constraint(text: str) -> tuple[bool, str]:
     """Returns (is_constraint, subtype). Detects user-stated directives.
     Excludes descriptive first-person/it uses ('I always get this error', 'it always worked')
     and ironic/sarcastic statements ('love always use pip', 'yeah right /s')."""
-    t = _directive_candidate_text(text).strip()
+    t = _directive_policy_text(text).strip()
     # Pasted blobs and tool/system-injected text are never clean user directives.
     if not t or len(t) > _MAX_DIRECTIVE_LEN:
         return False, ""
@@ -1926,7 +1989,7 @@ def capture_user_constraint_with_meta(
     is_constraint, subtype = _is_prescriptive_constraint(prompt)
     if not is_constraint:
         return None, None, None, {}
-    content = _sanitize_directive(_directive_candidate_text(prompt).strip())[:600]
+    content = _sanitize_directive(_directive_policy_text(prompt).strip())[:600]
     if not _is_storable(content):
         return None, None, None, {}
     deictic = _is_deictic(content)
@@ -3187,7 +3250,7 @@ def approve_decision(repo_path: str, entry_id: str, action: str,
 
     with store_lock(repo_slug(repo_path)):
         data = load(repo_path)
-        ok, msg, changed = _apply_approval(
+        ok, msg, changed = apply_approval(
             data, entry_id, action, content, datetime.now(timezone.utc).isoformat(), repo_path,
             has_caller_source_files=bool(source_files))
         if ok and source_files:
@@ -3205,14 +3268,15 @@ def approve_decision(repo_path: str, entry_id: str, action: str,
         return ok, msg
 
 
-def _apply_approval(data: dict, entry_id: str, action: str, content: str,
-                    now: str, repo_path: str, *,
-                    has_caller_source_files: bool = False) -> tuple[bool, str, bool]:
+def apply_approval(data: dict, entry_id: str, action: str, content: str,
+                   now: str, repo_path: str, *,
+                   has_caller_source_files: bool = False) -> tuple[bool, str, bool]:
     """Apply ONE approval action to `data` in memory - no load, no save (the caller owns
     those). NOT lock-free, though: an approve/edit that anchors (`_anchor_sources`, via
     `_promote_proposal` or directly below) shells out to `git rev-parse HEAD`, and its sole
-    caller (`approve_decision`) invokes this only from inside its own `store_lock(...)` block - so
-    that git subprocess runs under the store lock, not lock-free. Returns (success, message,
+    callers (`approve_decision` and bootstrap's atomic conflict resolver) invoke it only from
+    inside their own `store_lock(...)` blocks - so that git subprocess runs under the lock, not
+    lock-free. Returns (success, message,
     changed); `changed` lets the caller save only when something mutated. Resolves an exact id
     first, then an 8-char prefix (consistent with replace_id / get_shareable).
 
@@ -3296,6 +3360,15 @@ def _apply_approval(data: dict, entry_id: str, action: str, content: str,
         preview = stored[:80] + ("..." if len(stored) > 80 else "")
         verb = "Updated and approved" if action == "edit" else "Approved"
         return True, f"{verb}. Now revision {entry['revision']}: \"{preview}\"", True
+
+    # Parsed configuration facts already speak for the checked-out source and are not policy
+    # awaiting a signature.  Approving one creates a duplicate authoritative rule beside any
+    # actual conflict resolution (the live Ruff bootstrap failure).  Resolve the documented
+    # prescription instead; changing the configuration is what changes this observed fact.
+    if ((entry.get("bootstrap") or {}).get("origin") == "parser"
+            and action in ("approve", "edit")):
+        return False, ("Parsed configuration facts are observed context, not approval targets. "
+                       "Resolve the conflicting prescription or change the configuration."), False
 
     # Bootstrap has a usable-but-unratified lane. A user's explicit correction/confirmation
     # creates a new human revision even for its first capture; the inference stays immutable.

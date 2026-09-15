@@ -93,6 +93,12 @@ def test_conflict_only_is_pending_and_shows_both_sources(project):
     assert "UNRESOLVED" in detail and "db.insert_outbox" in detail
     assert "Always send billing" not in store.session_start_payload(str(project))["context"]
 
+    rerun = bootstrap.run(str(project), "unchanged-rerun")
+    assert rerun["status_summary"]["ready_conflict_groups"] == 0
+    assert rerun["status_summary"]["pending_conflict_groups"] == 1
+    assert "existing unresolved" in rerun["status_summary"]["message"]
+    assert "no question repeated" in rerun["status_summary"]["message"]
+
 
 @pytest.mark.parametrize("conflicted", [False, True])
 def test_user_correction_versions_original_and_rescan_cannot_undo(project, conflicted):
@@ -116,6 +122,176 @@ def test_user_correction_versions_original_and_rescan_cannot_undo(project, confl
     assert store.entry_by_id(store.load(str(project))["entries"], did)["revision"] == 2
     assert store.approve_decision(str(project), did, "edit", "Use an outbox for billing only.")[0]
     assert store.entry_by_id(store.load(str(project))["entries"], did)["revision"] == 3
+
+
+def test_conflict_resolution_updates_only_canonical_rule_and_is_idempotent(project):
+    scan = scan_rule(project, "Use Ruff line length 88.")
+    candidate = scan["candidates"][0]
+    row = {
+        "candidate_id": candidate["candidate_id"],
+        "content": candidate["content"],
+        "kind": "inferred",
+        "subtype": "convention",
+        "scope": "repository Ruff configuration",
+        "assessment": "contradicted",
+        "reason": "The shared rule says 88 while repository configuration says 100.",
+        "question": "Should this repository use Ruff line length 88 or 100?",
+        "sources": [
+            ref(project, candidate["source_file"], candidate["source_line"]),
+            candidate["comparison"]["sources"][0],
+        ],
+    }
+    receipt = finish(project, scan, [row])
+    group = receipt["clarifications"][0]
+    canonical_id = group["decisions"][0]["id"]
+    assert group["evidence_only"]
+    config = next(e for e in store.load(str(project))["entries"]
+                  if (e.get("bootstrap") or {}).get("origin") == "parser")
+    config_before = copy.deepcopy(config)
+
+    resolution = {"group_id": group["group_id"], "canonical_id": canonical_id,
+                  "resolved_content": "Use Ruff line length 100 in this repository."}
+    resolved = bootstrap.run(str(project), "human", run_id=receipt["run_id"],
+                             resolution=resolution)
+
+    entry = store.entry_by_id(store.load(str(project))["entries"], canonical_id)
+    assert entry["revision"] == 2 and entry["approved_by"] == "human"
+    assert entry["revisions"][0]["content"] == "Use Ruff line length 88."
+    assert entry["content"] == "Use Ruff line length 100 in this repository."
+    assert store.entry_by_id(store.load(str(project))["entries"], config["id"]) == config_before
+    assert not store.get_pending_decisions(str(project))
+    assert resolved["status_summary"]["human_decisions"] == 1
+    assert resolved["status_summary"]["suggestions_are_review_queue"] is False
+
+    repeated = bootstrap.run(str(project), "human", run_id=receipt["run_id"],
+                             resolution=resolution)
+    assert repeated["resolution_receipt"]["outcome"] == "unchanged"
+    assert store.entry_by_id(store.load(str(project))["entries"], canonical_id)["revision"] == 2
+
+
+def test_conflict_resolution_rejects_a_stale_group_after_a_human_change(project):
+    scan = scan_rule(project, "Always send billing email synchronously.")
+    row = finding(project, scan, assessment="contradicted")
+    row["question"] = "Keep the outbox implementation or restore synchronous delivery?"
+    receipt = finish(project, scan, [row])
+    group = receipt["clarifications"][0]
+    target = group["decisions"][0]
+    assert store.approve_decision(
+        str(project), target["id"], "edit", "Use the transactional outbox for billing email.")[0]
+
+    with pytest.raises(ValueError, match="decision changed"):
+        bootstrap.run(str(project), "late", run_id=receipt["run_id"], resolution={
+            "group_id": group["group_id"], "canonical_id": target["id"],
+            "resolved_content": "Send billing email synchronously."})
+
+
+def test_parsed_configuration_fact_cannot_be_approved_as_policy(project):
+    bootstrap.run(str(project), "scan")
+    fact = next(e for e in store.load(str(project))["entries"]
+                if (e.get("bootstrap") or {}).get("origin") == "parser")
+
+    ok, message = store.approve_decision(str(project), fact["id"], "approve")
+
+    assert not ok and "not approval targets" in message
+    assert store.entry_by_id(store.load(str(project))["entries"], fact["id"])["status"] == "suggested"
+
+
+def test_documented_rule_consolidates_matching_code_observation(project):
+    scan = bootstrap.run(str(project), "code-only")
+    code_row = {"topic": "transactional-outbox", "content":
+                "Queue billing email through a transactional outbox.", "kind": "observed",
+                "subtype": "architecture", "scope": "billing email delivery",
+                "assessment": "supported", "reason": "The charge transaction writes an outbox row.",
+                "sources": [ref(project, "billing.py", 2, 4, "implementation")]}
+    first = finish(project, scan, [code_row])
+    decision_id = first["outcomes"][0]["id"]
+
+    scan = scan_rule(project, "Use a transactional outbox for billing email delivery.")
+    candidate = scan["candidates"][0]
+    doc_row = {"candidate_id": candidate["candidate_id"], "content": candidate["content"],
+               "kind": "inferred", "subtype": "architecture",
+               "scope": "billing email delivery", "assessment": "supported",
+               "reason": "The documented rule matches the transaction implementation.",
+               "replaces": decision_id,
+               "sources": [ref(project, "ARCHITECTURE.md", 2),
+                           ref(project, "billing.py", 2, 4, "implementation")]}
+    receipt = finish(project, scan, [doc_row])
+
+    assert receipt["outcomes"][0]["outcome"] == "consolidated"
+    assert receipt["outcomes"][0]["id"] == decision_id
+    assert receipt["status_summary"]["display_counts"]["saved"] == 1
+    captured = [e for e in store.load(str(project))["entries"]
+                if e.get("bootstrap") and e["bootstrap"].get("origin") != "parser"]
+    assert len(captured) == 1
+    assert captured[0]["revision"] == 2
+    assert {source["role"] for source in captured[0]["bootstrap"]["sources"]} == {
+        "documentation", "implementation"}
+    assert captured[0]["status"] == "suggested" and not bootstrap._human(captured[0])
+
+
+def test_replaces_rejects_unrelated_bootstrap_observation(project):
+    scan = bootstrap.run(str(project), "code-only")
+    code_row = {"topic": "transactional-outbox", "content":
+                "Queue billing email through a transactional outbox.", "kind": "observed",
+                "subtype": "architecture", "scope": "billing email delivery",
+                "assessment": "supported", "reason": "The transaction writes an outbox row.",
+                "sources": [ref(project, "billing.py", 2, 4, "implementation")]}
+    decision_id = finish(project, scan, [code_row])["outcomes"][0]["id"]
+    scan = scan_rule(project, "Use Ruff line length 88 for repository source files.")
+    candidate = scan["candidates"][0]
+    unrelated = {"candidate_id": candidate["candidate_id"], "content": candidate["content"],
+                 "kind": "inferred", "subtype": "convention", "scope": "repository formatting",
+                 "assessment": "unverified", "reason": "Documented formatting rule.",
+                 "replaces": decision_id, "sources": [ref(project, "ARCHITECTURE.md", 2)]}
+
+    with pytest.raises(ValueError, match="grounded continuity"):
+        finish(project, scan, [unrelated])
+
+
+def test_status_summary_is_run_scoped_and_never_creates_a_review_queue(project):
+    scan = bootstrap.run(str(project), "first")
+    assert scan["status_summary"]["outcomes"]["stored"] == 2
+    assert scan["status_summary"]["suggestions_are_review_queue"] is False
+    assert "review" not in scan["status_summary"]["message"].lower()
+    first_run = scan["run_id"]
+
+    completed = finish(project, scan, [])
+    assert completed["run_id"] == first_run
+    assert completed["status_summary"]["next_action"] == "none"
+    assert completed["status_summary"]["outcomes"]["stored"] == 2
+    assert completed["status_summary"]["message"].endswith("No action required.")
+
+    rerun = bootstrap.run(str(project), "rerun")
+    assert rerun["run_id"] != first_run
+    assert rerun["snapshot_id"] != completed["snapshot_id"]
+    assert rerun["status_summary"]["outcomes"]["stored"] == 0
+    assert rerun["status_summary"]["outcomes"]["unchanged"] == 2
+    with pytest.raises(ValueError, match="superseded"):
+        bootstrap.run(str(project), "late", snapshot_id=rerun["snapshot_id"],
+                      run_id=first_run, findings=[])
+
+
+def test_later_batch_does_not_relabel_this_runs_saved_finding_as_unchanged(project):
+    scan = scan_rule(project)
+    first = bootstrap.run(str(project), "batch-one", snapshot_id=scan["snapshot_id"],
+                          run_id=scan["run_id"], findings=[finding(project, scan)])
+    assert first["status_summary"]["display_counts"]["saved"] == 3
+
+    final = bootstrap.run(str(project), "batch-two", snapshot_id=first["snapshot_id"],
+                          run_id=scan["run_id"], findings=[], finish=True)
+
+    assert final["status_summary"]["display_counts"]["saved"] == 3
+    assert final["status_summary"]["outcomes"]["unchanged"] == 0
+
+
+def test_second_identical_scan_supersedes_first_report_token(project):
+    first = bootstrap.run(str(project), "agent-one")
+    second = bootstrap.run(str(project), "agent-two")
+
+    assert second["snapshot_id"] != first["snapshot_id"]
+    assert second["generation"] == first["generation"] + 1
+    with pytest.raises(ValueError, match="superseded"):
+        finish(project, first, [])
 
 
 def test_rescan_is_idempotent_and_does_not_inflate_confidence(project):
@@ -166,9 +342,14 @@ def test_uncommitted_source_change_defers_report_and_marks_existing_inference_st
 
 
 def test_human_edit_during_analysis_rejects_report(project):
+    human = store.build_inferred_entry(
+        "Use Python 3.12 for production deployments.", "human", "constraint", "pending_approval")
+    data = store.load(str(project))
+    data["entries"].append(human)
+    store.save(str(project), data)
     scan = scan_rule(project)
-    did = store.load(str(project))["entries"][0]["id"]
-    store.approve_decision(str(project), did, "edit", "Python 3.13 or newer is required.")
+    assert store.approve_decision(
+        str(project), human["id"], "edit", "Python 3.13 or newer is required.")[0]
     with pytest.raises(ValueError, match="decision changed"):
         finish(project, scan, [finding(project, scan)])
 
@@ -548,9 +729,12 @@ def test_real_mcp_scan_interpretation_and_retrieval_roundtrip(project, tmp_path)
                 assert scan["stage"] == "interpreting"
                 response = await client.call_tool("bootstrap_context", {
                     "repo_path": str(project), "snapshot_id": scan["snapshot_id"],
-                    "findings": [finding(project, scan)], "finish": True})
+                    "run_id": scan["run_id"], "findings": [finding(project, scan)],
+                    "finish": True})
                 receipt = json.loads(response.content[0].text)
                 assert receipt["stage"] == "reported_complete"
+                assert receipt["status_summary"]["suggestions_are_review_queue"] is False
+                assert "review" not in receipt["status_summary"]["message"].lower()
                 recall = await client.call_tool("get_context", {"repo_path": str(project), "query": "outbox"})
                 assert "Not human-approved policy" in recall.content[0].text
                 assert "Evidence billing.py:2" in recall.content[0].text
@@ -602,6 +786,29 @@ def test_range_counterpart_links_both_rules_across_batches(project, first):
     assert len(receipt["clarifications"][0]["decisions"]) == 2
     entries = store.load(str(project))["entries"]
     assert next(e for e in entries if "Never log" in e["content"])["status"] == "suggested"
+
+
+def test_group_resolution_keeps_one_active_human_rule_and_suppresses_loser(project):
+    scan, rows = disputed_rules(project)
+    receipt = finish(project, scan, rows)
+    group = receipt["clarifications"][0]
+    outbox = next(item for item in group["decisions"] if "outbox" in item["content"])
+
+    resolved = bootstrap.run(str(project), "human", run_id=receipt["run_id"], resolution={
+        "group_id": group["group_id"],
+        "canonical_id": outbox["id"],
+        "resolved_content": "Use a transactional outbox for billing email.",
+    })
+
+    data = store.load(str(project))
+    canonical = store.entry_by_id(data["entries"], outbox["id"])
+    loser = next(e for e in data["entries"] if "synchronously" in e["content"])
+    assert canonical["status"] == "approved" and canonical["approved_by"] == "human"
+    assert canonical["revision"] == 2
+    assert loser["status"] == "ignored" and loser["revision"] == 1
+    assert loser["bootstrap_resolution"]["replacement_id"] == canonical["id"]
+    assert resolved["resolution_receipt"]["superseded_ids"] == [loser["id"]]
+    assert not store.get_pending_decisions(str(project))
 
 
 def test_ambiguous_range_requires_explicit_counterpart_not_unrelated_rule(project):

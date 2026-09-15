@@ -93,6 +93,18 @@ class TestCodexSharesClaudesEntrypoint:
 
 
 class TestUserDirectiveEmission:
+    def test_task_scoped_bootstrap_request_emits_no_durable_evidence(self, tmp_repo):
+        prompt = (
+            "Re-run bootstrap without changing code or existing human decisions. "
+            "Do not ask conflicts that the stored human decisions already resolve. "
+            "Show actual saved, protected, deferred, or unchanged outcomes"
+        )
+        raw = _json.dumps({"prompt": prompt, "session_id": "s-task"})
+
+        assert claude.capture_constraint(tmp_repo, raw) == "{}"
+        assert store.load(tmp_repo)["entries"] == []
+        assert spool.list_pending_evidence(tmp_repo, "s-task") == []
+
     def test_directive_prompt_emits_one_event(self, tmp_repo):
         raw = _json.dumps({"prompt": "always use conventional commits", "session_id": "s1"})
         out = _json.loads(claude.capture_constraint(tmp_repo, raw))

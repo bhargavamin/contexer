@@ -73,8 +73,12 @@ def test_old_delta_cannot_clear_second_change_and_human_basis_is_bound(project):
     with pytest.raises(ValueError, match="Inventory delta changed"):
         assess(project, scan, first)
     assert store.load(str(project)) == before
-    did = before["entries"][0]["id"]
-    store.approve_decision(str(project), did, "edit", "Python 3.14 is now required.")
+    pending = store.build_inferred_entry(
+        "Use Python 3.14 for production.", "human", "constraint", "pending_approval")
+    data = store.load(str(project))
+    data["entries"].append(pending)
+    store.save(str(project), data)
+    assert store.approve_decision(str(project), pending["id"], "approve")[0]
     with pytest.raises(ValueError, match="decision changed"):
         assess(project, scan, second)
 
@@ -293,21 +297,31 @@ def test_partial_conflict_report_never_shrinks_group_on_replay(project):
 
 
 def test_superseded_observation_cannot_be_recreated_by_repeated_old_reports(project):
-    scan, rows = fixtures.disputed_rules(project)
-    rows = rows[:2]
-    # Exercise explicit observation identity, independently of dispute semantics.
-    for row in rows:
-        row.update(assessment="unverified", sources=row["sources"][:1])
-        row.pop("question", None)
-    receipt = bootstrap.run(str(project), "first", snapshot_id=scan["snapshot_id"], findings=[rows[0]])
+    scan = bootstrap.run(str(project), "code-only")
+    old_row = {"topic": "transactional-outbox", "content":
+               "Queue billing email through a transactional outbox.", "kind": "observed",
+               "subtype": "architecture", "scope": "billing email delivery",
+               "assessment": "supported", "reason": "The transaction writes an outbox row.",
+               "sources": [fixtures.ref(project, "billing.py", 2, 4, "implementation")]}
+    receipt = bootstrap.run(str(project), "first", snapshot_id=scan["snapshot_id"],
+                            findings=[old_row], finish=True)
     did = receipt["outcomes"][0]["id"]
-    rows[1]["replaces"] = did
-    receipt = bootstrap.run(str(project), "supersede", snapshot_id=receipt["snapshot_id"], findings=[rows[1]])
+    scan = scan_rule(project, "Use a transactional outbox for billing email delivery.")
+    candidate = scan["candidates"][0]
+    replacement = {"candidate_id": candidate["candidate_id"], "content": candidate["content"],
+                   "kind": "inferred", "subtype": "architecture",
+                   "scope": "billing email delivery", "assessment": "supported",
+                   "reason": "The documented rule matches the implementation.", "replaces": did,
+                   "sources": [fixtures.ref(project, "ARCHITECTURE.md", 2),
+                               fixtures.ref(project, "billing.py", 2, 4, "implementation")]}
+    receipt = bootstrap.run(str(project), "supersede", snapshot_id=scan["snapshot_id"],
+                            findings=[replacement], finish=True)
     for _ in range(2):
-        receipt = bootstrap.run(str(project), "late-old", snapshot_id=receipt["snapshot_id"], findings=[rows[0]])
+        receipt = bootstrap.run(str(project), "late-old", snapshot_id=receipt["snapshot_id"],
+                                findings=[old_row])
         assert any(o["outcome"] == "superseded" for o in receipt["outcomes"])
         old = entry(project, did)
-        assert old["bootstrap"]["candidate_id"] == rows[1]["candidate_id"]
+        assert old["bootstrap"]["candidate_id"] == replacement["candidate_id"]
         assert old["revision"] == 2
         assert len([e for e in store.load(str(project))["entries"] if e.get("bootstrap", {}).get("candidate_id")]) == 1
 
