@@ -649,7 +649,7 @@ def test_bootstrap_preview_does_not_apply(monkeypatch, source_paths):
     server.bootstrap_context("/repo/x", apply=False, source_paths=source_paths)
     assert calls == [{"apply": False, "snapshot_id": "", "findings": None, "finish": False,
                      "external_paths": None, "source_paths": source_paths, "repo_source": "argument",
-                     "assessed_delta": ""}]
+                     "assessed_delta": "", "run_id": "", "resolution": None}]
 
 
 # ── capture_lint: bounce narrative-shaped AI captures ───────────────────────

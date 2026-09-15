@@ -43,8 +43,9 @@ def test_loaded_legacy_status_and_explicit_approved_have_identical_heads(project
 
 @pytest.mark.parametrize("action", ["approve", "edit", "ignore"])
 def test_human_action_still_invalidates_analysis_basis(project, action):
-    scan = fixtures.scan_rule(project)
-    entry_id = store.load(str(project))["entries"][0]["id"]
+    first = fixtures.scan_rule(project)
+    entry_id = fixtures.finish(project, first, [fixtures.finding(project, first)])["outcomes"][0]["id"]
+    scan = bootstrap.run(str(project), "analysis")
     assert store.approve_decision(str(project), entry_id, action, "Use Python 3.13.")[0]
     with pytest.raises(ValueError, match="decision changed"):
         fixtures.finish(project, scan, [fixtures.finding(project, scan)])

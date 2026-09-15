@@ -11,6 +11,9 @@ import json
 import os
 import re
 import tomllib
+import uuid
+from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 
 from contexer import repository_discovery, revisions, store
@@ -20,6 +23,10 @@ MAX_BYTES = 2_000_000
 MAX_FILE_BYTES = 100_000
 MAX_FOCUSED_BYTES = 2_000_000
 MAX_FINDINGS = 40
+MAX_REPORTED_FINDINGS = 80
+MAX_PARSED_FACTS = 7
+MAX_DEFERRED_RECEIPTS = MAX_REPORTED_FINDINGS
+MAX_RUN_RECEIPTS = store.MAX_BOOTSTRAP_RUN_RECEIPTS
 SUFFIXES = {".md", ".py", ".toml", ".json", ".yaml", ".yml", ".ts", ".tsx",
             ".js", ".jsx", ".go", ".rs", ".sql"}
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "vendor", "dist", "build",
@@ -52,15 +59,22 @@ When two documented rules conflict, cite the counterpart rule (a containing rang
 Contexer links those rules and keeps both prescriptions unresolved even if code supports one. Present the linked
 IDs as one choice; if an excerpt contains multiple counterpart candidates, explicitly select
 against_candidate_ids or narrow the quote to avoid implicating unrelated rules. Apply the user's
-explicit answer to each affected ID individually. Do not approve either by inferring intent from implementation or ask the same unchanged question again.
+explicit answer once through bootstrap_context(resolution={group_id, canonical_id,
+resolved_content}). Choose one actual prescription as canonical; never approve evidence_only
+configuration facts or create parallel human decisions for one conflict. Do not infer intent from
+implementation or ask the same unchanged question again.
 If a human decision is involved, set against_decision_id and cite the implementation discrepancy;
 do not replace that decision. If updating your own previous inference, set replaces to its ID.
-Submit findings using bootstrap_context(snapshot_id=..., findings=[...], finish=true).
+Use replaces only for the same scoped decision with clear wording and evidence continuity. When a
+new document states an already captured code decision, consolidate it with replaces and retain both
+documentation and implementation evidence. Never merge merely related or conflicting rules.
+Submit findings using bootstrap_context(snapshot_id=..., run_id=..., findings=[...], finish=true).
 Use finish=false for batches; every candidate must be accounted for before finishing. Invalid
 report structure rejects the batch. Changed citations defer only their finding: inspect deferred
 and missing_candidates, keep saved outcomes, and rescan affected sources. Report omitted coverage.
 snapshot_id binds a monotonic analysis generation, inventory, authorized paths and local/global
-decision heads. Always use the latest receipt token; SessionStart freshness does not supersede it.
+decision heads. run_id binds the user-visible receipt to this invocation. Always pass both from the
+latest receipt; SessionStart freshness does not supersede them.
 Uncited edits do not reject capture. inventory_delta identifies bounded changes whose implications
 remain unassessed: examine current code and retained inferences against current human decisions,
 report any conflicts/corrections, then submit assessed_delta=<that exact id> with snapshot_id.
@@ -71,13 +85,18 @@ never replay a removed rule. Omitted sources are unknown, not proof of deletion.
 If recheck_worklist is present, revalidate ALL members before asking the conflict question. Never
 ask a narrowed question just because a stale peer was hidden. Capture completion is separate from
 current applicability: report saved progress even if a finding still needs rechecking.
-After the receipt, show ONLY what was actually saved, in a compact list labeled observed/inferred
-with evidence links. Ask clarification only for material conflicts, grouping them in one response.
+After the receipt, reuse status_summary.message and show ONLY what this run actually saved,
+consolidated, protected, deferred, or left unchanged, in a compact list labeled observed/inferred
+with evidence links. Suggested bootstrap context is immediately usable but non-authoritative; it is
+not a review queue. Never say it is awaiting approval or recommend review_pending/`contexer review`.
+Ask clarification only for material conflicts, grouping them in one response.
 Otherwise end with optional 'Anything to change?' and continue the user's task without waiting.
 Offer the optional external documentation question only when external_docs_question is present;
 pass external_paths only for paths the user explicitly supplied/authorized (an empty list clears).
-For a user-requested correction call approve_decision(action='edit', entry_id=..., content=...).
-This creates a human-directed revision of that same bootstrap decision; silence approves nothing.
+For a non-conflict user-requested correction call approve_decision(action='edit', entry_id=...,
+content=...). This creates a human-directed revision of that same bootstrap decision; silence
+approves nothing. Describe configuration as configured/observed. Claim enforcement only when cited
+CI, hooks, or scripts actually run the check; tool defaults alone are not enforcement evidence.
 Inferred guidance never overrides human policy and never authorizes enforcement or external sharing.
 """
 
@@ -516,6 +535,42 @@ def _retained_reports(scan: dict) -> dict:
     return rows
 
 
+_IDENTITY_STOPWORDS = {"a", "an", "and", "as", "at", "be", "because", "by", "for", "from",
+                       "in", "is", "it", "of", "on", "or", "the", "this", "to", "use", "with"}
+
+
+def _identity_tokens(text: str) -> set[str]:
+    return {token for token in re.findall(r"[a-z0-9_]+", text.lower())
+            if len(token) > 2 and token not in _IDENTITY_STOPWORDS}
+
+
+def _replacement_is_grounded(old: dict, row: dict) -> bool:
+    """Bound an explicit same-decision claim with textual and evidence continuity."""
+    if _human(old) or not old.get("bootstrap") or old.get("status") == "ignored" \
+            or row.get("assessment") == "contradicted":
+        return False
+    if (revisions.normalize_content(old["bootstrap"].get("scope", ""))
+            != revisions.normalize_content(row["scope"])
+            or old.get("subtype") != row.get("subtype")):
+        return False
+    if len(_identity_tokens(old.get("content", "")) & _identity_tokens(row["content"])) < 3:
+        return False
+    old_sources = old["bootstrap"].get("sources", [])
+    shared_non_doc = any(
+        left.get("role") != "documentation" and right.get("role") != "documentation"
+        and left.get("file") == right.get("file") and left.get("sha256") == right.get("sha256")
+        and left.get("line", 0) <= right.get("end_line", -1)
+        and right.get("line", 0) <= left.get("end_line", -1)
+        for left in old_sources for right in row["sources"])
+    same_document = any(
+        left.get("role") == right.get("role") == "documentation"
+        and left.get("file") == right.get("file")
+        and left.get("line", 0) <= right.get("end_line", -1)
+        and right.get("line", 0) <= left.get("end_line", -1)
+        for left in old_sources for right in row["sources"])
+    return shared_non_doc or same_document
+
+
 def _link_disputes(scan: dict, valid: list[dict]) -> dict[str, dict]:
     """A containing counterpart citation links a policy dispute, not an authority/anchor.
 
@@ -573,6 +628,8 @@ def _persist_findings(data: dict, rows: list[dict], session_id: str,
             old = store.entry_by_id(entries, row["replaces"])
             if old is None or not old.get("bootstrap"):
                 raise ValueError("Bootstrap can only revise its own inferred captures")
+            if not _replacement_is_grounded(old, row):
+                raise ValueError("replaces needs grounded continuity with the same non-human bootstrap decision")
         # Never revive ignored/deleted findings or displace human decisions, even by exact text.
         same = next((e for e in entries if revisions.normalize_content(e.get("content", ""))
                      == revisions.normalize_content(row["content"])
@@ -609,6 +666,7 @@ def _persist_findings(data: dict, rows: list[dict], session_id: str,
             metadata["standing_decision"] = {"id": against["id"], "content": against["content"],
                                                "revision_id": against["current_revision_id"]}
         if old:
+            previous_key = (old.get("bootstrap") or {}).get("key")
             recovered = bool(old.get("bootstrap_withheld") or _unchecked(old))
             old.pop("bootstrap_withheld", None)
             old.pop("bootstrap_withheld_reason", None)
@@ -620,6 +678,7 @@ def _persist_findings(data: dict, rows: list[dict], session_id: str,
             revision = revisions.append_revision(old, row["content"], "ai")
             entry = old
         else:
+            previous_key = ""
             if len(entries) >= store.MAX_ENTRIES:
                 raise ValueError("Decision store is full; bootstrap retained as incomplete")
             entry = store.build_inferred_entry(row["content"], session_id, row["subtype"], status)
@@ -632,20 +691,24 @@ def _persist_findings(data: dict, rows: list[dict], session_id: str,
         # No approval timestamp, anchor, recurrence or confidence promotion from inference.
         revision["approved_at"] = None
         revision["bootstrap"] = copy.deepcopy(metadata)
-        outcomes.append({"key": key, "outcome": "updated" if old else "stored",
-                         "id": entry["id"], "content": entry["content"],
-                         "kind": row["kind"], "assessment": row["assessment"],
-                         "sources": row["sources"], "question": row.get("question", ""),
-                         "requires_clarification": status == "pending_approval"})
+        consolidated = bool(old and row.get("replaces") and previous_key != key)
+        outcome = {"key": key,
+                   "outcome": "consolidated" if consolidated else "updated" if old else "stored",
+                   "id": entry["id"], "content": entry["content"],
+                   "kind": row["kind"], "assessment": row["assessment"],
+                   "sources": row["sources"], "question": row.get("question", ""),
+                   "requires_clarification": status == "pending_approval"}
+        if consolidated:
+            outcome["replaced_key"] = previous_key
+        outcomes.append(outcome)
     return outcomes
 
 
-def _clarification_groups(entries: list[dict], outcomes: list[dict]) -> list[dict]:
-    """Derive complete dispute groups, including withheld peers, without storing a worklist."""
+def _pending_conflict_components(entries: list[dict]) -> list[list[dict]]:
+    """Every unresolved bootstrap component, independent of whether it should be re-asked."""
     pending = {e["bootstrap"]["key"]: e for e in entries
                if e.get("bootstrap") and e.get("status", "approved") == "pending_approval"
                and not _human(e)}
-    changed = {r["key"] for r in outcomes if r.get("requires_clarification")}
     adjacency = {key: set() for key in pending}
     for key, entry in pending.items():
         for peer in entry["bootstrap"].get("disputed_by", []):
@@ -664,19 +727,51 @@ def _clarification_groups(entries: list[dict], outcomes: list[dict]) -> list[dic
             component.add(current)
             todo.extend(adjacency[current])
         visited.update(component)
-        peers = [pending[k] for k in sorted(component)]
+        groups.append([pending[k] for k in sorted(component)])
+    return groups
+
+
+def _evidence_only_entries(entries: list[dict], peers: list[dict]) -> list[dict]:
+    """Active bootstrap entries whose cited evidence overlaps a conflict, never resolution targets."""
+    peer_sources = [source for peer in peers for source in peer["bootstrap"].get("sources", [])]
+    result = []
+    for entry in entries:
+        if entry in peers or not entry.get("bootstrap") or entry.get("status") == "ignored":
+            continue
+        overlap = any(left.get("file") == right.get("file")
+                      and left.get("sha256") == right.get("sha256")
+                      and left.get("line", 0) <= right.get("end_line", -1)
+                      and right.get("line", 0) <= left.get("end_line", -1)
+                      for left in entry["bootstrap"].get("sources", []) for right in peer_sources)
+        if overlap:
+            result.append({"id": entry["id"], "content": entry["content"],
+                           "status": entry.get("status"), "role": "evidence_only"})
+    return result
+
+
+def _clarification_groups(entries: list[dict], outcomes: list[dict]) -> list[dict]:
+    """Derive complete dispute groups, including withheld peers, without storing a worklist."""
+    changed = {r["key"] for r in outcomes if r.get("requires_clarification")}
+    groups = []
+    for peers in _pending_conflict_components(entries):
+        component = {e["bootstrap"]["key"] for e in peers}
         blocked = any(e.get("bootstrap_withheld") or _unchecked(e)
                       or e.get("bootstrap_check_unavailable") for e in peers)
         if not blocked and not component & changed:
             continue
-        groups.append({"state": "recheck" if blocked else "ready",
+        group_id = _digest([[e["id"], e.get("current_revision_id"), e["bootstrap"]]
+                            for e in peers])[:24]
+        groups.append({"group_id": group_id, "state": "recheck" if blocked else "ready",
                        "question": "" if blocked else peers[0]["bootstrap"]["question"],
+                       "resolution_instruction": ("Resolve through bootstrap_context(resolution={group_id, "
+                                                  "canonical_id, resolved_content}); do not approve evidence-only entries."),
                        "decisions": [{"id": e["id"], "content": e["content"],
                                       "sources": e["bootstrap"]["sources"],
                                       "withheld": e.get("bootstrap_withheld", ""),
                                       "unchecked": _unchecked(e),
                                       "check_unavailable": e.get("bootstrap_check_unavailable", "")}
-                                     for e in peers]})
+                                     for e in peers],
+                       "evidence_only": _evidence_only_entries(entries, peers)})
     return groups
 
 
@@ -684,11 +779,181 @@ def _clarifications(entries: list[dict], outcomes: list[dict]) -> list[dict]:
     return [g for g in _clarification_groups(entries, outcomes) if g["state"] == "ready"]
 
 
+def _current_conflict_groups(entries: list[dict]) -> list[dict]:
+    """Render every current component after an explicit resolution changed the graph."""
+    outcomes = [{"key": entry["bootstrap"]["key"], "requires_clarification": True}
+                for component in _pending_conflict_components(entries) for entry in component]
+    return _clarification_groups(entries, outcomes)
+
+
+_RUN_OUTCOMES = (
+    "stored", "consolidated", "updated", "unchanged", "protected", "protected_deleted",
+    "superseded", "historical", "unverified", "deferred_evidence",
+)
+
+
+def _record_run_outcomes(scan: dict, outcomes: list[dict], deferred: list[dict] | None = None) -> None:
+    """Keep one bounded final disposition per finding for the current bootstrap invocation."""
+    receipts = dict(scan.get("run_receipts", {}))
+    for index, result in enumerate(outcomes):
+        outcome = result.get("outcome")
+        if outcome not in _RUN_OUTCOMES:
+            continue
+        key = result.get("key") or f"outcome:{index}"
+        if outcome == "consolidated":
+            receipts.pop(result.get("replaced_key", ""), None)
+        if outcome == "unchanged" and key in receipts:
+            continue
+        receipts[key] = outcome
+    for index, result in enumerate(deferred or []):
+        key = ("doc:" + result["candidate_id"] if result.get("candidate_id")
+               else "deferred:" + (result.get("topic") or str(index)))
+        receipts[key] = "deferred_evidence"
+    if sum(value == "deferred_evidence" for value in receipts.values()) > MAX_DEFERRED_RECEIPTS:
+        raise ValueError("Bootstrap deferred receipt budget reached; start a new scan")
+    if len(receipts) > MAX_RUN_RECEIPTS:
+        raise ValueError("Bootstrap run receipt budget reached; start a new scan")
+    scan["run_receipts"] = receipts
+
+
+def _status_summary(entries: list[dict], scan: dict, *, clarifications: list[dict] | None = None,
+                    recheck_worklist: list[dict] | None = None) -> dict:
+    """Truthful, bootstrap-scoped status for host presentation; suggestions are not a queue."""
+    active = [e for e in entries if e.get("bootstrap") and e.get("status") != "ignored"]
+    suggested = [e for e in active if e.get("status") == "suggested" and not _human(e)]
+    caveated = [e for e in suggested if _unchecked(e) or e.get("bootstrap_check_unavailable")]
+    withheld = [e for e in active if e.get("bootstrap_withheld") and not _human(e)]
+    pending = [e for e in active if e.get("status") == "pending_approval" and not _human(e)]
+    pending_groups = _pending_conflict_components(entries)
+    human = [e for e in active if _human(e)]
+    receipts = Counter(scan.get("run_receipts", {}).values())
+    counts = {name: receipts.get(name, 0) for name in _RUN_OUTCOMES}
+    ready = clarifications or []
+    recheck = recheck_worklist or []
+    if scan.get("stage") != "reported_complete":
+        next_action = "interpret"
+    elif recheck or counts["deferred_evidence"] or scan.get("inventory_delta"):
+        next_action = "recheck_evidence"
+    elif ready:
+        next_action = "resolve_conflict"
+    else:
+        next_action = "none"
+    display_counts = {
+        "saved": counts["stored"] + counts["consolidated"] + counts["updated"],
+        "protected": counts["protected"] + counts["protected_deleted"] + counts["superseded"],
+        "deferred": counts["deferred_evidence"],
+        "unchanged": counts["unchanged"],
+    }
+    run_text = (f"{display_counts['saved']} saved, {display_counts['protected']} protected, "
+                f"{display_counts['deferred']} deferred, {display_counts['unchanged']} unchanged")
+    if scan.get("stage") != "reported_complete":
+        message = f"Bootstrap scan in progress: {run_text}. Finish the grounded interpretation."
+    elif ready:
+        message = f"Bootstrap complete: {run_text}. {len(ready)} conflict group(s) need a decision."
+    elif recheck or counts["deferred_evidence"] or scan.get("inventory_delta"):
+        message = f"Bootstrap capture complete: {run_text}. Evidence rechecking is still needed."
+    elif pending_groups:
+        message = (f"Bootstrap complete: {run_text}. {len(pending_groups)} existing unresolved "
+                   "conflict group(s) left unchanged; no question repeated.")
+    else:
+        message = f"Bootstrap complete: {run_text}. No conflicts require a decision. No action required."
+    return {
+        "run_id": scan.get("run_id", ""),
+        "outcomes": counts,
+        "display_counts": display_counts,
+        "active_total": len(active),
+        "usable_suggestions": len([e for e in suggested if not e.get("bootstrap_withheld")]),
+        "suggestions_with_freshness_caveat": len(caveated),
+        "withheld": len(withheld),
+        "human_decisions": len(human),
+        "pending_conflict_entries": len(pending),
+        "pending_conflict_groups": len(pending_groups),
+        "ready_conflict_groups": len(ready),
+        "next_action": next_action,
+        "message": message,
+        "suggestions_are_review_queue": False,
+    }
+
+
+def _resolve_conflict(repo_path: str, data: dict, scan: dict, resolution: dict) -> dict:
+    """Apply one user choice to exactly one current conflict component, in memory."""
+    fields = {"group_id", "canonical_id", "resolved_content"}
+    if not isinstance(resolution, dict) or set(resolution) != fields:
+        raise ValueError("resolution needs exactly group_id, canonical_id and resolved_content")
+    if any(not isinstance(resolution.get(key), str) or not resolution[key].strip()
+           for key in fields):
+        raise ValueError("resolution fields must be non-empty strings")
+    content = revisions.normalize_content(resolution["resolved_content"])
+    if len(content) > 1500:
+        raise ValueError("resolved_content must be at most 1500 characters")
+    resolution_id = _digest([resolution["group_id"], resolution["canonical_id"], content])
+    if scan.get("last_resolution", {}).get("resolution_id") == resolution_id:
+        return {**scan["last_resolution"]["receipt"], "outcome": "unchanged"}
+
+    groups = _current_conflict_groups(data["entries"])
+    group = next((item for item in groups if item["group_id"] == resolution["group_id"]), None)
+    if group is None:
+        raise ValueError("Conflict group changed or is no longer pending; get the current scan")
+    target_ids = {item["id"] for item in group["decisions"]}
+    if resolution["canonical_id"] not in target_ids:
+        raise ValueError("canonical_id must be a decision in this conflict group")
+    canonical = store.entry_by_id(data["entries"], resolution["canonical_id"])
+    now = datetime.now(timezone.utc).isoformat()
+    ok, message, changed = store.apply_approval(
+        data, canonical["id"], "edit", content, now, repo_path)
+    if not ok or not changed:
+        raise ValueError(message)
+    resolution_record = {"group_id": group["group_id"], "outcome": "canonical",
+                         "resolved_at": now, "replacement_id": canonical["id"]}
+    canonical["bootstrap_resolution"] = resolution_record
+    superseded = []
+    for entry_id in sorted(target_ids - {canonical["id"]}):
+        peer = store.entry_by_id(data["entries"], entry_id)
+        peer["status"] = "ignored"
+        peer["bootstrap_resolution"] = {**resolution_record, "outcome": "superseded"}
+        superseded.append(peer["id"])
+    receipt = {"outcome": "resolved", "group_id": group["group_id"],
+               "canonical_id": canonical["id"], "canonical_revision": canonical["revision"],
+               "superseded_ids": superseded, "evidence_only_ids":
+               [item["id"] for item in group.get("evidence_only", [])],
+               "message": "Human conflict decision saved; original inference history preserved."}
+    scan["last_resolution"] = {"resolution_id": resolution_id, "receipt": receipt}
+    scan["heads"] = _heads(data["entries"])
+    _advance_analysis(scan, scan)
+    data["bootstrap_scan"] = scan
+    return receipt
+
+
 def run(repo_path: str, session_id: str, *, apply: bool = True, snapshot_id: str = "",
         findings: list[dict] | None = None, finish: bool = False,
         external_paths: list[str] | None = None, source_paths: list[str] | None = None,
-        repo_source: str = "", assessed_delta: str = "") -> dict:
+        repo_source: str = "", assessed_delta: str = "", run_id: str = "",
+        resolution: dict | None = None) -> dict:
     """Start/inspect a scan or submit grounded findings through the existing bootstrap tool."""
+    if resolution is not None:
+        if (not apply or findings is not None or finish or assessed_delta
+                or external_paths is not None or source_paths is not None):
+            raise ValueError("Resolve a conflict separately with apply=true")
+        with store.store_lock(store.repo_slug(repo_path)):
+            data = store.load_for_update(repo_path)
+            scan = data.get("bootstrap_scan") or {}
+            if not scan:
+                raise ValueError("Bootstrap has no conflict state; start a scan")
+            if run_id and scan.get("run_id") != run_id:
+                raise ValueError("Bootstrap run was superseded; get the current scan")
+            if _heads(data["entries"]) != scan.get("heads"):
+                raise ValueError("A decision changed before conflict resolution; get the current scan")
+            receipt = _resolve_conflict(repo_path, data, scan, resolution)
+            store.save(repo_path, _persistable_view(data))
+            groups = _current_conflict_groups(data["entries"])
+            clarifications = [group for group in groups if group["state"] == "ready"]
+            recheck_worklist = [group for group in groups if group["state"] == "recheck"]
+            summary = _status_summary(data["entries"], scan, clarifications=clarifications,
+                                      recheck_worklist=recheck_worklist)
+            return {"stage": scan["stage"], "snapshot_id": scan["snapshot_id"],
+                    "run_id": scan.get("run_id", ""), "resolution_receipt": receipt,
+                    "status_summary": summary, "clarifications": clarifications,
+                    "recheck_worklist": recheck_worklist, "guide": GUIDE}
     if findings is not None or finish or assessed_delta:
         if not apply or external_paths is not None or source_paths is not None:
             raise ValueError("Reports require apply=true; configure sources in a separate scan")
@@ -697,6 +962,8 @@ def run(repo_path: str, session_id: str, *, apply: bool = True, snapshot_id: str
             scan = data.get("bootstrap_scan") or {}
             if not snapshot_id or scan.get("snapshot_id") != snapshot_id:
                 raise ValueError("Unknown or superseded bootstrap snapshot; rescan")
+            if run_id and scan.get("run_id") != run_id:
+                raise ValueError("Bootstrap run was superseded; start from the current scan")
             if scan.get("checkout") != os.path.abspath(repo_path):
                 raise ValueError("Snapshot belongs to a different checkout")
             current = snapshot(repo_path, scan["external_paths"], scan.get("source_paths", []))
@@ -725,7 +992,7 @@ def run(repo_path: str, session_id: str, *, apply: bool = True, snapshot_id: str
                     deferred.append({"index": index, "candidate_id": row.get("candidate_id", ""),
                                      "topic": row.get("topic", ""), "outcome": "deferred_evidence",
                                      "reason": str(exc)})
-            if len(set(scan["reported"]) | {r["key"] for r in valid}) > 80:
+            if len(set(scan["reported"]) | {r["key"] for r in valid}) > MAX_REPORTED_FINDINGS:
                 raise ValueError("Scan finding budget reached; retain remaining investigation as incomplete")
             retained = _retained_reports({**scan, "files": current["files"], "candidates": current["candidates"]})
             # An invalid peer cannot be persisted as current, but its unresolved dispute
@@ -739,6 +1006,15 @@ def run(repo_path: str, session_id: str, *, apply: bool = True, snapshot_id: str
             linked = _link_disputes({**scan, "reported": context}, valid)
             live = set(retained) | {r["key"] for r in valid}
             reports = {key: row for key, row in linked.items() if key in live}
+            # A grounded explicit replacement consumes the prior observation in this batch.
+            # Otherwise the retained old report would produce a misleading extra "unchanged"
+            # outcome before the same entry is consolidated under its new observation key.
+            for row in valid:
+                if not row.get("replaces"):
+                    continue
+                replaced = store.entry_by_id(data["entries"], row["replaces"])
+                if replaced and replaced.get("bootstrap"):
+                    reports.pop(replaced["bootstrap"].get("key"), None)
             outcomes = _persist_findings(data, list(reports.values()), session_id,
                                          store.load_deleted(repo_path).get("entries", []), repo_source, globals_)
             # Receipts account for attempted capture independently of current applicability.
@@ -760,6 +1036,7 @@ def run(repo_path: str, session_id: str, *, apply: bool = True, snapshot_id: str
                         receipts[result["key"][4:]] = "superseded"
             scan["reported"] = reports
             scan["candidate_receipts"] = receipts
+            _record_run_outcomes(scan, outcomes, deferred)
             missing = [c["candidate_id"] for c in scan["candidates"]
                        if "doc:" + c["candidate_id"] not in scan["reported"] and c["candidate_id"] not in receipts]
             if finish and missing and not deferred:
@@ -778,9 +1055,15 @@ def run(repo_path: str, session_id: str, *, apply: bool = True, snapshot_id: str
                     store.touch_pending_review(repo_path)
                 except OSError:
                     pass  # optional nudge failure cannot turn a committed report into 'not saved'
-            return {"stage": scan["stage"], "snapshot_id": scan["snapshot_id"], "outcomes": outcomes,
-                    "clarifications": _clarifications(data["entries"], outcomes),
-                    "recheck_worklist": [g for g in _clarification_groups(data["entries"], outcomes) if g["state"] == "recheck"],
+            clarifications = _clarifications(data["entries"], outcomes)
+            recheck_worklist = [g for g in _clarification_groups(data["entries"], outcomes)
+                                if g["state"] == "recheck"]
+            summary = _status_summary(data["entries"], scan, clarifications=clarifications,
+                                      recheck_worklist=recheck_worklist)
+            return {"stage": scan["stage"], "snapshot_id": scan["snapshot_id"], "run_id": scan.get("run_id", ""),
+                    "outcomes": outcomes, "status_summary": summary,
+                    "clarifications": clarifications,
+                    "recheck_worklist": recheck_worklist,
                     "inventory_delta": scan.get("inventory_delta", {}), "deferred": deferred,
                     "candidate_receipts": scan["candidate_receipts"],
                     "missing_candidates": missing, "coverage": scan["coverage"],
@@ -796,12 +1079,15 @@ def run(repo_path: str, session_id: str, *, apply: bool = True, snapshot_id: str
                  else previous.get("external_paths", []))
         focus = _source_paths(source_paths if source_paths is not None else previous.get("source_paths", []))
         scan = snapshot(repo_path, roots, focus)
+        scan["run_id"] = str(uuid.uuid4()) if apply else ""
+        scan["run_receipts"] = {}
         outcomes = []
         if apply:
             facts = [{**f, "origin": "parser", "key": "code:" + f["topic"] + ":" + f["scope"]} for f in scan["facts"]]
             for fact in facts:
                 fact["sources"] = _validate_sources(scan, fact["sources"])
             outcomes = _persist_findings(data, facts, session_id, store.load_deleted(repo_path).get("entries", []), repo_source)
+            _record_run_outcomes(scan, outcomes)
             _refresh_entries(data["entries"], scan)
         scan["heads"] = _heads(data["entries"])
         globals_ = store.load_global().get("entries", [])
@@ -813,17 +1099,17 @@ def run(repo_path: str, session_id: str, *, apply: bool = True, snapshot_id: str
         scan["candidate_receipts"] = {key: value for key, value in previous.get("candidate_receipts", {}).items()
                                       if key in candidates}
         scan["stage"] = previous.get("stage", "interpreting")
-        same_basis = bool(previous) and _analysis_basis(previous) == _analysis_basis(scan)
-        if same_basis:
-            scan["generation"] = previous.get("generation", 0)
-            scan["snapshot_id"] = previous["snapshot_id"]
-        else:
+        if not (bool(previous) and _analysis_basis(previous) == _analysis_basis(scan)):
             scan["reported"] = _retained_reports(scan)
             for key in previous.get("reported", {}):
                 if key.startswith("doc:") and key[4:] in candidates and key not in scan["reported"]:
                     scan["candidate_receipts"][key[4:]] = "needs_recheck"
             scan["stage"] = "interpreting"
-            _advance_analysis(scan, previous)
+        # Every explicit apply scan is a new analysis owner, even when its bytes match the
+        # previous scan. This makes the second agent win deterministically and prevents an
+        # older report from committing through a reused token. SessionStart never reaches
+        # this path, so applicability refreshes still leave in-flight analysis valid.
+        _advance_analysis(scan, previous)
         _apply_inventory(data["entries"], scan, scan)
         ask_external = not previous.get("external_docs_offered") and external_paths is None
         scan["external_docs_offered"] = True if apply else previous.get("external_docs_offered", False)
@@ -837,8 +1123,10 @@ def run(repo_path: str, session_id: str, *, apply: bool = True, snapshot_id: str
                       "withheld": e.get("bootstrap_withheld", ""), "unchecked": _unchecked(e)}
                      for e in active[:50]]
     public = {k: v for k, v in scan.items() if k not in {"heads", "global_heads", "reported", "external_docs_offered"}}
+    recheck_worklist = [g for g in _clarification_groups(data["entries"], []) if g["state"] == "recheck"]
+    summary = _status_summary(data["entries"], scan, recheck_worklist=recheck_worklist)
     return {**public, "reported_keys": list(scan["reported"]), "outcomes": outcomes,
-            "recheck_worklist": [g for g in _clarification_groups(data["entries"], []) if g["state"] == "recheck"],
+            "status_summary": summary, "recheck_worklist": recheck_worklist,
             "decisions": decisions, "decisions_omitted": max(0, len(active) - 50), "guide": GUIDE,
             "external_docs_question": "Any shared Markdown rules outside this repository to include? "
             "Provide a specific path now or later; this is optional." if ask_external else ""}

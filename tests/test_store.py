@@ -2971,6 +2971,62 @@ class TestDeicticCleanRestatementPromotion:
         assert [r["session_id"] for r in entry["recurrences"]] == ["s2", "s3"]
 
 
+class TestTaskScopedDirectiveCapture:
+    """One bootstrap/task instruction must not become durable repository policy."""
+
+    def test_bootstrap_rerun_request_is_not_captured(self, tmp_repo):
+        prompt = (
+            "Re-run bootstrap without changing code or existing human decisions. "
+            "Do not ask conflicts that the stored human decisions already resolve. "
+            "Show actual saved, protected, deferred, or unchanged outcomes"
+        )
+
+        assert store.capture_user_constraint(tmp_repo, prompt, "s1") == (None, None, None)
+        assert store.load(tmp_repo)["entries"] == []
+
+    @pytest.mark.parametrize("prompt", [
+        "For this run, never modify repository files.",
+        "During this bootstrap, always show the raw outcome counts.",
+        "Right now, do not edit the configuration.",
+    ])
+    def test_explicit_task_scope_is_not_captured(self, tmp_repo, prompt):
+        assert store.capture_user_constraint(tmp_repo, prompt, "s1") == (None, None, None)
+        assert store.load(tmp_repo)["entries"] == []
+
+    def test_task_scope_applies_to_sibling_always_clause(self, tmp_repo):
+        prompt = ("For this run, never modify files. Always report saved outcomes. "
+                  "Show the tests.")
+
+        assert store.capture_user_constraint(tmp_repo, prompt, "s1") == (None, None, None)
+        assert store.load(tmp_repo)["entries"] == []
+
+    def test_separately_declared_lasting_rule_survives_task_scope(self, tmp_repo):
+        prompt = ("For this run, never modify files. Going forward, always use "
+                  "Conventional Commits. Show the tests.")
+
+        entry_id, content, status = store.capture_user_constraint(tmp_repo, prompt, "s1")
+
+        assert entry_id and status == "approved"
+        assert content == "Going forward, always use Conventional Commits"
+
+    def test_durable_sibling_survives_multi_step_task(self, tmp_repo):
+        prompt = "Fix the bootstrap output. Always use Conventional Commits. Show the tests."
+
+        entry_id, content, status = store.capture_user_constraint(tmp_repo, prompt, "s1")
+
+        assert entry_id and status == "approved"
+        assert content == "Always use Conventional Commits"
+
+    @pytest.mark.parametrize("prompt", [
+        "Never log raw customer emails.",
+        "Do not commit generated files.",
+        "Rule: do not approve inferred documentation automatically.",
+    ])
+    def test_standalone_durable_rules_keep_existing_capture(self, tmp_repo, prompt):
+        entry_id, _content, status = store.capture_user_constraint(tmp_repo, prompt, "s1")
+        assert entry_id and status == "approved"
+
+
 class TestDeicticIgnoredTombstoneDoesNotBlock:
     """Fix 3: an entry the developer ignored via review must not block a re-typed rule."""
 
