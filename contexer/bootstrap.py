@@ -25,6 +25,7 @@ MAX_FOCUSED_BYTES = 2_000_000
 MAX_FINDINGS = 40
 MAX_REPORTED_FINDINGS = 80
 MAX_PARSED_FACTS = 7
+MAX_DEFERRED_RECEIPTS = MAX_FINDINGS
 MAX_RUN_RECEIPTS = store.MAX_BOOTSTRAP_RUN_RECEIPTS
 SUFFIXES = {".md", ".py", ".toml", ".json", ".yaml", ".yml", ".ts", ".tsx",
             ".js", ".jsx", ".go", ".rs", ".sql"}
@@ -808,6 +809,8 @@ def _record_run_outcomes(scan: dict, outcomes: list[dict], deferred: list[dict] 
         key = ("doc:" + result["candidate_id"] if result.get("candidate_id")
                else "deferred:" + (result.get("topic") or str(index)))
         receipts[key] = "deferred_evidence"
+    if sum(value == "deferred_evidence" for value in receipts.values()) > MAX_DEFERRED_RECEIPTS:
+        raise ValueError("Bootstrap deferred receipt budget reached; start a new scan")
     if len(receipts) > MAX_RUN_RECEIPTS:
         raise ValueError("Bootstrap run receipt budget reached; start a new scan")
     scan["run_receipts"] = receipts

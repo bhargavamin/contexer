@@ -316,18 +316,43 @@ def test_later_batch_does_not_relabel_this_runs_saved_finding_as_unchanged(proje
 
 def test_run_receipts_preserve_the_full_bounded_maximum():
     assert bootstrap.MAX_RUN_RECEIPTS == (
-        bootstrap.MAX_REPORTED_FINDINGS + bootstrap.MAX_PARSED_FACTS)
+        bootstrap.MAX_REPORTED_FINDINGS + bootstrap.MAX_PARSED_FACTS
+        + bootstrap.MAX_DEFERRED_RECEIPTS)
     scan = {"run_receipts": {}}
     outcomes = [{"key": f"finding:{index}", "outcome": "stored"}
-                for index in range(bootstrap.MAX_RUN_RECEIPTS)]
+                for index in range(bootstrap.MAX_REPORTED_FINDINGS + bootstrap.MAX_PARSED_FACTS)]
+    deferred = [{"topic": f"deferred-{index}"}
+                for index in range(bootstrap.MAX_DEFERRED_RECEIPTS)]
 
-    bootstrap._record_run_outcomes(scan, outcomes)
+    bootstrap._record_run_outcomes(scan, outcomes, deferred)
 
     assert len(scan["run_receipts"]) == bootstrap.MAX_RUN_RECEIPTS
-    assert set(scan["run_receipts"].values()) == {"stored"}
+    assert list(scan["run_receipts"].values()).count("stored") == 87
+    assert list(scan["run_receipts"].values()).count("deferred_evidence") == 40
     with pytest.raises(ValueError, match="receipt budget"):
         bootstrap._record_run_outcomes(
             scan, [{"key": "one-too-many", "outcome": "stored"}])
+
+
+def test_old_deferred_receipt_does_not_block_full_success_budget():
+    scan = {"run_receipts": {}}
+    bootstrap._record_run_outcomes(scan, [], [{"topic": "needs-recheck"}])
+    outcomes = [{"key": f"success:{index}", "outcome": "stored"}
+                for index in range(bootstrap.MAX_REPORTED_FINDINGS + bootstrap.MAX_PARSED_FACTS)]
+
+    bootstrap._record_run_outcomes(scan, outcomes)
+
+    assert len(scan["run_receipts"]) == 88
+    assert list(scan["run_receipts"].values()).count("deferred_evidence") == 1
+
+
+def test_unresolved_deferred_receipts_have_an_explicit_bound():
+    scan = {"run_receipts": {}}
+    deferred = [{"topic": f"deferred-{index}"}
+                for index in range(bootstrap.MAX_DEFERRED_RECEIPTS + 1)]
+
+    with pytest.raises(ValueError, match="deferred receipt budget"):
+        bootstrap._record_run_outcomes(scan, [], deferred)
 
 
 def test_second_identical_scan_supersedes_first_report_token(project):

@@ -372,7 +372,7 @@ def test_disappeared_authorized_document_does_not_block_rescan(project, tmp_path
 
 @pytest.mark.parametrize("field,value", [("generation", -1), ("generation", True),
                                           ("candidate_receipts", {"bad": []}),
-                                          ("run_receipts", {str(i): "stored" for i in range(88)}),
+                                          ("run_receipts", {str(i): "stored" for i in range(128)}),
                                           ("assessed_inventory", "not-a-fingerprint")])
 def test_malformed_new_state_never_gets_overwritten(project, field, value):
     bootstrap.run(str(project), "test")

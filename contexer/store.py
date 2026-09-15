@@ -27,7 +27,7 @@ except ImportError:                    # pragma: no cover - non-POSIX fallback
 
 STORE_DIR = Path.home() / ".contexer"
 MAX_ENTRIES = 500
-MAX_BOOTSTRAP_RUN_RECEIPTS = 87  # 80 interpreted findings + 7 root config facts
+MAX_BOOTSTRAP_RUN_RECEIPTS = 127  # 80 findings + 7 config facts + 40 unresolved deferrals
 _SCHEMA_VERSION = 4               # bumped when the on-disk entry shape changes; gates migration
 GLOBAL_SLUG = "_global"           # reserved slug for cross-repo decisions
 _UNFILTERED_DISPLAY = 10          # entries shown when no query/type filter applied
