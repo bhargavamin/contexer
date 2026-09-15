@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.47.0](https://github.com/bhargavamin/contexer/compare/v0.46.0...v0.47.0) (2026-09-15)
+
+
+### Features
+
+* **bootstrap:** streamline inferred context capture ([5a97dba](https://github.com/bhargavamin/contexer/commit/5a97dba4a15330dbbb7ea2b4df9fe185f63246db))
+* **bootstrap:** streamline inferred context capture ([a3c2415](https://github.com/bhargavamin/contexer/commit/a3c2415984542b12028e50a461436612541acbdf))
+
+
+### Bug Fixes
+
+* **bootstrap:** cover deferred report batches ([d340ba3](https://github.com/bhargavamin/contexer/commit/d340ba3cc775be9ca5253bda0ae56c6429cd2c25))
+* **bootstrap:** preserve deferred run receipts ([7e27703](https://github.com/bhargavamin/contexer/commit/7e27703d2a3d1f992fa3162471d796bb279ac594))
+* **bootstrap:** tighten inferred capture boundaries ([21826b0](https://github.com/bhargavamin/contexer/commit/21826b0ce9a9856de603c4330608e50c98e1b798))
+
 ## [0.46.0](https://github.com/bhargavamin/contexer/compare/v0.45.4...v0.46.0) (2026-09-06)
 
 
