@@ -372,6 +372,7 @@ def test_disappeared_authorized_document_does_not_block_rescan(project, tmp_path
 
 @pytest.mark.parametrize("field,value", [("generation", -1), ("generation", True),
                                           ("candidate_receipts", {"bad": []}),
+                                          ("run_receipts", {str(i): "stored" for i in range(88)}),
                                           ("assessed_inventory", "not-a-fingerprint")])
 def test_malformed_new_state_never_gets_overwritten(project, field, value):
     bootstrap.run(str(project), "test")
@@ -394,7 +395,9 @@ def test_max_report_budget_has_bounded_applicability_overhead(project):
              "assessment": "supported", "reason": "Benchmark source fixture.", "sources": [source] * 8}
             for i in range(80)]
     receipt = bootstrap.run(str(project), "first", snapshot_id=scan["snapshot_id"], findings=rows[:40])
-    finish(project, receipt, rows[40:])
+    receipt = finish(project, receipt, rows[40:])
+    assert receipt["status_summary"]["outcomes"]["stored"] == 82
+    assert receipt["status_summary"]["display_counts"]["saved"] == 82
     before = store.load(str(project))
     (project / "extra.py").write_text("VALUE = 1\n")
     after = refresh(project)

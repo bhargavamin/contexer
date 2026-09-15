@@ -27,6 +27,7 @@ except ImportError:                    # pragma: no cover - non-POSIX fallback
 
 STORE_DIR = Path.home() / ".contexer"
 MAX_ENTRIES = 500
+MAX_BOOTSTRAP_RUN_RECEIPTS = 87  # 80 interpreted findings + 7 root config facts
 _SCHEMA_VERSION = 4               # bumped when the on-disk entry shape changes; gates migration
 GLOBAL_SLUG = "_global"           # reserved slug for cross-repo decisions
 _UNFILTERED_DISPLAY = 10          # entries shown when no query/type filter applied
@@ -411,7 +412,7 @@ def load_for_update(repo_path: str) -> dict:
                 or ("run_id" in scan and (not isinstance(scan["run_id"], str)
                                           or len(scan["run_id"]) > 64))
                 or not isinstance(scan.get("run_receipts", {}), dict)
-                or len(scan.get("run_receipts", {})) > 80
+                or len(scan.get("run_receipts", {})) > MAX_BOOTSTRAP_RUN_RECEIPTS
                 or any(not isinstance(k, str) or not isinstance(v, str) or v not in {
                            "stored", "consolidated", "updated", "unchanged", "protected",
                            "protected_deleted", "superseded", "historical", "unverified",
@@ -1764,6 +1765,12 @@ _DURABLE_DIRECTIVE = re.compile(
     r"|^\s*(?:rule|constraint|convention|decision|policy|requirement)\s*[:\-]",
     re.IGNORECASE,
 )
+_EXPLICIT_DURABLE_SCOPE = re.compile(
+    r"\b(?:from\s+now\s+on|going\s+forward|henceforth|permanently)\b"
+    r"|^\s*(?:(?:standing|permanent|project|repository|team|global)\s+)?"
+    r"(?:rule|constraint|convention|decision|policy|requirement)\s*[:\-]",
+    re.IGNORECASE,
+)
 _TASK_IMPERATIVE = re.compile(
     r"^\s*(?:please\s+)?(?:re-?run|run|check|inspect|review|test|fix|implement|show|"
     r"report|open|install|create|change|update|edit|do\s+not|don['\u2019]t|ensure|"
@@ -1790,9 +1797,12 @@ def _directive_policy_text(text: str) -> str:
         r"(?<=[.!?])\s+|\n+|,\s+(?:but|and)\s+|\s+but\s+", candidate,
         flags=re.IGNORECASE) if part.strip(" ,")]
     if any(_TASK_SCOPE_MARKER.search(part) for part in fragments):
-        fragments = [part for part in fragments if not _TASK_SCOPE_MARKER.search(part)]
-        if not fragments:
-            return ""
+        # Explicit task scope governs sibling actions too. "Always" alone can describe
+        # how to perform this run; only an independently declared lasting-policy clause
+        # escapes that scope.
+        durable = [part for part in fragments if _EXPLICIT_DURABLE_SCOPE.search(part)
+                   and not _TASK_SCOPE_MARKER.search(part)]
+        return ". ".join(durable)
     task_actions = sum(bool(_TASK_IMPERATIVE.search(part)) for part in fragments)
     if task_actions < 2:
         return candidate if not _TASK_SCOPE_MARKER.search(candidate) else ""

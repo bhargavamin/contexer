@@ -23,6 +23,9 @@ MAX_BYTES = 2_000_000
 MAX_FILE_BYTES = 100_000
 MAX_FOCUSED_BYTES = 2_000_000
 MAX_FINDINGS = 40
+MAX_REPORTED_FINDINGS = 80
+MAX_PARSED_FACTS = 7
+MAX_RUN_RECEIPTS = store.MAX_BOOTSTRAP_RUN_RECEIPTS
 SUFFIXES = {".md", ".py", ".toml", ".json", ".yaml", ".yml", ".ts", ".tsx",
             ".js", ".jsx", ".go", ".rs", ".sql"}
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "vendor", "dist", "build",
@@ -561,6 +564,8 @@ def _replacement_is_grounded(old: dict, row: dict) -> bool:
     same_document = any(
         left.get("role") == right.get("role") == "documentation"
         and left.get("file") == right.get("file")
+        and left.get("line", 0) <= right.get("end_line", -1)
+        and right.get("line", 0) <= left.get("end_line", -1)
         for left in old_sources for right in row["sources"])
     return shared_non_doc or same_document
 
@@ -803,7 +808,9 @@ def _record_run_outcomes(scan: dict, outcomes: list[dict], deferred: list[dict] 
         key = ("doc:" + result["candidate_id"] if result.get("candidate_id")
                else "deferred:" + (result.get("topic") or str(index)))
         receipts[key] = "deferred_evidence"
-    scan["run_receipts"] = dict(list(receipts.items())[-80:])
+    if len(receipts) > MAX_RUN_RECEIPTS:
+        raise ValueError("Bootstrap run receipt budget reached; start a new scan")
+    scan["run_receipts"] = receipts
 
 
 def _status_summary(entries: list[dict], scan: dict, *, clarifications: list[dict] | None = None,
@@ -982,7 +989,7 @@ def run(repo_path: str, session_id: str, *, apply: bool = True, snapshot_id: str
                     deferred.append({"index": index, "candidate_id": row.get("candidate_id", ""),
                                      "topic": row.get("topic", ""), "outcome": "deferred_evidence",
                                      "reason": str(exc)})
-            if len(set(scan["reported"]) | {r["key"] for r in valid}) > 80:
+            if len(set(scan["reported"]) | {r["key"] for r in valid}) > MAX_REPORTED_FINDINGS:
                 raise ValueError("Scan finding budget reached; retain remaining investigation as incomplete")
             retained = _retained_reports({**scan, "files": current["files"], "candidates": current["candidates"]})
             # An invalid peer cannot be persisted as current, but its unresolved dispute

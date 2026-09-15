@@ -2993,6 +2993,22 @@ class TestTaskScopedDirectiveCapture:
         assert store.capture_user_constraint(tmp_repo, prompt, "s1") == (None, None, None)
         assert store.load(tmp_repo)["entries"] == []
 
+    def test_task_scope_applies_to_sibling_always_clause(self, tmp_repo):
+        prompt = ("For this run, never modify files. Always report saved outcomes. "
+                  "Show the tests.")
+
+        assert store.capture_user_constraint(tmp_repo, prompt, "s1") == (None, None, None)
+        assert store.load(tmp_repo)["entries"] == []
+
+    def test_separately_declared_lasting_rule_survives_task_scope(self, tmp_repo):
+        prompt = ("For this run, never modify files. Going forward, always use "
+                  "Conventional Commits. Show the tests.")
+
+        entry_id, content, status = store.capture_user_constraint(tmp_repo, prompt, "s1")
+
+        assert entry_id and status == "approved"
+        assert content == "Going forward, always use Conventional Commits"
+
     def test_durable_sibling_survives_multi_step_task(self, tmp_repo):
         prompt = "Fix the bootstrap output. Always use Conventional Commits. Show the tests."
 

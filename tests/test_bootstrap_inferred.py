@@ -248,6 +248,36 @@ def test_replaces_rejects_unrelated_bootstrap_observation(project):
         finish(project, scan, [unrelated])
 
 
+def test_replaces_rejects_separate_rule_in_same_document_and_scope():
+    old = {"content": "Use a transactional outbox for billing notifications.",
+           "subtype": "architecture", "status": "suggested",
+           "bootstrap": {"scope": "billing delivery", "sources": [{
+               "file": "ARCHITECTURE.md", "line": 2, "end_line": 2,
+               "sha256": "old-version", "role": "documentation"}]}}
+    row = {"content": "Use a transactional outbox for billing retries.",
+           "subtype": "architecture", "scope": "billing delivery",
+           "assessment": "supported", "sources": [{
+               "file": "ARCHITECTURE.md", "line": 20, "end_line": 20,
+               "sha256": "new-version", "role": "documentation"}]}
+
+    assert not bootstrap._replacement_is_grounded(old, row)
+
+
+def test_replaces_accepts_rewording_at_same_document_range():
+    old = {"content": "Use a transactional outbox for billing notifications.",
+           "subtype": "architecture", "status": "suggested",
+           "bootstrap": {"scope": "billing delivery", "sources": [{
+               "file": "ARCHITECTURE.md", "line": 2, "end_line": 2,
+               "sha256": "old-version", "role": "documentation"}]}}
+    row = {"content": "Use a transactional outbox for all billing notifications.",
+           "subtype": "architecture", "scope": "billing delivery",
+           "assessment": "supported", "sources": [{
+               "file": "ARCHITECTURE.md", "line": 2, "end_line": 2,
+               "sha256": "new-version", "role": "documentation"}]}
+
+    assert bootstrap._replacement_is_grounded(old, row)
+
+
 def test_status_summary_is_run_scoped_and_never_creates_a_review_queue(project):
     scan = bootstrap.run(str(project), "first")
     assert scan["status_summary"]["outcomes"]["stored"] == 2
@@ -282,6 +312,22 @@ def test_later_batch_does_not_relabel_this_runs_saved_finding_as_unchanged(proje
 
     assert final["status_summary"]["display_counts"]["saved"] == 3
     assert final["status_summary"]["outcomes"]["unchanged"] == 0
+
+
+def test_run_receipts_preserve_the_full_bounded_maximum():
+    assert bootstrap.MAX_RUN_RECEIPTS == (
+        bootstrap.MAX_REPORTED_FINDINGS + bootstrap.MAX_PARSED_FACTS)
+    scan = {"run_receipts": {}}
+    outcomes = [{"key": f"finding:{index}", "outcome": "stored"}
+                for index in range(bootstrap.MAX_RUN_RECEIPTS)]
+
+    bootstrap._record_run_outcomes(scan, outcomes)
+
+    assert len(scan["run_receipts"]) == bootstrap.MAX_RUN_RECEIPTS
+    assert set(scan["run_receipts"].values()) == {"stored"}
+    with pytest.raises(ValueError, match="receipt budget"):
+        bootstrap._record_run_outcomes(
+            scan, [{"key": "one-too-many", "outcome": "stored"}])
 
 
 def test_second_identical_scan_supersedes_first_report_token(project):
