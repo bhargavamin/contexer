@@ -328,7 +328,7 @@ def test_run_receipts_preserve_the_full_bounded_maximum():
 
     assert len(scan["run_receipts"]) == bootstrap.MAX_RUN_RECEIPTS
     assert list(scan["run_receipts"].values()).count("stored") == 87
-    assert list(scan["run_receipts"].values()).count("deferred_evidence") == 40
+    assert list(scan["run_receipts"].values()).count("deferred_evidence") == 80
     with pytest.raises(ValueError, match="receipt budget"):
         bootstrap._record_run_outcomes(
             scan, [{"key": "one-too-many", "outcome": "stored"}])
@@ -353,6 +353,18 @@ def test_unresolved_deferred_receipts_have_an_explicit_bound():
 
     with pytest.raises(ValueError, match="deferred receipt budget"):
         bootstrap._record_run_outcomes(scan, [], deferred)
+
+
+def test_deferred_receipts_cover_both_report_batches():
+    scan = {"run_receipts": {}}
+    first_batch = [{"topic": f"first-{index}"} for index in range(bootstrap.MAX_FINDINGS)]
+    second_batch = [{"topic": f"second-{index}"} for index in range(bootstrap.MAX_FINDINGS)]
+
+    bootstrap._record_run_outcomes(scan, [], first_batch)
+    bootstrap._record_run_outcomes(scan, [], second_batch)
+
+    assert len(scan["run_receipts"]) == bootstrap.MAX_REPORTED_FINDINGS
+    assert set(scan["run_receipts"].values()) == {"deferred_evidence"}
 
 
 def test_second_identical_scan_supersedes_first_report_token(project):

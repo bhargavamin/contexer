@@ -25,7 +25,7 @@ MAX_FOCUSED_BYTES = 2_000_000
 MAX_FINDINGS = 40
 MAX_REPORTED_FINDINGS = 80
 MAX_PARSED_FACTS = 7
-MAX_DEFERRED_RECEIPTS = MAX_FINDINGS
+MAX_DEFERRED_RECEIPTS = MAX_REPORTED_FINDINGS
 MAX_RUN_RECEIPTS = store.MAX_BOOTSTRAP_RUN_RECEIPTS
 SUFFIXES = {".md", ".py", ".toml", ".json", ".yaml", ".yml", ".ts", ".tsx",
             ".js", ".jsx", ".go", ".rs", ".sql"}
