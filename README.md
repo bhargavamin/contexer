@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <em>Remember your engineering decisions. Reuse them across AI coding agents.</em>
+  <em>Capture decisions. Review changes. Enforce selected rules.</em>
 </p>
 
 <p align="center">
@@ -39,11 +39,11 @@
 
 ---
 
-# Project memory for your AI coding agents
+# The decision and enforcement layer for AI coding agents
 
-Contexer remembers your project's rules, engineering decisions, and the reasons behind them, so you spend less time explaining the same things in every new AI session.
+Capture engineering decisions and their reasoning, review changes, and bring the right guidance into **Claude Code, Cursor, Codex, and Gemini CLI**. Share approved decisions through optional Contexer Teams and enforce selected rules with optional commit checks.
 
-It works with **Claude Code, Cursor, Codex, and Gemini CLI**, using the same local decision store across supported assistants. It brings relevant knowledge back into their context, lets you review and revise it, and offers optional commit-time checks. It does not train or change the underlying AI model.
+Contexer keeps a reviewable, versioned record of what was decided, why, and whether it has been approved. The same local decision store works across supported assistants, so your engineering guidance is not tied to one agent's conversation history. Review, revision history, team approval, and explicitly enabled checks turn recorded decisions into guidance you can manage and verify.
 
 ### A simple example
 
@@ -90,7 +90,7 @@ Details: **[installation & verification](docs/install.md)** · **[per-tool integ
 |---|---|
 | **Decisions with reasons** | Saves what you chose and why: architecture, constraints, conventions, and reusable patterns. |
 | **Relevant reminders** | Loads standing rules at session start and retrieves matching decisions using your question or referenced files. Avoids repeatedly injecting decisions already shown in the session. |
-| **Shared memory across assistants** | Makes the same local project knowledge available to Claude Code, Cursor, Codex, and Gemini CLI. Automatic delivery varies by assistant. |
+| **Decisions across assistants** | Makes the same local project decisions available to Claude Code, Cursor, Codex, and Gemini CLI. Automatic delivery varies by assistant. |
 | **Project and global rules** | Keeps project-specific choices separate from preferences you want to reuse across repositories. |
 | **Repository-derived context** | Reads configuration and uses source-backed analysis to build starting knowledge. Observations and inferences are labeled, not treated as human-approved rules. |
 | **Review and history** | Lets you review pending decisions and proposed updates, while preserving earlier revisions and their origins. |
