@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import textwrap
 import time
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -4254,6 +4255,28 @@ def _resolve_share_projections(repo_path: str, decision_id: str,
     return [p for p in (get_shareable(repo_path, i, redact_on) for i in ids) if p is not None]
 
 
+def _share_preview_token(value: str) -> str:
+    """Render one opaque wire token without letting it create preview structure.
+
+    Session ids normally come from a UUID, but Claude Code may supply one through an environment
+    variable. Escape controls, format characters (including bidi overrides), and non-space line
+    separators at this render boundary. The stored/projected value stays untouched, so this is
+    display hardening rather than a silent change to the payload the developer is approving.
+    """
+    escaped = {"\n": r"\n", "\r": r"\r", "\t": r"\t"}
+    rendered = []
+    for char in value:
+        if char != " " and (char.isspace() or unicodedata.category(char).startswith("C")):
+            codepoint = ord(char)
+            rendered.append(escaped.get(
+                char,
+                f"\\u{codepoint:04x}" if codepoint <= 0xFFFF else f"\\U{codepoint:08x}",
+            ))
+        else:
+            rendered.append(char)
+    return "".join(rendered)
+
+
 def format_share_preview(repo_path: str, decision_id: str = "", profile=None) -> str:
     """Dry-run preview of what a personal-cloud push would send - a pure local read, NO network.
     Safe-by-default gate for share_decision: pushing is an OUTWARD action, so the developer must
@@ -4282,7 +4305,7 @@ def format_share_preview(repo_path: str, decision_id: str = "", profile=None) ->
         session_id = p.get("session_id")
         if session_id:
             note = "" if remote._WIRE_SESSION_ID else " (not yet sent - server support pending)"
-            lines.append(f"      session: {session_id}{note}")
+            lines.append(f"      session: {_share_preview_token(session_id)}{note}")
         files = p.get("source_files") or []
         if files:
             note = "" if remote._WIRE_SOURCE_FILES else " (not yet sent - server support pending)"
