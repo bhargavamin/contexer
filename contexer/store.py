@@ -4005,10 +4005,14 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
     # sent, not what is stored. `wire_total` is the pre-bound count, so a drop here surfaces
     # through the same "sending N of M" line that capture-time truncation already uses rather
     # than needing a second notice.
+    # Keep the preview/outbox honest about the lineage the wire can actually accept. This is
+    # bounded here and again in `_wire_args`, like source_files and lifecycle, so legacy/direct
+    # callers cannot bypass the server limit.
+    from contexer import remote
+    session_id = remote.bound_session_id(entry.get("session_id"))
     wire_total = len(source_files)
     lifecycle = entry.get("lifecycle")
     if source_files or lifecycle:
-        from contexer import remote
         source_files = remote.bound_source_files(source_files)
         # COMPLETED lifecycle events only (plan E2): `lifecycle` is written solely by
         # lifecycle.tombstone_entry / restore_decision, i.e. only once a human has actually
@@ -4038,6 +4042,9 @@ def _share_projection(entry: dict, redact_on: bool | None = None) -> dict:
         # Present here (even when empty) so downstream builders (share._dec_push_kwargs /
         # _entry_push_kwargs / _payload) can read it uniformly with `.get("source_files")`.
         "source_files": source_files,
+        # Originating capture session only. `session_ids` is the accumulated set of sessions that
+        # later touched the entry and has different semantics, so it must never egress here.
+        "session_id": session_id,
         # Reaches the wire subject to remote._WIRE_LIFECYCLE *and* the server having advertised
         # `decisionLifecycle.tombstones` - see that constant. `[]` for the ordinary decision
         # that has never been retired or restored, so downstream builders read it uniformly.
@@ -4272,6 +4279,10 @@ def format_share_preview(repo_path: str, decision_id: str = "", profile=None) ->
              f"{_SHARE_SECRETS_HINT}:\n"]
     for p in projs:
         lines.append(_share_item_line(p))
+        session_id = p.get("session_id")
+        if session_id:
+            note = "" if remote._WIRE_SESSION_ID else " (not yet sent - server support pending)"
+            lines.append(f"      session: {session_id}{note}")
         files = p.get("source_files") or []
         if files:
             note = "" if remote._WIRE_SOURCE_FILES else " (not yet sent - server support pending)"

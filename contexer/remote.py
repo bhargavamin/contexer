@@ -60,6 +60,16 @@ _DEFAULT_TIMEOUT = 10.0
 # on against an old server and reintroduce the poisoning failure mode.
 _WIRE_SOURCE_FILES = True
 
+# GATE (issue #255): `session_id` follows the same server-first rollout as `source_files`.
+# An unknown field on either push schema is a permanent -32602 and can wedge a durable outbox,
+# so this remains a module constant read inside `_wire_args` at drain time rather than a user
+# toggle or a value captured when the row is queued.
+#
+# OPENED: contexer-teams accepts and stores `session_id` on both push tools (Teams PR #186,
+# merged 2026-08-29). The value is opaque capture-session lineage: send the originating
+# `session_id`, never the accumulated local `session_ids` list.
+_WIRE_SESSION_ID = True
+
 # Wire bounds for `source_files`, mirroring contexer-teams `INPUT_LIMITS.sourceFiles`. The server
 # commit justifies rejecting over-bounds input with "the client caps at the same numbers" - true
 # for the COUNT (store.MAX_SOURCE_FILES, enforced at every anchor write) and false for the
@@ -72,6 +82,7 @@ _WIRE_SOURCE_FILES = True
 # capture side to have been bounded.
 _WIRE_SOURCE_FILES_MAX_ITEMS = 10
 _WIRE_SOURCE_FILES_MAX_LEN = 300
+_WIRE_SESSION_ID_MAX_LEN = 64
 
 # GATE (plan E1/E2): the same shape as `_WIRE_SOURCE_FILES` above, and it shipped CLOSED for the
 # same reason that one did - `source_files` stayed local until the server had accepted the field
@@ -238,6 +249,28 @@ def bound_source_files(source_files: list[str]) -> list[str]:
             if len(f) <= _WIRE_SOURCE_FILES_MAX_LEN][:_WIRE_SOURCE_FILES_MAX_ITEMS]
 
 
+def bound_session_id(session_id: object) -> str | None:
+    """Return one wire-safe opaque session id, or ``None`` when it must be omitted.
+
+    The Teams singular push is TypeScript/Zod and rejects values longer than 64 UTF-16 code
+    units at its schema boundary. Python's ``len`` undercounts astral characters relative to
+    JavaScript, so measure the encoded code units explicitly; otherwise a malformed host-provided
+    id could pass here and still poison the singular outbox path with -32602. Never truncate an
+    opaque identity (which could create a collision); omission loses lineage metadata but keeps
+    the decision pushable. Empty, non-string, and legacy-missing values are likewise absent
+    rather than serialized as null/empty.
+    """
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    try:
+        wire_len = len(session_id.encode("utf-16-le")) // 2
+    except UnicodeEncodeError:
+        # A lone surrogate can exist in a Python str but cannot be serialized as valid Unicode.
+        # Treat it like every other malformed opaque id so it cannot strand an outbox row.
+        return None
+    return session_id if wire_len <= _WIRE_SESSION_ID_MAX_LEN else None
+
+
 def _bounded_token(value) -> str:
     """One lifecycle id or timestamp, or "" when it is missing or implausibly long. These are
     machine-generated tokens, so an over-long one is corrupt data rather than a long name and is
@@ -294,7 +327,8 @@ def _wire_args(*, type: str, content: str, repo: str | None = None,
                confidence: int | None = None, evidence: list[str] | None = None,
                source: str | None = None, decision_id: str | None = None,
                title: str | None = None, source_files: list[str] | None = None,
-               redact_on: bool | None = None, revision_id: str | None = None,
+               session_id: str | None = None, redact_on: bool | None = None,
+               revision_id: str | None = None,
                lifecycle: list | None = None,
                lifecycle_caps: "DecisionLifecycleCapabilities | None" = None) -> dict:
     """Serialize one decision onto the push wire shape, OMITTING every unset optional (the server
@@ -316,6 +350,10 @@ def _wire_args(*, type: str, content: str, repo: str | None = None,
     the server's own bounds (see `_WIRE_SOURCE_FILES_MAX_*`), for the same reason redaction lives
     at this chokepoint: every push funnels through here, so bounding once here is the guarantee,
     where bounding at each capture site would be a promise several writers have to keep.
+
+    `session_id` follows the same drain-time gate and two-layer bound. It is an opaque id minted
+    by the client, not user content, so it is never redacted. Missing/empty/over-bound values are
+    omitted rather than sent as null or truncated into a different identity.
 
     `redact_on` lets a batch caller resolve the on/off flag ONCE and pass it in (avoids re-reading
     config.toml per row); None means resolve it here for a lone call.
@@ -366,6 +404,10 @@ def _wire_args(*, type: str, content: str, repo: str | None = None,
         bounded = bound_source_files(source_files)
         if bounded:
             args["source_files"] = bounded
+    if _WIRE_SESSION_ID:
+        bounded_session = bound_session_id(session_id)
+        if bounded_session is not None:
+            args["session_id"] = bounded_session
     if _WIRE_LIFECYCLE and lifecycle_caps is not None:
         if lifecycle_caps.revisions and revision_id:
             # `revision_id`, snake_case, CONFIRMED against contexer-teams lifecycle merge
@@ -660,6 +702,7 @@ class RemoteStore:
                              source: str | None = None, decision_id: str | None = None,
                              title: str | None = None,
                              source_files: list[str] | None = None,
+                             session_id: str | None = None,
                              revision_id: str | None = None,
                              lifecycle: list | None = None) -> str:
         """Async core of :meth:`push_decision`. Awaits the transport (cancellable).
@@ -683,7 +726,8 @@ class RemoteStore:
             return _wire_args(
                 type=type, content=content, repo=repo, rationale=rationale, agent=agent,
                 confidence=confidence, evidence=evidence, source=source, decision_id=decision_id,
-                title=title, source_files=source_files, redact_on=self._redact_on(),
+                title=title, source_files=source_files, session_id=session_id,
+                redact_on=self._redact_on(),
                 revision_id=revision_id, lifecycle=lifecycle, lifecycle_caps=for_caps)
 
         args = _args(caps)
@@ -1072,6 +1116,7 @@ class RemoteStore:
                       source: str | None = None, decision_id: str | None = None,
                       title: str | None = None,
                       source_files: list[str] | None = None,
+                      session_id: str | None = None,
                       revision_id: str | None = None,
                       lifecycle: list | None = None) -> str:
         """Push one local decision to the caller's personal Teams context (sync shim).
@@ -1083,7 +1128,8 @@ class RemoteStore:
         return self._run_with_reactive_refresh(lambda: asyncio.run(self.apush_decision(
             type=type, content=content, repo=repo, rationale=rationale, agent=agent,
             confidence=confidence, evidence=evidence, source=source, decision_id=decision_id,
-            title=title, source_files=source_files, revision_id=revision_id,
+            title=title, source_files=source_files, session_id=session_id,
+            revision_id=revision_id,
             lifecycle=lifecycle)))
 
     def push_decisions(self, kwargs_list: list[dict]) -> tuple[list[str], list[dict]]:

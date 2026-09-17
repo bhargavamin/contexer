@@ -7,6 +7,7 @@ integration test documented in the manual steps.
 """
 import asyncio
 import inspect
+import json
 import types
 
 import pytest
@@ -1134,6 +1135,46 @@ def test_wire_args_redact_param_overrides_config():
     assert _WIRE_AWS in off["content"]  # caller-resolved flag wins over a config read
 
 
+# ── session_id on the wire (issue #255, server-first gated) ───────────────────
+
+def test_wire_args_includes_session_id_by_default():
+    args = remote._wire_args(type="architecture", content="use jwt", session_id="session-123")
+    assert args["session_id"] == "session-123"
+
+
+def test_wire_args_session_id_gate_closed_is_byte_identical_to_legacy_shape(monkeypatch):
+    legacy = remote._wire_args(type="architecture", content="use jwt")
+    monkeypatch.setattr(remote, "_WIRE_SESSION_ID", False)
+    gated = remote._wire_args(
+        type="architecture", content="use jwt", session_id="session-123")
+    assert json.dumps(gated, separators=(",", ":")) == json.dumps(legacy, separators=(",", ":"))
+
+
+@pytest.mark.parametrize("session_id", [None, "", 123])
+def test_wire_args_omits_missing_empty_or_non_string_session_id(session_id):
+    args = remote._wire_args(type="architecture", content="use jwt", session_id=session_id)
+    assert "session_id" not in args
+
+
+def test_wire_args_omits_over_bound_session_id_without_truncating():
+    session_id = "s" * (remote._WIRE_SESSION_ID_MAX_LEN + 1)
+    args = remote._wire_args(type="architecture", content="use jwt", session_id=session_id)
+    assert "session_id" not in args
+
+
+def test_wire_args_bounds_session_id_in_server_utf16_units():
+    # Zod's max(64) uses JavaScript string length (UTF-16 code units), not Python code points.
+    session_id = "🚀" * 33
+    assert len(session_id) == 33
+    args = remote._wire_args(type="architecture", content="use jwt", session_id=session_id)
+    assert "session_id" not in args
+
+
+def test_wire_args_omits_session_id_with_unpaired_surrogate():
+    args = remote._wire_args(type="architecture", content="use jwt", session_id="bad\ud800id")
+    assert "session_id" not in args
+
+
 # ── source_files on the wire (issue #174 Task 5, gate now open) ────────────────
 # THE pin that protects the outbox: contexer-teams' push_decision schema is server-controlled,
 # and an unknown/rejected field can poison the outbox with permanent validation failures (the
@@ -1224,6 +1265,18 @@ def test_push_decision_includes_source_files_by_default(monkeypatch):
     RemoteStore("https://t/mcp", "tok").push_decision(
         type="architecture", content="use jwt", repo=None, source_files=["auth/jwt.py"])
     assert captured["args"]["source_files"] == ["auth/jwt.py"]
+
+
+def test_push_decision_includes_session_id_by_default(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        remote, "_acall_tool",
+        lambda e, t, n, args, to: captured.update(args=args)
+        or _result(content=[_text("Saved decision x to your personal context.")]),
+    )
+    RemoteStore("https://t/mcp", "tok").push_decision(
+        type="architecture", content="use jwt", repo=None, session_id="session-123")
+    assert captured["args"]["session_id"] == "session-123"
 
 
 def test_push_decision_includes_source_files_when_gate_explicitly_on(monkeypatch):

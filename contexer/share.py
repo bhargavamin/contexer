@@ -698,11 +698,10 @@ def _entry_push_kwargs(entry: dict) -> dict:
     and `_adrain_outbox_unlocked`) so they serialize an entry identically (source coerced through
     _wire_source).
 
-    `source_files` (issue #174 Task 5) is read back off the queued entry unconditionally - the
-    wire gate `remote._wire_args`/`_WIRE_SOURCE_FILES` is read at CALL time, i.e. AT DRAIN, not
-    at the time this entry was queued. So an entry queued before the gate opened drains with its
-    files intact, no re-queue or schema migration needed; conversely a rollback before this entry
-    drains means it won't egress the field, exactly as if it had never been gated on.
+    `source_files` (issue #174 Task 5) and `session_id` (issue #255) are read back off the queued
+    entry unconditionally. Their wire gates are read at CALL time, i.e. AT DRAIN, not when the
+    row was queued. An entry queued before a gate opens therefore drains with its metadata intact,
+    with no re-queue or schema migration; a rollback before drain suppresses it.
 
     `revision_id`/`lifecycle` (plan E1/E2) ride the identical rule, and one step further: their
     gate is the SERVER's advertised capability, discovered by the draining store at drain time.
@@ -714,22 +713,23 @@ def _entry_push_kwargs(entry: dict) -> dict:
         rationale=entry.get("rationale"), confidence=entry.get("confidence"),
         evidence=entry.get("evidence"), source=_wire_source(entry.get("source")),
         decision_id=entry.get("decision_id"), title=entry.get("title"),
-        source_files=entry.get("source_files"), revision_id=entry.get("revision_id"),
-        lifecycle=entry.get("lifecycle"))
+        source_files=entry.get("source_files"), session_id=entry.get("session_id"),
+        revision_id=entry.get("revision_id"), lifecycle=entry.get("lifecycle"))
 
 
 def _dec_push_kwargs(dec: dict, key) -> dict:
     """push_decision kwargs for one shareable decision. Shared by share / share_all /
     share_async so every share path puts the same decision on the wire identically.
 
-    `source_files` passes through from the projection; whether it actually reaches the wire is
-    decided later, at `remote._wire_args` time, by `remote._WIRE_SOURCE_FILES`."""
+    `source_files` and the originating `session_id` pass through from the projection; whether
+    either actually reaches the wire is decided later by the corresponding gate in
+    `remote._wire_args`."""
     return dict(
         type=dec["type"], content=dec["content"], repo=key,
         confidence=dec["confidence"], evidence=dec["evidence"],
         source=_wire_source(dec["source"]), decision_id=dec["id"], title=dec.get("title"),
-        source_files=dec.get("source_files"), revision_id=dec.get("revision_id"),
-        lifecycle=dec.get("lifecycle"))
+        source_files=dec.get("source_files"), session_id=dec.get("session_id"),
+        revision_id=dec.get("revision_id"), lifecycle=dec.get("lifecycle"))
 
 
 def _finish_share(dec: dict, key, server_id,
@@ -1201,15 +1201,16 @@ async def _adrain_outbox_unlocked(profile: Profile | None = None) -> int:
 def _payload(dec: dict, key) -> dict:
     """Outbox entry for one wire-projected decision (same shape share() enqueues). Carries
     title so a queued offline share still sends it once drained (_entry_push_kwargs reads
-    it back off this same row). Also carries `source_files` (issue #174 Task 5) and
-    `revision_id`/`lifecycle` (plan E1/E2) the same way - stored in the outbox regardless of the
-    current wire gate or of what any server has advertised, so `_entry_push_kwargs` +
-    `remote._wire_args` decide at DRAIN time whether they actually egress."""
+    it back off this same row). Also carries `source_files` (issue #174 Task 5), `session_id`
+    (issue #255), and `revision_id`/`lifecycle` (plan E1/E2) the same way - stored in the outbox
+    regardless of the current wire gates or of what any server has advertised, so
+    `_entry_push_kwargs` + `remote._wire_args` decide at DRAIN time whether they egress."""
     return {
         "decision_id": dec["id"], "type": dec["type"], "content": dec["content"],
         "repo": key, "rationale": None, "confidence": dec["confidence"],
         "evidence": dec["evidence"], "source": _wire_source(dec["source"]),
         "title": dec.get("title"), "source_files": dec.get("source_files"),
+        "session_id": dec.get("session_id"),
         "revision_id": dec.get("revision_id"), "lifecycle": dec.get("lifecycle"),
         "queued_at": time.time(), "attempts": 0,
     }

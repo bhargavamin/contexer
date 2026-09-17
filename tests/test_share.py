@@ -177,6 +177,7 @@ def test_share_happy_path_wire_args(tmp_repo, monkeypatch):
     assert kw["repo"] == "github.com/a/b"
     assert kw["decision_id"] == did  # local id -> idempotent re-share
     assert kw["source"] == "ai"
+    assert kw["session_id"] == "s1"
 
 
 def test_share_happy_path_includes_title(tmp_repo, monkeypatch):
@@ -765,6 +766,7 @@ def test_share_degraded_enqueues_payload(tmp_repo, monkeypatch):
     assert "sync" in entry["content"].lower()
     assert entry["repo"] == "github.com/a/b"
     assert entry["source"] == "ai"
+    assert entry["session_id"] == "s1"
     assert entry["attempts"] == 0
     assert isinstance(entry["queued_at"], float)
 
@@ -1029,6 +1031,35 @@ def test_drain_outbox_source_files_gate_is_checked_at_drain_time(tmp_repo, monke
     monkeypatch.setattr(remote, "_WIRE_SOURCE_FILES", True)
     assert share.drain_outbox(TEAM) == 1
     assert captured["args"]["decisions"][0]["source_files"] == ["auth/jwt.py"]
+
+
+def test_drain_outbox_session_id_gate_is_checked_at_drain_time(tmp_repo, monkeypatch):
+    """A durable origin session is retained while queued, but the compatibility gate is
+    evaluated by the real serializer on every drain attempt."""
+    queued = {"decision_id": "d1", "type": "architecture", "content": "use jwt for auth",
+              "repo": "r", "rationale": None, "confidence": 80, "evidence": None,
+              "source": "ai", "title": None, "session_id": "session-origin",
+              "queued_at": 1.0, "attempts": 0}
+    share._enqueue(queued)
+    captured = {}
+
+    async def fake_call(endpoint, token, name, arguments, timeout):
+        captured.update(name=name, args=arguments)
+        return types.SimpleNamespace(
+            content=[], isError=False,
+            structuredContent={"results": [{"decisionId": "d1", "id": "srv-1"}], "skipped": []})
+
+    monkeypatch.setattr(remote, "_acall_tool", fake_call)
+    remote.reset_degradation_warnings()
+
+    monkeypatch.setattr(remote, "_WIRE_SESSION_ID", False)
+    assert share.drain_outbox(TEAM) == 1
+    assert "session_id" not in captured["args"]["decisions"][0]
+
+    share._enqueue(queued)
+    monkeypatch.setattr(remote, "_WIRE_SESSION_ID", True)
+    assert share.drain_outbox(TEAM) == 1
+    assert captured["args"]["decisions"][0]["session_id"] == "session-origin"
 
 
 def test_load_outbox_corrupt_file_reads_empty(tmp_repo):
