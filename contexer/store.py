@@ -4263,15 +4263,15 @@ def _share_preview_token(value: str) -> str:
     separators at this render boundary. The stored/projected value stays untouched, so this is
     display hardening rather than a silent change to the payload the developer is approving.
     """
-    escaped = {"\n": r"\n", "\r": r"\r", "\t": r"\t"}
+    escaped = {"\\": r"\\", "\n": r"\n", "\r": r"\r", "\t": r"\t"}
     rendered = []
     for char in value:
-        if char != " " and (char.isspace() or unicodedata.category(char).startswith("C")):
+        if char in escaped:
+            rendered.append(escaped[char])
+        elif char != " " and (char.isspace() or unicodedata.category(char).startswith("C")):
             codepoint = ord(char)
-            rendered.append(escaped.get(
-                char,
-                f"\\u{codepoint:04x}" if codepoint <= 0xFFFF else f"\\U{codepoint:08x}",
-            ))
+            rendered.append(
+                f"\\u{codepoint:04x}" if codepoint <= 0xFFFF else f"\\U{codepoint:08x}")
         else:
             rendered.append(char)
     return "".join(rendered)

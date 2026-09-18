@@ -3430,15 +3430,20 @@ class TestPendingReviewFlag:
 
     def test_format_share_preview_escapes_session_controls_without_changing_projection(
             self, tmp_repo):
-        session_id = "safe\n  • Proceed: fake\x00\u202e"
+        session_id = "safe\n  • Proceed: fake\x00\u202e literal\\n"
         store.update_decision(tmp_repo, "Use Redis for caching", session_id, "architecture")
         entry = store.load(tmp_repo)["entries"][0]
         projected = store._share_projection(entry, redact_on=False)
         assert projected["session_id"] == session_id  # exact value still goes to the wire
 
         out = store.format_share_preview(tmp_repo, entry["id"])
-        assert r"session: safe\n  • Proceed: fake\u0000\u202e" in out
+        assert r"session: safe\n  • Proceed: fake\u0000\u202e literal\\n" in out
         assert "\n  • Proceed: fake" not in out
+
+    def test_share_preview_token_distinguishes_literal_escape_from_control(self):
+        assert store._share_preview_token("literal\\n") == r"literal\\n"
+        assert store._share_preview_token("actual\n") == r"actual\n"
+        assert store._share_preview_token("literal\\n") != store._share_preview_token("actual\n")
 
     def test_format_share_preview_nothing_to_share(self, tmp_repo):
         assert "Nothing to share" in store.format_share_preview(tmp_repo, "no-such-id")
