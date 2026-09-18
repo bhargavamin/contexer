@@ -5158,6 +5158,32 @@ class TestTopicAliasRetry:
         result = store.get_context(tmp_repo, query="jwt")
         assert "JWT refresh tokens" in result
 
+    def test_multiword_literal_miss_falls_back_to_bm25(self, tmp_repo, monkeypatch):
+        _seed_rv1(tmp_repo, [
+            ("Encrypt webhook payload archives with rotating envelope keys", "architecture"),
+            ("Encrypt webhook payload archives only for legacy export samples", "architecture"),
+        ])
+        calls = []
+        real_rank = retrieval.prompt_rank
+
+        def traced_rank(query_terms, index):
+            calls.append(list(query_terms))
+            return real_rank(query_terms, index)
+
+        monkeypatch.setattr(retrieval, "prompt_rank", traced_rank)
+        result = store.get_context(tmp_repo, query="webhook archives rotating keys")
+        assert len(calls) == 1
+        assert "rotating envelope keys" in result
+        assert "legacy export samples" in result
+
+    def test_multiword_fallback_retrieves_title_only_subject(self, tmp_repo):
+        store.update_decision(
+            tmp_repo, "Lexical scoring stays local and deterministic", "title-subject",
+            "architecture", title="Use BM25 for prompt retrieval")
+        result = store.get_context(tmp_repo, query="retrieval bm25")
+        assert "Use BM25 for prompt retrieval" in result
+        assert "No matching decisions" not in result
+
     def test_no_result_query_logs_no_followup(self, tmp_repo):
         _seed_rv1(tmp_repo, RV1_CORPUS)
         # Arm a fresh pointer for the db topic.

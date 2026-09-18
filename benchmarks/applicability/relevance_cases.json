@@ -1,0 +1,1758 @@
+{
+  "schema_version": 1,
+  "fixture_version": "1.0.3",
+  "reference_revision": "5676247f358dc6a0c099d8eb8eb94623bad04bb0",
+  "cases": [
+    {
+      "case_id": "R01-imperative-vs-rationale",
+      "family": "R01",
+      "description": "Ordinary imperative versus equivalent rationale prompt",
+      "repo_id": "synthetic/r01",
+      "checkout_id": "checkout-r01",
+      "host": "claude",
+      "surface": "prompt_hook",
+      "session_id": "session-r01",
+      "request_id": "request-r01",
+      "decisions": [
+        {
+          "decision_id": "r01-payment",
+          "revision_id": "rev-r01-payment-a",
+          "content": "R01_PAYMENT_MARKER Retry card charges with exponential backoff and idempotency keys.",
+          "title": "Retry card charges safely",
+          "status": "approved",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R01_PAYMENT_MARKER Retry card charges with exponential backoff and idempotency keys.",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human"
+        }
+      ],
+      "actions": [
+        {
+          "action_id": "imperative",
+          "kind": "prompt",
+          "prompt": "Add payment retries",
+          "session_id": "session-r01-a"
+        },
+        {
+          "action_id": "rationale",
+          "kind": "prompt",
+          "prompt": "Why did we choose payment retries?",
+          "session_id": "session-r01-b"
+        }
+      ],
+      "applicable": [
+        {
+          "decision_id": "r01-payment",
+          "revision_id": "rev-r01-payment-a",
+          "required_tier": "prompt_full",
+          "authority": "approved"
+        }
+      ],
+      "desired_assertions": [
+        {
+          "key": "imperative-supplies-payment-decision",
+          "kind": "contains_decision",
+          "action_id": "imperative",
+          "decision_id": "r01-payment",
+          "revision_id": "rev-r01-payment-a",
+          "tier": "prompt_full",
+          "known_gap": "ordinary-task-trigger-gap",
+          "owner": "later ordinary-task experiment"
+        },
+        {
+          "key": "rationale-control-supplies-payment-decision",
+          "kind": "contains_decision",
+          "action_id": "rationale",
+          "decision_id": "r01-payment",
+          "revision_id": "rev-r01-payment-a",
+          "tier": "prompt_full"
+        }
+      ],
+      "forbidden_outputs": [],
+      "reference_observation": {
+        "commit": "5676247f358dc6a0c099d8eb8eb94623bad04bb0",
+        "gap_key": "ordinary-task-trigger-gap",
+        "observed": "imperative absent; rationale emitted"
+      },
+      "outcome_unknown_reason": "retrieval_only"
+    },
+    {
+      "case_id": "R02-revision-working-set",
+      "family": "R02",
+      "description": "Approved revision B after revision A was delivered",
+      "repo_id": "synthetic/r02",
+      "checkout_id": "checkout-r02",
+      "host": "claude",
+      "surface": "prompt_hook",
+      "session_id": "session-r02",
+      "request_id": "request-r02",
+      "decisions": [
+        {
+          "decision_id": "r02-revision",
+          "revision_id": "rev-r02-a",
+          "content": "R02_REV_A_MARKER Use 30-second checkout reservations.",
+          "title": "Use 30-second reservations",
+          "status": "approved",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R02_REV_A_MARKER Use 30-second checkout reservations.",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human",
+          "proposal": {
+            "proposal_id": "proposal-r02-b",
+            "revision_id": "fixture-only-rev-r02-b",
+            "content": "R02_REV_B_MARKER Use 45-second checkout reservations after approval.",
+            "title": "Use 45-second reservations",
+            "created_at": "2026-01-16T12:00:00+00:00",
+            "source": "human",
+            "marker": "R02_REV_B_MARKER"
+          }
+        }
+      ],
+      "actions": [
+        {
+          "action_id": "revision-a",
+          "kind": "prompt",
+          "prompt": "Why use checkout reservations?",
+          "session_id": "session-r02"
+        },
+        {
+          "action_id": "approve-b",
+          "kind": "approve_proposal",
+          "decision_id": "r02-revision",
+          "generated_revision_id": "00000000-0000-0000-0000-00000000002b"
+        },
+        {
+          "action_id": "revision-b-same-session",
+          "kind": "prompt",
+          "prompt": "Why use checkout reservations?",
+          "session_id": "session-r02"
+        },
+        {
+          "action_id": "revision-b-fresh-session",
+          "kind": "prompt",
+          "prompt": "Why use checkout reservations?",
+          "session_id": "session-r02-fresh"
+        }
+      ],
+      "applicable": [
+        {
+          "decision_id": "r02-revision",
+          "revision_id": "00000000-0000-0000-0000-00000000002b",
+          "required_tier": "prompt_full",
+          "authority": "approved"
+        }
+      ],
+      "desired_assertions": [
+        {
+          "key": "revision-a-control",
+          "kind": "contains_decision",
+          "action_id": "revision-a",
+          "decision_id": "r02-revision",
+          "revision_id": "rev-r02-a",
+          "tier": "prompt_full"
+        },
+        {
+          "key": "same-session-receives-current-revision",
+          "kind": "contains_decision",
+          "action_id": "revision-b-same-session",
+          "decision_id": "r02-revision",
+          "revision_id": "00000000-0000-0000-0000-00000000002b",
+          "tier": "prompt_full",
+          "known_gap": "revision-id-working-set-dedup",
+          "owner": "revision-dedup contract"
+        },
+        {
+          "key": "fresh-session-receives-current-revision",
+          "kind": "contains_decision",
+          "action_id": "revision-b-fresh-session",
+          "decision_id": "r02-revision",
+          "revision_id": "00000000-0000-0000-0000-00000000002b",
+          "tier": "prompt_full"
+        }
+      ],
+      "forbidden_outputs": [],
+      "reference_observation": {
+        "commit": "5676247f358dc6a0c099d8eb8eb94623bad04bb0",
+        "gap_key": "revision-id-working-set-dedup",
+        "observed": "same session misses B; fresh session emits B"
+      },
+      "outcome_unknown_reason": "retrieval_only"
+    },
+    {
+      "case_id": "R03-query-cap-order",
+      "family": "R03",
+      "description": "Explicit query ranking versus recurrence display truncation",
+      "repo_id": "synthetic/r03",
+      "checkout_id": "checkout-r03",
+      "host": "mcp",
+      "surface": "get_context",
+      "session_id": "session-r03",
+      "request_id": "request-r03",
+      "decisions": [
+        {
+          "decision_id": "r03-best",
+          "revision_id": "rev-r03-best-a",
+          "content": "R03_BEST_MARKER Encrypt webhook payload archives with rotating envelope keys.",
+          "title": "Encrypt webhook payload archives",
+          "status": "approved",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R03_BEST_MARKER Encrypt webhook payload archives with rotating envelope keys.",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human"
+        },
+        {
+          "decision_id": "r03-incidental",
+          "revision_id": "rev-r03-incidental-a",
+          "content": "R03_INCIDENTAL_MARKER Encrypt webhook payload archives only for legacy export samples.",
+          "title": "Webhook archive operations",
+          "status": "approved",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R03_INCIDENTAL_MARKER Encrypt webhook payload archives only for legacy export samples.",
+          "occurrence_count": 12,
+          "created_by": "human",
+          "source": "human"
+        }
+      ],
+      "actions": [
+        {
+          "action_id": "uncapped",
+          "kind": "lookup",
+          "query": "webhook archives rotating keys",
+          "trace_prompt_rank": true
+        },
+        {
+          "action_id": "capped",
+          "kind": "lookup",
+          "query": "webhook archives rotating keys",
+          "limit": 1,
+          "trace_prompt_rank": true
+        }
+      ],
+      "applicable": [
+        {
+          "decision_id": "r03-best",
+          "revision_id": "rev-r03-best-a",
+          "required_tier": "tool_result",
+          "authority": "approved"
+        }
+      ],
+      "desired_assertions": [
+        {
+          "key": "bm25-candidate-winner",
+          "kind": "rank_order",
+          "action_id": "uncapped",
+          "decision_ids": [
+            "r03-best",
+            "r03-incidental"
+          ]
+        },
+        {
+          "key": "uncapped-uses-production-bm25",
+          "kind": "prompt_rank_call_count",
+          "action_id": "uncapped",
+          "minimum": 1
+        },
+        {
+          "key": "capped-uses-production-bm25",
+          "kind": "prompt_rank_call_count",
+          "action_id": "capped",
+          "minimum": 1
+        },
+        {
+          "key": "uncapped-contains-relevant",
+          "kind": "contains_decision",
+          "action_id": "uncapped",
+          "decision_id": "r03-best",
+          "revision_id": "rev-r03-best-a",
+          "tier": "tool_result"
+        },
+        {
+          "key": "capped-retains-relevant-winner",
+          "kind": "contains_decision",
+          "action_id": "capped",
+          "decision_id": "r03-best",
+          "revision_id": "rev-r03-best-a",
+          "tier": "tool_result",
+          "known_gap": "query-cap-relevance-loss",
+          "owner": "contract 02 query-cap relevance preservation"
+        }
+      ],
+      "forbidden_outputs": [],
+      "reference_observation": {
+        "commit": "5676247f358dc6a0c099d8eb8eb94623bad04bb0",
+        "gap_key": "query-cap-relevance-loss",
+        "observed": "recurrence-based cap displaces BM25 winner"
+      },
+      "outcome_unknown_reason": "retrieval_only"
+    },
+    {
+      "case_id": "R04-title-body-retrieval",
+      "family": "R04",
+      "description": "Rationale retrieval with strong title and body terms",
+      "repo_id": "synthetic/r04",
+      "checkout_id": "checkout-r04",
+      "host": "claude",
+      "surface": "prompt_hook",
+      "session_id": "session-r04",
+      "request_id": "request-r04",
+      "decisions": [
+        {
+          "decision_id": "r04-ledger",
+          "revision_id": "rev-r04-ledger-a",
+          "content": "R04_LEDGER_MARKER Deterministic ledger replay was chosen to make recovery auditable.",
+          "title": "Choose deterministic ledger replay",
+          "status": "approved",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R04_LEDGER_MARKER Deterministic ledger replay was chosen to make recovery auditable.",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human"
+        }
+      ],
+      "actions": [
+        {
+          "action_id": "prompt",
+          "kind": "prompt",
+          "prompt": "Why choose deterministic ledger replay?",
+          "session_id": "session-r04"
+        }
+      ],
+      "applicable": [
+        {
+          "decision_id": "r04-ledger",
+          "revision_id": "rev-r04-ledger-a",
+          "required_tier": "prompt_full",
+          "authority": "approved"
+        }
+      ],
+      "desired_assertions": [
+        {
+          "key": "meaningful-body-delivered",
+          "kind": "contains_decision",
+          "action_id": "prompt",
+          "decision_id": "r04-ledger",
+          "revision_id": "rev-r04-ledger-a",
+          "tier": "prompt_full"
+        },
+        {
+          "key": "body-marker-present",
+          "kind": "contains_text",
+          "action_id": "prompt",
+          "text": "R04_LEDGER_MARKER"
+        }
+      ],
+      "forbidden_outputs": [],
+      "outcome_unknown_reason": "retrieval_only"
+    },
+    {
+      "case_id": "R05-file-anchor",
+      "family": "R05",
+      "description": "Explicit file request routes governing anchor",
+      "repo_id": "synthetic/r05",
+      "checkout_id": "checkout-r05",
+      "host": "claude",
+      "surface": "prompt_hook",
+      "session_id": "session-r05",
+      "request_id": "request-r05",
+      "decisions": [
+        {
+          "decision_id": "r05-anchor",
+          "revision_id": "rev-r05-anchor-a",
+          "content": "R05_ANCHOR_MARKER Retries in the payment module must preserve idempotency.",
+          "title": "Govern payment retry module",
+          "status": "approved",
+          "subtype": "constraint",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R05_ANCHOR_MARKER Retries in the payment module must preserve idempotency.",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human",
+          "source_files": [
+            "src/payments/retry.py"
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "action_id": "file-prompt",
+          "kind": "prompt",
+          "prompt": "How does src/payments/retry.py handle failures?",
+          "session_id": "session-r05"
+        }
+      ],
+      "applicable": [
+        {
+          "decision_id": "r05-anchor",
+          "revision_id": "rev-r05-anchor-a",
+          "required_tier": "prompt_full",
+          "authority": "approved"
+        }
+      ],
+      "desired_assertions": [
+        {
+          "key": "anchored-rule-delivered",
+          "kind": "contains_decision",
+          "action_id": "file-prompt",
+          "decision_id": "r05-anchor",
+          "revision_id": "rev-r05-anchor-a",
+          "tier": "prompt_full"
+        },
+        {
+          "key": "authority-not-pending",
+          "kind": "omits_text",
+          "metric": "authority",
+          "action_id": "file-prompt",
+          "text": "[pending]"
+        }
+      ],
+      "forbidden_outputs": [
+        "[scope=retired]"
+      ],
+      "outcome_unknown_reason": "retrieval_only"
+    },
+    {
+      "case_id": "R06-pointer-then-lookup",
+      "family": "R06",
+      "description": "Weak topic pointer followed by explicit lookup",
+      "repo_id": "synthetic/r06",
+      "checkout_id": "checkout-r06",
+      "host": "claude",
+      "surface": "prompt_and_tool",
+      "session_id": "session-r06",
+      "request_id": "request-r06",
+      "decisions": [
+        {
+          "decision_id": "r06-db",
+          "revision_id": "rev-r06-db-a",
+          "content": "R06_DB_MARKER Use PostgreSQL and Alembic for transactional schema migrations.",
+          "title": "Use PostgreSQL migrations",
+          "status": "approved",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R06_DB_MARKER Use PostgreSQL and Alembic for transactional schema migrations.",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human"
+        }
+      ],
+      "actions": [
+        {
+          "action_id": "pointer",
+          "kind": "prompt",
+          "prompt": "What about database?",
+          "session_id": "session-r06"
+        },
+        {
+          "action_id": "lookup",
+          "kind": "lookup",
+          "query": "db"
+        }
+      ],
+      "applicable": [
+        {
+          "decision_id": "r06-db",
+          "revision_id": "rev-r06-db-a",
+          "required_tier": "tool_result",
+          "authority": "approved"
+        }
+      ],
+      "desired_assertions": [
+        {
+          "key": "weak-signal-is-pointer",
+          "kind": "action_status",
+          "action_id": "pointer",
+          "status": "observed"
+        },
+        {
+          "key": "pointer-does-not-contain-full-marker",
+          "kind": "omits_text",
+          "action_id": "pointer",
+          "text": "R06_DB_MARKER"
+        },
+        {
+          "key": "lookup-delivers-full-guidance",
+          "kind": "contains_decision",
+          "action_id": "lookup",
+          "decision_id": "r06-db",
+          "revision_id": "rev-r06-db-a",
+          "tier": "tool_result"
+        }
+      ],
+      "forbidden_outputs": [],
+      "outcome_unknown_reason": "retrieval_only"
+    },
+    {
+      "case_id": "R07-unrelated-noise",
+      "family": "R07",
+      "description": "Acknowledgement and unrelated request stay silent",
+      "repo_id": "synthetic/r07",
+      "checkout_id": "checkout-r07",
+      "host": "claude",
+      "surface": "prompt_hook",
+      "session_id": "session-r07",
+      "request_id": "request-r07",
+      "decisions": [
+        {
+          "decision_id": "r07-auth",
+          "revision_id": "rev-r07-auth-a",
+          "content": "R07_AUTH_MARKER Use signed sessions for browser authentication.",
+          "title": "Use signed sessions",
+          "status": "approved",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R07_AUTH_MARKER Use signed sessions for browser authentication.",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human"
+        }
+      ],
+      "actions": [
+        {
+          "action_id": "thanks",
+          "kind": "prompt",
+          "prompt": "Thanks, now center the footer.",
+          "session_id": "session-r07"
+        }
+      ],
+      "applicable": [],
+      "desired_assertions": [
+        {
+          "key": "unrelated-request-no-full-guidance",
+          "kind": "omits_decision",
+          "action_id": "thanks",
+          "decision_id": "r07-auth"
+        },
+        {
+          "key": "gate-reports-absence",
+          "kind": "action_status",
+          "action_id": "thanks",
+          "status": "absent"
+        }
+      ],
+      "forbidden_outputs": [],
+      "outcome_unknown_reason": "retrieval_only"
+    },
+    {
+      "case_id": "R08-repeat-suppression",
+      "family": "R08",
+      "description": "Repeated revision in one session is suppressed",
+      "repo_id": "synthetic/r08",
+      "checkout_id": "checkout-r08",
+      "host": "claude",
+      "surface": "prompt_hook",
+      "session_id": "session-r08",
+      "request_id": "request-r08",
+      "decisions": [
+        {
+          "decision_id": "r08-repeat",
+          "revision_id": "rev-r08-repeat-a",
+          "content": "R08_REPEAT_MARKER Queue reads use bounded batches to limit memory.",
+          "title": "Use bounded queue reads",
+          "status": "approved",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R08_REPEAT_MARKER Queue reads use bounded batches to limit memory.",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human"
+        }
+      ],
+      "actions": [
+        {
+          "action_id": "first",
+          "kind": "prompt",
+          "prompt": "Why use bounded queue reads?",
+          "session_id": "session-r08"
+        },
+        {
+          "action_id": "repeat",
+          "kind": "prompt",
+          "prompt": "Why use bounded queue reads?",
+          "session_id": "session-r08"
+        }
+      ],
+      "applicable": [
+        {
+          "decision_id": "r08-repeat",
+          "revision_id": "rev-r08-repeat-a",
+          "required_tier": "prompt_full",
+          "authority": "approved"
+        }
+      ],
+      "desired_assertions": [
+        {
+          "key": "first-exposure",
+          "kind": "contains_decision",
+          "action_id": "first",
+          "decision_id": "r08-repeat",
+          "revision_id": "rev-r08-repeat-a",
+          "tier": "prompt_full"
+        },
+        {
+          "key": "repeat-suppressed",
+          "kind": "omits_decision",
+          "action_id": "repeat",
+          "decision_id": "r08-repeat"
+        },
+        {
+          "key": "repeat-boundary-observed-absent",
+          "kind": "action_status",
+          "action_id": "repeat",
+          "status": "absent"
+        }
+      ],
+      "forbidden_outputs": [],
+      "outcome_unknown_reason": "retrieval_only"
+    },
+    {
+      "case_id": "R09-session-isolation",
+      "family": "R09",
+      "description": "Working-set effects stay session scoped",
+      "repo_id": "synthetic/r09",
+      "checkout_id": "checkout-r09",
+      "host": "claude",
+      "surface": "prompt_hook",
+      "session_id": "session-r09-a",
+      "request_id": "request-r09",
+      "decisions": [
+        {
+          "decision_id": "r09-sessions",
+          "revision_id": "rev-r09-sessions-a",
+          "content": "R09_SESSION_MARKER Cache keys always include tenant identity.",
+          "title": "Use tenant-scoped caches",
+          "status": "approved",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R09_SESSION_MARKER Cache keys always include tenant identity.",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human"
+        }
+      ],
+      "actions": [
+        {
+          "action_id": "session-a",
+          "kind": "prompt",
+          "prompt": "Why use tenant scoped caches?",
+          "session_id": "session-r09-a"
+        },
+        {
+          "action_id": "session-b",
+          "kind": "prompt",
+          "prompt": "Why use tenant scoped caches?",
+          "session_id": "session-r09-b"
+        }
+      ],
+      "applicable": [
+        {
+          "decision_id": "r09-sessions",
+          "revision_id": "rev-r09-sessions-a",
+          "required_tier": "prompt_full",
+          "authority": "approved"
+        }
+      ],
+      "desired_assertions": [
+        {
+          "key": "session-a-delivery",
+          "kind": "contains_decision",
+          "action_id": "session-a",
+          "decision_id": "r09-sessions",
+          "revision_id": "rev-r09-sessions-a",
+          "tier": "prompt_full"
+        },
+        {
+          "key": "session-b-independent-delivery",
+          "kind": "contains_decision",
+          "action_id": "session-b",
+          "decision_id": "r09-sessions",
+          "revision_id": "rev-r09-sessions-a",
+          "tier": "prompt_full"
+        }
+      ],
+      "forbidden_outputs": [],
+      "outcome_unknown_reason": "retrieval_only"
+    },
+    {
+      "case_id": "R10-compaction-restore",
+      "family": "R10",
+      "description": "Compaction restores current prompt guidance, including Gemini deferred reload",
+      "repo_id": "synthetic/r10",
+      "checkout_id": "checkout-r10",
+      "host": "multi",
+      "surface": "compaction",
+      "session_id": "session-r10",
+      "request_id": "request-r10",
+      "decisions": [
+        {
+          "decision_id": "r10-compact",
+          "revision_id": "rev-r10-compact-a",
+          "content": "R10_COMPACT_MARKER Consumers persist replay cursors before acknowledging messages.",
+          "title": "Use replay-safe consumers",
+          "status": "approved",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R10_COMPACT_MARKER Consumers persist replay cursors before acknowledging messages.",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human"
+        }
+      ],
+      "actions": [
+        {
+          "action_id": "pre-compact",
+          "kind": "prompt",
+          "prompt": "Why use replay safe consumers?",
+          "session_id": "session-r10"
+        },
+        {
+          "action_id": "claude-compact",
+          "kind": "compact",
+          "host": "claude",
+          "session_id": "session-r10"
+        },
+        {
+          "action_id": "gemini-pre",
+          "kind": "prompt",
+          "prompt": "Why use replay safe consumers?",
+          "session_id": "session-r10-gemini"
+        },
+        {
+          "action_id": "gemini-compact",
+          "kind": "compact",
+          "host": "gemini",
+          "session_id": "session-r10-gemini"
+        }
+      ],
+      "applicable": [
+        {
+          "decision_id": "r10-compact",
+          "revision_id": "rev-r10-compact-a",
+          "required_tier": "standing_full",
+          "authority": "approved"
+        }
+      ],
+      "desired_assertions": [
+        {
+          "key": "pre-compact-delivery",
+          "kind": "contains_decision",
+          "action_id": "pre-compact",
+          "decision_id": "r10-compact",
+          "revision_id": "rev-r10-compact-a",
+          "tier": "prompt_full"
+        },
+        {
+          "key": "claude-restores-working-set",
+          "kind": "contains_decision",
+          "action_id": "claude-compact",
+          "decision_id": "r10-compact",
+          "revision_id": "rev-r10-compact-a",
+          "tier": "standing_full"
+        },
+        {
+          "key": "gemini-deferred-restore",
+          "kind": "contains_decision",
+          "action_id": "gemini-compact",
+          "decision_id": "r10-compact",
+          "revision_id": "rev-r10-compact-a",
+          "tier": "standing_full"
+        }
+      ],
+      "forbidden_outputs": [],
+      "outcome_unknown_reason": "retrieval_only"
+    },
+    {
+      "case_id": "R11-pending-authority",
+      "family": "R11",
+      "description": "Pending-only match remains explicitly pending",
+      "repo_id": "synthetic/r11",
+      "checkout_id": "checkout-r11",
+      "host": "claude",
+      "surface": "prompt_hook",
+      "session_id": "session-r11",
+      "request_id": "request-r11",
+      "decisions": [
+        {
+          "decision_id": "r11-pending",
+          "revision_id": "rev-r11-pending-a",
+          "content": "R11_PENDING_MARKER Try regional failover before enabling global traffic.",
+          "title": "Try regional failover",
+          "status": "pending_approval",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R11_PENDING_MARKER Try regional failover before enabling global traffic.",
+          "occurrence_count": 1,
+          "created_by": "ai",
+          "source": "ai"
+        }
+      ],
+      "actions": [
+        {
+          "action_id": "prompt",
+          "kind": "prompt",
+          "prompt": "Why try regional failover?",
+          "session_id": "session-r11"
+        }
+      ],
+      "applicable": [
+        {
+          "decision_id": "r11-pending",
+          "revision_id": "rev-r11-pending-a",
+          "required_tier": "prompt_full",
+          "authority": "pending_approval"
+        }
+      ],
+      "desired_assertions": [
+        {
+          "key": "pending-content-useful",
+          "kind": "contains_decision",
+          "action_id": "prompt",
+          "decision_id": "r11-pending",
+          "revision_id": "rev-r11-pending-a",
+          "tier": "prompt_full"
+        },
+        {
+          "key": "pending-authority-labeled",
+          "kind": "contains_text",
+          "metric": "authority",
+          "action_id": "prompt",
+          "text": "[pending]"
+        }
+      ],
+      "forbidden_outputs": [
+        "[approved] R11_PENDING_MARKER"
+      ],
+      "outcome_unknown_reason": "retrieval_only"
+    },
+    {
+      "case_id": "R12-inactive-lifecycle",
+      "family": "R12",
+      "description": "Ignored and bootstrap-withheld entries are not active guidance",
+      "repo_id": "synthetic/r12",
+      "checkout_id": "checkout-r12",
+      "host": "mcp",
+      "surface": "get_context",
+      "session_id": "session-r12",
+      "request_id": "request-r12",
+      "decisions": [
+        {
+          "decision_id": "r12-ignored",
+          "revision_id": "rev-r12-ignored-a",
+          "content": "R12_IGNORED_MARKER Use the obsolete queue.",
+          "title": "Obsolete queue rule",
+          "status": "ignored",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R12_IGNORED_MARKER Use the obsolete queue.",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human"
+        },
+        {
+          "decision_id": "r12-withheld",
+          "revision_id": "rev-r12-withheld-a",
+          "content": "R12_WITHHELD_MARKER Assume every service uses Kafka.",
+          "title": "Unverified bootstrap guess",
+          "status": "ignored",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R12_WITHHELD_MARKER Assume every service uses Kafka.",
+          "occurrence_count": 1,
+          "created_by": "bootstrap",
+          "source": "bootstrap",
+          "withheld_reason": "bootstrap evidence withheld"
+        }
+      ],
+      "actions": [
+        {
+          "action_id": "ignored-lookup",
+          "kind": "lookup",
+          "query": "obsolete queue"
+        },
+        {
+          "action_id": "withheld-lookup",
+          "kind": "lookup",
+          "query": "every service uses Kafka"
+        }
+      ],
+      "applicable": [],
+      "desired_assertions": [
+        {
+          "key": "ignored-not-rendered",
+          "kind": "omits_decision",
+          "action_id": "ignored-lookup",
+          "decision_id": "r12-ignored"
+        },
+        {
+          "key": "withheld-not-rendered",
+          "kind": "omits_decision",
+          "action_id": "withheld-lookup",
+          "decision_id": "r12-withheld"
+        },
+        {
+          "key": "no-invented-retired-status",
+          "kind": "omits_text",
+          "action_id": "ignored-lookup",
+          "text": "retired"
+        }
+      ],
+      "forbidden_outputs": [],
+      "outcome_unknown_reason": "retrieval_only"
+    },
+    {
+      "case_id": "R13-open-conflict",
+      "family": "R13",
+      "description": "Standing decision and unreviewed update retain separate authority",
+      "repo_id": "synthetic/r13",
+      "checkout_id": "checkout-r13",
+      "host": "claude",
+      "surface": "prompt_hook",
+      "session_id": "session-r13",
+      "request_id": "request-r13",
+      "decisions": [
+        {
+          "decision_id": "r13-conflict",
+          "revision_id": "rev-r13-conflict-a",
+          "content": "R13_STANDING_MARKER Keep audit events in Postgres for transactional reads.",
+          "title": "Keep audit events in Postgres",
+          "status": "approved",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R13_STANDING_MARKER Keep audit events in Postgres for transactional reads.",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human",
+          "proposal": {
+            "proposal_id": "proposal-r13",
+            "revision_id": "rev-r13-proposed",
+            "content": "R13_UPDATE_MARKER Move audit events to object storage.",
+            "title": "Move audit events",
+            "created_at": "2026-01-16T12:00:00+00:00",
+            "source": "human",
+            "marker": "R13_UPDATE_MARKER"
+          }
+        }
+      ],
+      "actions": [
+        {
+          "action_id": "prompt",
+          "kind": "prompt",
+          "prompt": "Why move audit events to object storage?",
+          "session_id": "session-r13"
+        }
+      ],
+      "applicable": [
+        {
+          "decision_id": "r13-conflict",
+          "revision_id": "rev-r13-conflict-a",
+          "required_tier": "prompt_full",
+          "authority": "approved"
+        }
+      ],
+      "desired_assertions": [
+        {
+          "key": "standing-side-rendered",
+          "kind": "contains_decision",
+          "action_id": "prompt",
+          "decision_id": "r13-conflict",
+          "revision_id": "rev-r13-conflict-a",
+          "tier": "prompt_full"
+        },
+        {
+          "key": "proposal-side-rendered",
+          "kind": "contains_decision",
+          "action_id": "prompt",
+          "decision_id": "r13-conflict",
+          "revision_id": "rev-r13-conflict-a",
+          "proposal_id": "proposal-r13",
+          "tier": "prompt_full"
+        },
+        {
+          "key": "proposal-authority-labeled",
+          "kind": "contains_text",
+          "metric": "authority",
+          "action_id": "prompt",
+          "text": "NOT yet approved"
+        }
+      ],
+      "forbidden_outputs": [
+        "R13_UPDATE_MARKER [approved]"
+      ],
+      "outcome_unknown_reason": "retrieval_only"
+    },
+    {
+      "case_id": "R14-startup-tiers",
+      "family": "R14",
+      "description": "Startup distinguishes full constraints, title conventions, deferred architecture, and global rules",
+      "repo_id": "synthetic/r14",
+      "checkout_id": "checkout-r14",
+      "host": "claude",
+      "surface": "session_start",
+      "session_id": "session-r14",
+      "request_id": "request-r14",
+      "decisions": [
+        {
+          "decision_id": "r14-constraint",
+          "revision_id": "rev-r14-constraint-a",
+          "content": "R14_CONSTRAINT_MARKER Never log authorization headers.",
+          "title": "Never log authorization headers",
+          "status": "approved",
+          "subtype": "constraint",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R14_CONSTRAINT_MARKER Never log authorization headers.",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human"
+        },
+        {
+          "decision_id": "r14-convention",
+          "revision_id": "rev-r14-convention-a",
+          "content": "R14_CONVENTION_BODY_MARKER Migration names include a UTC timestamp.",
+          "title": "Name migrations with UTC timestamps",
+          "status": "approved",
+          "subtype": "convention",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "Name migrations with UTC timestamps",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human"
+        },
+        {
+          "decision_id": "r14-architecture",
+          "revision_id": "rev-r14-architecture-a",
+          "content": "R14_ARCH_MARKER Audit storage is append-only for traceability.",
+          "title": "Use append-only audit storage",
+          "status": "approved",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R14_ARCH_MARKER Audit storage is append-only for traceability.",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human"
+        }
+      ],
+      "global_decisions": [
+        {
+          "decision_id": "r14-global",
+          "revision_id": "rev-r14-global-a",
+          "content": "R14_GLOBAL_MARKER Never commit provider tokens.",
+          "title": "Never commit secrets",
+          "status": "approved",
+          "subtype": "constraint",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R14_GLOBAL_MARKER Never commit provider tokens.",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human",
+          "scope": "global"
+        }
+      ],
+      "actions": [
+        {
+          "action_id": "start",
+          "kind": "session_start",
+          "tier": "standing_full",
+          "tier_by_decision": {
+            "r14-constraint": "standing_full",
+            "r14-convention": "standing_title",
+            "r14-global": "standing_full",
+            "r14-architecture": "standing_title"
+          }
+        }
+      ],
+      "applicable": [
+        {
+          "decision_id": "r14-constraint",
+          "revision_id": "rev-r14-constraint-a",
+          "required_tier": "standing_full",
+          "authority": "approved"
+        },
+        {
+          "decision_id": "r14-convention",
+          "revision_id": "rev-r14-convention-a",
+          "required_tier": "standing_title",
+          "authority": "approved"
+        },
+        {
+          "decision_id": "r14-global",
+          "revision_id": "rev-r14-global-a",
+          "required_tier": "standing_full",
+          "authority": "approved"
+        }
+      ],
+      "desired_assertions": [
+        {
+          "key": "constraint-full",
+          "kind": "contains_decision",
+          "action_id": "start",
+          "decision_id": "r14-constraint",
+          "revision_id": "rev-r14-constraint-a",
+          "tier": "standing_full"
+        },
+        {
+          "key": "convention-title-only",
+          "kind": "contains_decision",
+          "action_id": "start",
+          "decision_id": "r14-convention",
+          "revision_id": "rev-r14-convention-a",
+          "tier": "standing_title"
+        },
+        {
+          "key": "convention-body-deferred",
+          "kind": "omits_text",
+          "action_id": "start",
+          "text": "R14_CONVENTION_BODY_MARKER"
+        },
+        {
+          "key": "architecture-body-deferred",
+          "kind": "omits_text",
+          "action_id": "start",
+          "text": "R14_ARCH_MARKER"
+        },
+        {
+          "key": "global-standing-rule",
+          "kind": "contains_decision",
+          "action_id": "start",
+          "decision_id": "r14-global",
+          "revision_id": "rev-r14-global-a",
+          "tier": "standing_full"
+        }
+      ],
+      "forbidden_outputs": [],
+      "outcome_unknown_reason": "retrieval_only"
+    },
+    {
+      "case_id": "R15-host-parity",
+      "family": "R15",
+      "description": "Same request across Claude, Codex, Gemini, and Cursor surfaces",
+      "repo_id": "synthetic/r15",
+      "checkout_id": "checkout-r15",
+      "host": "multi",
+      "surface": "adapter_matrix",
+      "session_id": "session-r15",
+      "request_id": "request-r15",
+      "decisions": [
+        {
+          "decision_id": "r15-parity",
+          "revision_id": "rev-r15-parity-a",
+          "content": "R15_PARITY_MARKER Job cursors are monotonic across retries.",
+          "title": "Use monotonic job cursors",
+          "status": "approved",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R15_PARITY_MARKER Job cursors are monotonic across retries.",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human"
+        }
+      ],
+      "actions": [
+        {
+          "action_id": "claude",
+          "kind": "adapter_prompt",
+          "host": "claude",
+          "surface": "claude_rationale_hook",
+          "prompt": "Why use monotonic job cursors?",
+          "session_id": "session-r15-claude"
+        },
+        {
+          "action_id": "codex",
+          "kind": "adapter_prompt",
+          "host": "codex",
+          "surface": "codex_rationale_hook",
+          "prompt": "Why use monotonic job cursors?",
+          "session_id": "session-r15-codex"
+        },
+        {
+          "action_id": "gemini",
+          "kind": "adapter_prompt",
+          "host": "gemini",
+          "surface": "gemini_before_agent_hook",
+          "prompt": "Why use monotonic job cursors?",
+          "session_id": "session-r15-gemini"
+        },
+        {
+          "action_id": "cursor",
+          "kind": "adapter_prompt",
+          "host": "cursor",
+          "surface": "cursor_prompt_passthrough",
+          "prompt": "Why use monotonic job cursors?",
+          "session_id": "session-r15-cursor"
+        }
+      ],
+      "applicable": [
+        {
+          "decision_id": "r15-parity",
+          "revision_id": "rev-r15-parity-a",
+          "required_tier": "prompt_full",
+          "authority": "approved"
+        }
+      ],
+      "desired_assertions": [
+        {
+          "key": "claude-actual-output",
+          "kind": "contains_decision",
+          "action_id": "claude",
+          "decision_id": "r15-parity",
+          "revision_id": "rev-r15-parity-a",
+          "tier": "prompt_full"
+        },
+        {
+          "key": "codex-shared-runtime-output",
+          "kind": "contains_decision",
+          "action_id": "codex",
+          "decision_id": "r15-parity",
+          "revision_id": "rev-r15-parity-a",
+          "tier": "prompt_full"
+        },
+        {
+          "key": "gemini-actual-output",
+          "kind": "contains_decision",
+          "action_id": "gemini",
+          "decision_id": "r15-parity",
+          "revision_id": "rev-r15-parity-a",
+          "tier": "prompt_full"
+        },
+        {
+          "key": "cursor-reported-unsupported",
+          "kind": "action_status",
+          "action_id": "cursor",
+          "status": "unsupported"
+        }
+      ],
+      "forbidden_outputs": [],
+      "outcome_unknown_reason": "retrieval_only"
+    },
+    {
+      "case_id": "R16-fail-soft-observation",
+      "family": "R16",
+      "description": "Missing or malformed index and failed bookkeeping remain fail-soft",
+      "repo_id": "synthetic/r16",
+      "checkout_id": "checkout-r16",
+      "host": "claude",
+      "surface": "prompt_hook",
+      "session_id": "session-r16",
+      "request_id": "request-r16",
+      "decisions": [
+        {
+          "decision_id": "r16-failsoft",
+          "revision_id": "rev-r16-failsoft-a",
+          "content": "R16_FAILSOFT_MARKER Retry budgets are deterministic per operation.",
+          "title": "Use deterministic retry budgets",
+          "status": "approved",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R16_FAILSOFT_MARKER Retry budgets are deterministic per operation.",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human"
+        }
+      ],
+      "actions": [
+        {
+          "action_id": "remove",
+          "kind": "remove_index"
+        },
+        {
+          "action_id": "missing-prompt",
+          "kind": "prompt",
+          "prompt": "Why use deterministic retry budgets?",
+          "session_id": "session-r16-missing"
+        },
+        {
+          "action_id": "missing-check",
+          "kind": "check_index"
+        },
+        {
+          "action_id": "corrupt",
+          "kind": "corrupt_index"
+        },
+        {
+          "action_id": "corrupt-prompt",
+          "kind": "prompt",
+          "prompt": "Why use deterministic retry budgets?",
+          "session_id": "session-r16-corrupt"
+        },
+        {
+          "action_id": "corrupt-check",
+          "kind": "check_index"
+        },
+        {
+          "action_id": "restore",
+          "kind": "restore_index"
+        },
+        {
+          "action_id": "bookkeeping-failure",
+          "kind": "prompt",
+          "prompt": "Why use deterministic retry budgets?",
+          "session_id": "session-r16-fail-write",
+          "fail_working_set_write": true
+        }
+      ],
+      "applicable": [
+        {
+          "decision_id": "r16-failsoft",
+          "revision_id": "rev-r16-failsoft-a",
+          "required_tier": "prompt_full",
+          "authority": "approved"
+        }
+      ],
+      "desired_assertions": [
+        {
+          "key": "missing-index-fallback",
+          "kind": "contains_decision",
+          "action_id": "missing-prompt",
+          "decision_id": "r16-failsoft",
+          "revision_id": "rev-r16-failsoft-a",
+          "tier": "prompt_full"
+        },
+        {
+          "key": "prompt-does-not-rebuild-missing-index",
+          "kind": "index_absent",
+          "action_id": "missing-check"
+        },
+        {
+          "key": "corrupt-index-fallback",
+          "kind": "contains_decision",
+          "action_id": "corrupt-prompt",
+          "decision_id": "r16-failsoft",
+          "revision_id": "rev-r16-failsoft-a",
+          "tier": "prompt_full"
+        },
+        {
+          "key": "prompt-leaves-corrupt-index",
+          "kind": "index_unchanged",
+          "before_action_id": "corrupt",
+          "after_action_id": "corrupt-check"
+        },
+        {
+          "key": "bookkeeping-failure-does-not-drop-guidance",
+          "kind": "contains_decision",
+          "action_id": "bookkeeping-failure",
+          "decision_id": "r16-failsoft",
+          "revision_id": "rev-r16-failsoft-a",
+          "tier": "prompt_full"
+        }
+      ],
+      "forbidden_outputs": [],
+      "outcome_unknown_reason": "retrieval_only"
+    },
+    {
+      "case_id": "R17-cap-and-candidate-coverage",
+      "family": "R17",
+      "description": "Candidate coverage, output cap, and common-file incidental match stay distinct",
+      "repo_id": "synthetic/r17",
+      "checkout_id": "checkout-r17",
+      "host": "claude",
+      "surface": "prompt_hook",
+      "session_id": "session-r17",
+      "request_id": "request-r17",
+      "decisions": [
+        {
+          "decision_id": "r17-relevant-1",
+          "revision_id": "rev-r17-relevant-1-a",
+          "content": "R17_RELEVANT_1_MARKER Shared delivery budget requires bounded batch rule 1.",
+          "title": "Apply shared delivery rule 1",
+          "status": "approved",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R17_RELEVANT_1_MARKER Shared delivery budget requires bounded batch rule 1.",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human"
+        },
+        {
+          "decision_id": "r17-relevant-2",
+          "revision_id": "rev-r17-relevant-2-a",
+          "content": "R17_RELEVANT_2_MARKER Shared delivery budget requires bounded batch rule 2.",
+          "title": "Apply shared delivery rule 2",
+          "status": "approved",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R17_RELEVANT_2_MARKER Shared delivery budget requires bounded batch rule 2.",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human"
+        },
+        {
+          "decision_id": "r17-relevant-3",
+          "revision_id": "rev-r17-relevant-3-a",
+          "content": "R17_RELEVANT_3_MARKER Shared delivery budget requires bounded batch rule 3.",
+          "title": "Apply shared delivery rule 3",
+          "status": "approved",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R17_RELEVANT_3_MARKER Shared delivery budget requires bounded batch rule 3.",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human"
+        },
+        {
+          "decision_id": "r17-relevant-4",
+          "revision_id": "rev-r17-relevant-4-a",
+          "content": "R17_RELEVANT_4_MARKER Shared delivery budget requires bounded batch rule 4.",
+          "title": "Apply shared delivery rule 4",
+          "status": "approved",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R17_RELEVANT_4_MARKER Shared delivery budget requires bounded batch rule 4.",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human"
+        },
+        {
+          "decision_id": "r17-relevant-5",
+          "revision_id": "rev-r17-relevant-5-a",
+          "content": "R17_RELEVANT_5_MARKER Shared delivery budget requires bounded batch rule 5.",
+          "title": "Apply shared delivery rule 5",
+          "status": "approved",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R17_RELEVANT_5_MARKER Shared delivery budget requires bounded batch rule 5.",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human"
+        },
+        {
+          "decision_id": "r17-incidental",
+          "revision_id": "rev-r17-incidental-a",
+          "content": "R17_INCIDENTAL_MARKER src/common.py contains generic utilities.",
+          "title": "Common helper note",
+          "status": "approved",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R17_INCIDENTAL_MARKER src/common.py contains generic utilities.",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human",
+          "source_files": [
+            "src/common.py"
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "action_id": "rank",
+          "kind": "rank",
+          "prompt": "shared delivery budget bounded batch rule"
+        },
+        {
+          "action_id": "prompt",
+          "kind": "prompt",
+          "prompt": "How should src/common.py apply the shared delivery budget bounded batch rule?",
+          "session_id": "session-r17"
+        }
+      ],
+      "applicable": [
+        {
+          "decision_id": "r17-relevant-1",
+          "revision_id": "rev-r17-relevant-1-a",
+          "required_tier": "prompt_full",
+          "authority": "approved"
+        },
+        {
+          "decision_id": "r17-relevant-2",
+          "revision_id": "rev-r17-relevant-2-a",
+          "required_tier": "prompt_full",
+          "authority": "approved"
+        },
+        {
+          "decision_id": "r17-relevant-3",
+          "revision_id": "rev-r17-relevant-3-a",
+          "required_tier": "prompt_full",
+          "authority": "approved"
+        },
+        {
+          "decision_id": "r17-relevant-4",
+          "revision_id": "rev-r17-relevant-4-a",
+          "required_tier": "prompt_full",
+          "authority": "approved"
+        },
+        {
+          "decision_id": "r17-relevant-5",
+          "revision_id": "rev-r17-relevant-5-a",
+          "required_tier": "prompt_full",
+          "authority": "approved"
+        }
+      ],
+      "delivery_expectations": [
+        {
+          "action_id": "prompt",
+          "decision_id": "r17-relevant-1",
+          "revision_id": "rev-r17-relevant-1-a"
+        },
+        {
+          "action_id": "prompt",
+          "decision_id": "r17-relevant-2",
+          "revision_id": "rev-r17-relevant-2-a"
+        },
+        {
+          "action_id": "prompt",
+          "decision_id": "r17-relevant-3",
+          "revision_id": "rev-r17-relevant-3-a"
+        },
+        {
+          "action_id": "prompt",
+          "decision_id": "r17-relevant-4",
+          "revision_id": "rev-r17-relevant-4-a"
+        },
+        {
+          "action_id": "prompt",
+          "decision_id": "r17-relevant-5",
+          "revision_id": "rev-r17-relevant-5-a"
+        }
+      ],
+      "desired_assertions": [
+        {
+          "key": "candidate-set-visible",
+          "kind": "observation_count",
+          "action_id": "rank",
+          "stage": "candidate",
+          "decision_only": true,
+          "minimum": 5
+        },
+        {
+          "key": "full-output-cap-visible",
+          "kind": "observation_count",
+          "action_id": "prompt",
+          "stage": "emitted",
+          "decision_only": true,
+          "maximum": 3
+        }
+      ],
+      "forbidden_outputs": [],
+      "outcome_unknown_reason": "retrieval_only"
+    },
+    {
+      "case_id": "R18-outcome-evidence",
+      "family": "R18",
+      "description": "Synthetic evidence rejects fabricated outcome claims",
+      "repo_id": "synthetic/r18",
+      "checkout_id": "checkout-r18",
+      "host": "synthetic",
+      "surface": "measurement_contract",
+      "session_id": "session-r18",
+      "request_id": "request-r18",
+      "decisions": [],
+      "actions": [
+        {
+          "action_id": "evidence",
+          "kind": "outcome_evidence",
+          "evidence": [
+            {
+              "evidence_id": "pass",
+              "scope": "rule:encrypt-at-rest",
+              "artifact_id": "artifact-a",
+              "decision_id": "rule-a",
+              "validator": "synthetic-policy",
+              "validator_version": "1",
+              "completeness": "complete",
+              "provenance": "independent_check",
+              "checked_policies": [
+                "rule-a"
+              ],
+              "raw_result": "allow"
+            },
+            {
+              "evidence_id": "violation",
+              "scope": "rule:no-plaintext-token",
+              "artifact_id": "artifact-b",
+              "decision_id": "rule-b",
+              "validator": "synthetic-policy",
+              "validator_version": "1",
+              "completeness": "partial",
+              "provenance": "independent_check",
+              "checked_policies": [
+                "rule-b"
+              ],
+              "raw_result": "violation"
+            },
+            {
+              "evidence_id": "partial-allow",
+              "scope": "task",
+              "artifact_id": "artifact-c",
+              "decision_id": "rule-c",
+              "validator": "synthetic-policy",
+              "validator_version": "1",
+              "completeness": "partial",
+              "provenance": "independent_check",
+              "checked_policies": [
+                "rule-c"
+              ],
+              "raw_result": "allow"
+            },
+            {
+              "evidence_id": "unrelated-pass",
+              "scope": "unrelated-test",
+              "artifact_id": "artifact-d",
+              "decision_id": null,
+              "validator": "pytest",
+              "validator_version": "1",
+              "completeness": "complete",
+              "provenance": "independent_check",
+              "checked_policies": [],
+              "raw_result": "allow"
+            },
+            {
+              "evidence_id": "model-claim",
+              "scope": "task",
+              "artifact_id": "artifact-e",
+              "decision_id": "rule-e",
+              "validator": "model",
+              "validator_version": "1",
+              "completeness": "complete",
+              "provenance": "model_claim",
+              "checked_policies": [
+                "rule-e"
+              ],
+              "raw_result": "allow"
+            },
+            {
+              "evidence_id": "missing-identity",
+              "scope": "task",
+              "artifact_id": null,
+              "decision_id": "rule-f",
+              "validator": "synthetic-policy",
+              "validator_version": "1",
+              "completeness": "complete",
+              "provenance": "independent_check",
+              "checked_policies": [
+                "rule-f"
+              ],
+              "raw_result": "allow"
+            },
+            {
+              "evidence_id": "wrong-policy",
+              "scope": "rule:encrypt-at-rest",
+              "artifact_id": "artifact-h",
+              "decision_id": "rule-h",
+              "validator": "synthetic-policy",
+              "validator_version": "1",
+              "completeness": "complete",
+              "provenance": "independent_check",
+              "checked_policies": [
+                "different-rule"
+              ],
+              "raw_result": "allow"
+            },
+            {
+              "evidence_id": "missing-validator-version",
+              "scope": "rule:encrypt-at-rest",
+              "artifact_id": "artifact-i",
+              "decision_id": "rule-i",
+              "validator": "synthetic-policy",
+              "validator_version": null,
+              "completeness": "complete",
+              "provenance": "independent_check",
+              "checked_policies": [
+                "rule-i"
+              ],
+              "raw_result": "allow"
+            },
+            {
+              "evidence_id": "clarification",
+              "scope": "ambiguity:deployment-region",
+              "artifact_id": "request-g",
+              "decision_id": null,
+              "validator": "synthetic-criterion",
+              "validator_version": "1",
+              "completeness": "complete",
+              "provenance": "independent_check",
+              "criterion": "clarification_needed",
+              "checked_criteria": [
+                "clarification_needed"
+              ],
+              "raw_result": "satisfied"
+            },
+            {
+              "evidence_id": "clarification-missing-identity",
+              "scope": "ambiguity:deployment-region",
+              "artifact_id": null,
+              "decision_id": null,
+              "validator": "synthetic-criterion",
+              "validator_version": "1",
+              "completeness": "complete",
+              "provenance": "independent_check",
+              "criterion": "clarification_needed",
+              "checked_criteria": [
+                "clarification_needed"
+              ],
+              "raw_result": "satisfied"
+            }
+          ]
+        }
+      ],
+      "applicable": [],
+      "desired_assertions": [
+        {
+          "key": "scoped-pass",
+          "kind": "outcome_result",
+          "evidence_id": "pass",
+          "result": "verified_compliant"
+        },
+        {
+          "key": "scoped-violation",
+          "kind": "outcome_result",
+          "evidence_id": "violation",
+          "result": "violation_observed"
+        },
+        {
+          "key": "partial-allow-unknown",
+          "kind": "outcome_result",
+          "evidence_id": "partial-allow",
+          "result": "unknown"
+        },
+        {
+          "key": "unrelated-pass-unknown",
+          "kind": "outcome_result",
+          "evidence_id": "unrelated-pass",
+          "result": "unknown"
+        },
+        {
+          "key": "model-claim-unknown",
+          "kind": "outcome_result",
+          "evidence_id": "model-claim",
+          "result": "unknown"
+        },
+        {
+          "key": "missing-identity-unknown",
+          "kind": "outcome_result",
+          "evidence_id": "missing-identity",
+          "result": "unknown"
+        },
+        {
+          "key": "wrong-policy-unknown",
+          "kind": "outcome_result",
+          "evidence_id": "wrong-policy",
+          "result": "unknown"
+        },
+        {
+          "key": "missing-validator-version-unknown",
+          "kind": "outcome_result",
+          "evidence_id": "missing-validator-version",
+          "result": "unknown"
+        },
+        {
+          "key": "clarification-independent",
+          "kind": "outcome_result",
+          "evidence_id": "clarification",
+          "result": "clarification_appropriate"
+        },
+        {
+          "key": "clarification-missing-identity-unknown",
+          "kind": "outcome_result",
+          "evidence_id": "clarification-missing-identity",
+          "result": "unknown"
+        }
+      ],
+      "forbidden_outputs": []
+    }
+  ]
+}
