@@ -40,7 +40,7 @@ LEAVES = frozenset({
     "revisions", "reconciliation", "review", "retrieval", "redact", "miner",
     "conflicts", "guard_engine", "anchors", "console_api", "scope_audit", "memory_sync",
     "sidecars", "share_status", "evidence", "spool", "candidates", "reconcile", "lifecycle",
-    "policy", "policy_api", "review_impact",
+    "policy", "policy_api", "review_impact", "working_set",
 })
 
 
@@ -173,7 +173,7 @@ class TestRuleOneFacadeIsBackCompatOnly:
 
     def test_no_module_reaches_a_re_exported_name_through_store(self):
         exported = (store._GUARD_EXPORTS | store._CONFLICT_EXPORTS | store._CONSOLE_EXPORTS
-                    | store._LIFECYCLE_EXPORTS)
+                    | store._LIFECYCLE_EXPORTS | store._WORKING_SET_EXPORTS)
         offenders = []
         for path, tree in _py_files(CALLER_ROOTS):
             if path == STORE_PY:
@@ -188,7 +188,7 @@ class TestRuleOneFacadeIsBackCompatOnly:
     def test_every_re_exported_name_still_resolves(self):
         # The shim's whole purpose. If it stops resolving it is broken, not merely unused.
         for name in (store._GUARD_EXPORTS | store._CONFLICT_EXPORTS | store._CONSOLE_EXPORTS
-                     | store._LIFECYCLE_EXPORTS):
+                     | store._LIFECYCLE_EXPORTS | store._WORKING_SET_EXPORTS):
             assert getattr(store, name) is not None, name
 
 

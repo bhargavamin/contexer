@@ -5498,150 +5498,6 @@ def ensure_retrieval_index(repo_path: str) -> bool:
 
 
 
-def _ws_path(repo_path: str, session_id: str) -> Path:
-    # Hash the session id before embedding: filename-safe for any host-supplied id
-    # (no path escape) and collision-free where truncation wasn't (two ids sharing
-    # a 32-char prefix must not share a working set).
-    safe = hashlib.sha1(session_id.encode("utf-8", "replace")).hexdigest()[:16]
-    return sidecar_path("working_set", slug=repo_slug(repo_path), session=safe)
-
-
-_WORKING_SET_VERSION = 2
-_WORKING_SET_MAX_BYTES = 256 * 1024
-_WORKING_SET_FIELD_MAX = 256
-_WORKING_SET_SCOPES = frozenset({"personal", "global"})
-
-
-def _valid_ws_string(value: object) -> bool:
-    return isinstance(value, str) and 0 < len(value) <= _WORKING_SET_FIELD_MAX
-
-
-def _recent_unique_ids(values: list[str]) -> list[str]:
-    """Most-recent spelling of each id, preserving oldest-to-newest result order."""
-    seen: set[str] = set()
-    recent: list[str] = []
-    for did in reversed(values):
-        if did not in seen:
-            seen.add(did)
-            recent.append(did)
-    recent.reverse()
-    return recent[-MAX_ENTRIES:]
-
-
-def _read_working_set(repo_path: str, session_id: str) -> dict:
-    """Validated ledger state; old/future/malformed identity rows become hints only."""
-    empty = {"injected": [], "records": []}
-    if not session_id:
-        return empty
-    path = _ws_path(repo_path, session_id)
-    try:
-        if path.stat().st_size > _WORKING_SET_MAX_BYTES:
-            return empty
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        return empty
-    if not isinstance(data, dict):
-        return empty
-    raw_ids = data.get("injected")
-    injected = []
-    if isinstance(raw_ids, list):
-        injected = _recent_unique_ids([i for i in raw_ids if _valid_ws_string(i)])
-    if data.get("v") != _WORKING_SET_VERSION or not isinstance(data.get("records"), list):
-        return {"injected": injected, "records": []}
-    records: list[dict] = []
-    seen: set[tuple[str, str]] = set()
-    # Read newest first so duplicate rows cannot resurrect older credit.
-    for row in reversed(data["records"][-MAX_ENTRIES:]):
-        if not isinstance(row, dict):
-            continue
-        scope, did, fingerprint = row.get("scope"), row.get("id"), row.get("fingerprint")
-        if (scope not in _WORKING_SET_SCOPES or not _valid_ws_string(did)
-                or (fingerprint is not None and not _valid_ws_string(fingerprint))):
-            continue
-        key = (scope, did)
-        if key in seen:
-            continue
-        seen.add(key)
-        records.append({"scope": scope, "id": did, "fingerprint": fingerprint})
-    records.reverse()
-    return {"injected": injected, "records": records}
-
-
-def _write_working_set(repo_path: str, session_id: str, records: list[dict],
-                       hints: list[str] | None = None) -> bool:
-    """Write a bounded v2 ledger. Returns persistence success; never blocks output."""
-    if not session_id:
-        return False
-    rows = records[-MAX_ENTRIES:]
-    hint_ids = _recent_unique_ids((hints or []) + [r["id"] for r in rows])
-    try:
-        ensure_store_dir()
-        while True:
-            payload = {"v": _WORKING_SET_VERSION, "injected": hint_ids,
-                       "records": rows, "ts": time.time()}
-            raw = json.dumps(payload, separators=(",", ":"))
-            if len(raw.encode("utf-8")) <= _WORKING_SET_MAX_BYTES:
-                break
-            # Compatibility hints carry no suppression credit, so shed them first.
-            credited_ids = {r["id"] for r in rows}
-            removable = next((i for i, did in enumerate(hint_ids)
-                              if did not in credited_ids), None)
-            if removable is not None:
-                hint_ids.pop(removable)
-            elif rows:
-                rows = rows[1:]
-                hint_ids = _recent_unique_ids(hint_ids + [r["id"] for r in rows])
-            else:
-                return False
-        atomic_write(_ws_path(repo_path, session_id), raw)
-        return True
-    except OSError:
-        return False
-
-
-def working_set_ids(repo_path: str, session_id: str) -> list[str]:
-    """Decision ids already injected this session (fail-soft; [] when no session id)."""
-    return _read_working_set(repo_path, session_id)["injected"]
-
-
-def _working_set_records(repo_path: str, session_id: str) -> list[dict]:
-    return _read_working_set(repo_path, session_id)["records"]
-
-
-def _ws_has_credit(records: list[dict], scope: str, did: str,
-                   fingerprint: str | None) -> bool:
-    return bool(fingerprint) and any(
-        r["scope"] == scope and r["id"] == did and r.get("fingerprint") == fingerprint
-        for r in records)
-
-
-def _ws_record_deliveries(repo_path: str, session_id: str, delivered: list[dict]) -> bool:
-    """MRU-upsert actual full-render receipts, one row per scoped decision."""
-    if not session_id or not delivered:
-        return False
-    state = _read_working_set(repo_path, session_id)
-    rows = list(state["records"])
-    for row in delivered:
-        if (row.get("scope") not in _WORKING_SET_SCOPES
-                or not _valid_ws_string(row.get("id"))
-                or not _valid_ws_string(row.get("fingerprint"))):
-            continue
-        rows = [old for old in rows
-                if (old["scope"], old["id"]) != (row["scope"], row["id"])]
-        rows.append({"scope": row["scope"], "id": row["id"],
-                     "fingerprint": row["fingerprint"]})
-    return _write_working_set(repo_path, session_id, rows, state["injected"])
-
-
-def _ws_add(repo_path: str, session_id: str, ids: list[str]) -> None:
-    """Compatibility writer: ID-only observations are restoration hints, never credit."""
-    if not session_id or not ids:
-        return
-    state = _read_working_set(repo_path, session_id)
-    merged = state["injected"] + [i for i in ids if _valid_ws_string(i)]
-    _write_working_set(repo_path, session_id, state["records"], merged)
-
-
 # ── Edited-files signal (guard anchor accrual, issue #175 Task 2) ───────────────
 # Records WHICH files the repo's recent turns edited, so a later capture call can propose
 # anchor candidates (Task 3) without asking the model to name source_files itself.
@@ -5792,27 +5648,25 @@ def _rehydrate_working_set(repo_path: str, session_id: str) -> str:
     """
     if not session_id:
         return ""
-    state = _read_working_set(repo_path, session_id)
+    from contexer import working_set
+
+    state = working_set.read(repo_path, session_id)
     rows = list(state["records"])
-    keyed = {(r["scope"], r["id"]) for r in rows}
-    history: list[str | dict] = list(rows)
-    for did in state["injected"]:
-        if not any(key[1] == did for key in keyed):
-            history.append(did)  # ambiguous legacy hint: preserve local-first lookup
+    history = working_set.restoration_history(state)
     if not history:
         return ""
 
     # A successful write invalidates every old-window fingerprint, including rows omitted
     # by the bounded replay. On write failure the documented best-effort limitation applies.
     cleared = [{"scope": r["scope"], "id": r["id"], "fingerprint": None} for r in rows]
-    _write_working_set(repo_path, session_id, cleared, state["injected"])
+    working_set.write(repo_path, session_id, cleared, state["injected"])
 
     recent = history[-_REHYDRATE_CAP:]
     rendered, receipts = _render_prompt_decisions_with_records(
         repo_path, recent, active_only=True)
     if not rendered:
         return ""
-    _ws_record_deliveries(repo_path, session_id, receipts)
+    working_set.record_deliveries(repo_path, session_id, receipts)
     return "## Rehydrated working context:\n" + rendered
 
 
@@ -6180,15 +6034,15 @@ def _index_file_lookup(repo_path: str, index: dict, file_artifacts: list[str]) -
 
 
 def _prompt_file_hits(repo_path: str, prompt: str, ws: set[str] | list[dict],
-                       index: dict | None) -> tuple[list[str], list[tuple[str, str]], list[str]]:
+                       index: dict | None) -> tuple[list[str | dict], list[tuple[str, str]], list[str]]:
     """Path/module-shaped files named IN THE PROMPT itself (issue #187 - "fix the pairing bug
     in contexer/guard_engine.py"), routed deterministically through the same anchor/content-
     reference matching the commit-time guard uses, no voluntary `get_context(files=...)` call
-    required. Returns `(anchor_ids, mention_hits, file_artifacts)`.
+    required. Returns `(anchor_requests, mention_hits, file_artifacts)`.
 
     **Tiered by signal strength (fix round 1 - the ratified risk-asymmetry principle: a wrong
     STRONG injection plants false context as if human-approved, a wrong pointer costs one
-    line).** `anchor_ids`: decisions matched via `source_files` - a human explicitly linked
+    line).** `anchor_requests`: scoped decisions matched via `source_files` - a human explicitly linked
     this file to this decision (via `contexer guard anchors`, an approval-time link, or a
     `source_files=` capture) - genuine governance signal, STRONG-tier (full content). `mention_
     hits`: decisions matched only via a path-shaped artifact found IN THE DECISION'S OWN
@@ -6218,7 +6072,7 @@ def _prompt_file_hits(repo_path: str, prompt: str, ws: set[str] | list[dict],
     of the ladder runs exactly as if no file signal existed - never raises into the per-prompt
     hook path."""
     try:
-        from contexer import guard_engine
+        from contexer import guard_engine, working_set
         # _guard_content_artifacts doesn't dedupe (a path can satisfy both the raw path regex
         # and the trailing dotted-component regex, e.g. "contexer/guard_engine.py" also
         # yields "guard_engine.py") - dedupe here, order-preserving, so canon/canon_by_base
@@ -6241,22 +6095,28 @@ def _prompt_file_hits(repo_path: str, prompt: str, ws: set[str] | list[dict],
         else:
             raw_hits = guard_engine.decisions_for_files(repo_path, file_artifacts)
 
-        anchor_ids: list[str] = []
+        anchor_requests: list[str | dict] = []
         mention_hits: list[tuple[str, str]] = []
         seen: set[str] = set()
         for hit in raw_hits:
             did = hit.get("decision_id")
             suppressed = (did in ws if isinstance(ws, set) else
-                          _ws_has_credit(ws, hit.get("scope", "personal"), did,
-                                         hit.get("guidance_fingerprint")))
+                          working_set.has_credit(
+                              ws, hit.get("scope", "personal"), did,
+                              hit.get("guidance_fingerprint")))
             if not did or suppressed or did in seen:
                 continue
             seen.add(did)
             if hit.get("reason") == "source_files match":
-                anchor_ids.append(did)
+                # Preserve the lookup owner. A bare ID resolves local-first in the renderer,
+                # which can substitute unrelated local guidance for a global anchor when the
+                # stores happen to contain the same opaque decision ID.
+                anchor_requests.append({
+                    "scope": hit.get("scope", "personal"), "id": did,
+                })
             else:
                 mention_hits.append((did, hit.get("title") or ""))
-        return anchor_ids, mention_hits, file_artifacts
+        return anchor_requests, mention_hits, file_artifacts
     except Exception:
         return [], [], []
 
@@ -6265,6 +6125,8 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
     """Body of get_context_for_prompt, returning (text, meta). meta = {"kind": "strong"|
     "pointer"|"overview"|"global"|"", "count": int, "topics": [...]} - structured data for
     a caller's status line (claude.rationale) instead of scraping the rendered text."""
+    from contexer import working_set
+
     words_raw = [w.strip("?,./!;:\"'()[]") for w in prompt.lower().split()]
     word_set = set(words_raw)
 
@@ -6303,7 +6165,7 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
     # extraction), so digit-bearing terms like k8s / oauth2 reach the ranker. Artifacts
     # stay double-weighted. The legacy `keywords`/`ordered_kws` are kept for gating and the
     # overview/global fallbacks below - only this vector changes.
-    ws = _working_set_records(repo_path, session_id)
+    ws = working_set.records(repo_path, session_id)
 
     # File route (#187): a prompt naming a path/module-shaped file ("fix the pairing bug in
     # contexer/guard_engine.py") consults the anchor/content-reference lookup deterministically
@@ -6314,11 +6176,12 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
     # bare content-artifact mention is weaker signal and is downgraded to the WEAK pointer
     # lane below - a wrong pointer costs one line, a wrong STRONG injection plants false
     # context as if human-approved.
-    anchor_ids, mention_hits, file_artifacts_prompt = _prompt_file_hits(repo_path, prompt, ws, index)
+    anchor_requests, mention_hits, file_artifacts_prompt = _prompt_file_hits(
+        repo_path, prompt, ws, index)
 
     # NOTE (fix round 1): mention-tier ids are deliberately NOT excluded from BM25's own
     # candidate pool here. The file route's tiering governs what the FILE SIGNAL itself
-    # contributes (anchor_ids lead strong; mention_hits are capped at the WEAK pointer below)
+    # contributes (anchor_requests lead strong; mention_hits are capped at the WEAK pointer below)
     # - it does not reach into BM25's separately-existing, already-shipped artifact-double-
     # weighting mechanism (predates #187 - see test_artifact_extraction_routes_paste_to_db).
     # A decision that also has genuine independent term overlap (e.g. a discriminative word
@@ -6334,11 +6197,14 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
     # an incidental rare word in another decision cannot borrow that title's relevance.
     ranked = retrieval.prompt_rank(query_terms, index)
     ranked = [r for r in ranked
-              if not _ws_has_credit(ws, "personal", r[0],
-                                    (index.get("docs", {}).get(r[0]) or {}).get(
-                                        "guidance_fingerprint"))]
+              if not working_set.has_credit(
+                  ws, "personal", r[0],
+                  (index.get("docs", {}).get(r[0]) or {}).get("guidance_fingerprint"))]
 
-    strong: list[str] = list(anchor_ids)
+    strong: list[str | dict] = list(anchor_requests)
+    strong_ids = {
+        request.get("id") if isinstance(request, dict) else request for request in strong
+    }
     if ranked:
         top_score = ranked[0][1]
         # Junk guard: a bare question (no rationale/project word) only earns a content
@@ -6371,14 +6237,15 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
         # File-route hits already lead `strong` (deterministic, highest-precision signal);
         # BM25 candidates fill any remaining slots, deduped against what the file route found.
         for did in bm25_strong:
-            if did not in strong:
+            if did not in strong_ids:
                 strong.append(did)
+                strong_ids.add(did)
     strong = strong[:_STRONG_CAP]
     if strong:
         rendered, receipts = _render_prompt_decisions_with_records(
             repo_path, strong, previous_records=ws)
         if rendered:
-            _ws_record_deliveries(repo_path, session_id, receipts)
+            working_set.record_deliveries(repo_path, session_id, receipts)
             # Suffix (not part of the pinned header prefix): the block normally avoids a
             # redundant fetch, but a lexical candidate can still be a false positive. Tell
             # the model to judge relevance and recover through Contexer before reading files.
@@ -6395,7 +6262,7 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
     if prompt_topics:
         counts: dict[str, int] = {}
         for did, doc in index.get("docs", {}).items():
-            if _ws_has_credit(ws, "personal", did, doc.get("guidance_fingerprint")):
+            if working_set.has_credit(ws, "personal", did, doc.get("guidance_fingerprint")):
                 continue
             for t in set(doc.get("topics", [])) & prompt_topics:
                 counts[t] = counts.get(t, 0) + 1
@@ -6881,6 +6748,10 @@ _CONSOLE_EXPORTS = frozenset({
 # need them (anchors, reconcile, cli, server, ui/api all do exactly that), which is what keeps
 # the boundary visible instead of letting store slowly re-accumulate the surface it just shed.
 _LIFECYCLE_EXPORTS = frozenset({"restore_decision"})
+# `working_set_ids` was the one public ledger reader before the working-set persistence
+# concern was extracted. Keep that spelling for external compatibility; new production and
+# tests import `working_set.ids` from its owner directly.
+_WORKING_SET_EXPORTS = frozenset({"working_set_ids"})
 
 
 def __getattr__(name):
@@ -6896,6 +6767,9 @@ def __getattr__(name):
     if name in _LIFECYCLE_EXPORTS:
         from contexer import lifecycle
         return getattr(lifecycle, name)
+    if name in _WORKING_SET_EXPORTS:
+        from contexer import working_set
+        return working_set.ids
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -6907,4 +6781,4 @@ def __dir__():
     # only some left a name answerable by getattr but absent from dir(), a split that no
     # longer matches the facade the moment any set changes.
     return sorted([*globals(), *_GUARD_EXPORTS, *_CONFLICT_EXPORTS, *_CONSOLE_EXPORTS,
-                   *_LIFECYCLE_EXPORTS])
+                   *_LIFECYCLE_EXPORTS, *_WORKING_SET_EXPORTS])

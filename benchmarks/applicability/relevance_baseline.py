@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from contexer import retrieval, revisions, store  # noqa: E402
+from contexer import retrieval, revisions, store, working_set  # noqa: E402
 from contexer.adapters import claude, cursor, gemini  # noqa: E402
 
 SCHEMA_VERSION = 1
@@ -525,8 +525,9 @@ def _run_action(
         state.setdefault("outcomes", []).extend(outcomes)
         return [], detail
     if kind == "record_prior_exposure":
-        store._ws_add(repo, action.get("session_id", case["session_id"]), action["decision_ids"])
-        detail["working_set"] = store.working_set_ids(
+        working_set.add_hints(
+            repo, action.get("session_id", case["session_id"]), action["decision_ids"])
+        detail["working_set"] = working_set.ids(
             repo, action.get("session_id", case["session_id"])
         )
         return [], detail
