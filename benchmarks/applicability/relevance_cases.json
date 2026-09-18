@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "fixture_version": "1.0.2",
+  "fixture_version": "1.0.3",
   "reference_revision": "5676247f358dc6a0c099d8eb8eb94623bad04bb0",
   "cases": [
     {
@@ -1158,6 +1158,7 @@
           "action_id": "claude",
           "kind": "adapter_prompt",
           "host": "claude",
+          "surface": "claude_rationale_hook",
           "prompt": "Why use monotonic job cursors?",
           "session_id": "session-r15-claude"
         },
@@ -1165,6 +1166,7 @@
           "action_id": "codex",
           "kind": "adapter_prompt",
           "host": "codex",
+          "surface": "codex_rationale_hook",
           "prompt": "Why use monotonic job cursors?",
           "session_id": "session-r15-codex"
         },
@@ -1172,6 +1174,7 @@
           "action_id": "gemini",
           "kind": "adapter_prompt",
           "host": "gemini",
+          "surface": "gemini_before_agent_hook",
           "prompt": "Why use monotonic job cursors?",
           "session_id": "session-r15-gemini"
         },
@@ -1179,6 +1182,7 @@
           "action_id": "cursor",
           "kind": "adapter_prompt",
           "host": "cursor",
+          "surface": "cursor_prompt_passthrough",
           "prompt": "Why use monotonic job cursors?",
           "session_id": "session-r15-cursor"
         }

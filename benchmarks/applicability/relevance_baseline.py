@@ -28,7 +28,7 @@ from contexer import retrieval, revisions, store  # noqa: E402
 from contexer.adapters import claude, cursor, gemini  # noqa: E402
 
 SCHEMA_VERSION = 1
-RUNNER_VERSION = "1"
+RUNNER_VERSION = "2"
 FIXTURE_PATH = Path(__file__).with_name("relevance_cases.json")
 STAGES = {"candidate", "selected", "emitted", "looked_up"}
 TIERS = {"standing_title", "standing_full", "prompt_full", "pointer", "tool_result", "team_delta"}
@@ -82,8 +82,10 @@ def validate_fixture(data: dict[str, Any]) -> None:
     if not isinstance(cases, list) or not cases:
         raise FixtureError("fixture cases must be a non-empty list")
     ids = [case.get("case_id") for case in cases if isinstance(case, dict)]
-    if len(ids) != len(cases) or len(ids) != len(set(ids)):
-        raise FixtureError("case_id values must be unique strings")
+    if (len(ids) != len(cases)
+            or any(not isinstance(case_id, str) or not case_id.strip() for case_id in ids)
+            or len(ids) != len(set(ids))):
+        raise FixtureError("case_id values must be unique non-empty strings")
     required_families = {f"R{i:02d}" for i in range(1, 19)}
     if {case.get("family") for case in cases} != required_families:
         raise FixtureError("fixture must contain exactly scenario families R01-R18")
@@ -182,6 +184,8 @@ def _action_identity(case: dict[str, Any], action: dict[str, Any]) -> dict[str, 
         "action_id": action_id,
         "session_id": action.get("session_id", case["session_id"]),
         "request_id": f"{request_root}:{action_id}" if request_root else None,
+        "host": action.get("host", case["host"]),
+        "surface": action.get("surface", case["surface"]),
     }
 
 
@@ -638,6 +642,7 @@ def _metrics(cases: list[dict[str, Any]]) -> dict[str, Any]:
     stage_counts: Counter[str] = Counter()
     checked_cases = 0
     by_host: dict[str, Counter[str]] = {}
+    by_surface: dict[str, Counter[str]] = {}
     by_request: list[dict[str, Any]] = []
     for case in cases:
         expectations = case.get("delivery_expectations", [])
@@ -670,10 +675,20 @@ def _metrics(cases: list[dict[str, Any]]) -> dict[str, Any]:
             ]
             if obs["tier"] in FULL_TIERS:
                 token = (*group, *identity, obs.get("proposal_id"))
+                host = obs.get("host", case["host"])
+                surface = obs.get("surface", case["surface"])
+                new_emission = token not in emitted_full
                 emitted_full.add(token)
                 delivered_full_by_request.setdefault(group, set()).add(identity)
+                if new_emission:
+                    by_host.setdefault(host, Counter())["emitted_full"] += 1
+                    by_surface.setdefault(surface, Counter())["emitted_full"] += 1
                 if matching:
+                    new_applicable = token not in applicable_full
                     applicable_full.add(token)
+                    if new_applicable:
+                        by_host.setdefault(host, Counter())["applicable_emitted_full"] += 1
+                        by_surface.setdefault(surface, Counter())["applicable_emitted_full"] += 1
         case_delivered = 0
         case_required = 0
         case_supported = True
@@ -695,8 +710,9 @@ def _metrics(cases: list[dict[str, Any]]) -> dict[str, Any]:
                 ):
                     delivered += 1
             supported = group not in unsupported_requests
-            required_num += delivered
-            required_den += len(group_expectations)
+            if supported:
+                required_num += delivered
+                required_den += len(group_expectations)
             case_delivered += delivered
             case_required += len(group_expectations)
             case_supported = case_supported and supported
@@ -729,12 +745,6 @@ def _metrics(cases: list[dict[str, Any]]) -> dict[str, Any]:
             assertion.get("metric") == "authority" and assertion["status"] != "passed"
             for assertion in case.get("assertions", [])
         )
-        host_counts = by_host.setdefault(case["host"], Counter())
-        host_full = {token for token in emitted_full if token[0] == case["case_id"]}
-        host_applicable = {token for token in applicable_full if token[0] == case["case_id"]}
-        host_counts["emitted_full"] += len(host_full)
-        host_counts["applicable_emitted_full"] += len(host_applicable)
-
     def ratio(num: int, den: int) -> float | None:
         return num / den if den else None
 
@@ -746,6 +756,11 @@ def _metrics(cases: list[dict[str, Any]]) -> dict[str, Any]:
                                 "denominator": counts["emitted_full"],
                                 "ratio": ratio(counts["applicable_emitted_full"], counts["emitted_full"])}
                         for host, counts in sorted(by_host.items())},
+            "by_surface": {surface: {"numerator": counts["applicable_emitted_full"],
+                                      "denominator": counts["emitted_full"],
+                                      "ratio": ratio(counts["applicable_emitted_full"],
+                                                     counts["emitted_full"])}
+                           for surface, counts in sorted(by_surface.items())},
         },
         "required_guidance_coverage": {
             "numerator": required_num, "denominator": required_den,

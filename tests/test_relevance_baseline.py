@@ -57,7 +57,8 @@ def test_report_schema_and_version_provenance(report):
     assert len(report["code_revision"]) == 40
     assert len(report["fixture_sha256"]) == 64
     assert len(report["runner_sha256"]) == 64
-    assert report["runner_version"] == "1"
+    assert report["fixture_version"] == "1.0.3"
+    assert report["runner_version"] == "2"
 
 
 def test_only_registered_gaps_remain(report):
@@ -116,6 +117,14 @@ def test_invalid_fixture_fails_before_execution(fixture_data):
         baseline.validate_fixture(invalid)
 
 
+@pytest.mark.parametrize("invalid_id", [None, 7, "", "   "])
+def test_invalid_case_ids_are_rejected(fixture_data, invalid_id):
+    invalid = copy.deepcopy(fixture_data)
+    invalid["cases"][0]["case_id"] = invalid_id
+    with pytest.raises(baseline.FixtureError, match="unique non-empty strings"):
+        baseline.validate_fixture(invalid)
+
+
 def test_strict_mode_fails_while_known_gaps_remain(report):
     assert baseline.exit_code(report) == 0
     assert baseline.exit_code(report, strict=True) == 1
@@ -162,6 +171,40 @@ def test_cursor_is_unsupported_not_empty_success(report):
     assert cursor["reason"] == "host_unsupported"
 
 
+def test_precision_uses_action_level_host_and_surface(report):
+    metrics = baseline._metrics([_case(report, "R15")])
+    precision = metrics["full_guidance_precision"]
+    assert set(precision["by_host"]) == {"claude", "codex", "gemini"}
+    assert set(precision["by_surface"]) == {
+        "claude_rationale_hook", "codex_rationale_hook", "gemini_before_agent_hook",
+    }
+    assert all(row == {"numerator": 1, "denominator": 1, "ratio": 1.0}
+               for row in precision["by_host"].values())
+
+
+def test_unsupported_requests_do_not_lower_supported_coverage(report):
+    case = copy.deepcopy(_case(report, "R15"))
+    cursor = next(obs for obs in case["observations"] if obs["action_id"] == "cursor")
+    case["delivery_expectations"].append({
+        "action_id": "cursor", "session_id": cursor["session_id"],
+        "request_id": cursor["request_id"], "host": cursor["host"],
+        "surface": cursor["surface"], "decision_id": "r15-parity",
+        "revision_id": "rev-r15-parity-a", "proposal_id": None,
+        "required_tier": "prompt_full", "authority": "approved",
+    })
+
+    metrics = baseline._metrics([case])
+    coverage = metrics["required_guidance_coverage"]
+    assert (coverage["numerator"], coverage["denominator"], coverage["ratio"]) == (3, 3, 1.0)
+    cursor_row = next(row for row in coverage["by_request"] if row["action_id"] == "cursor")
+    assert cursor_row["supported"] is False
+    assert (cursor_row["numerator"], cursor_row["denominator"]) == (0, 1)
+    assert metrics["whole_case_coverage"]["supported"]["denominator"] == 0
+    assert metrics["whole_case_coverage"]["all_assigned_conservative"] == {
+        "numerator": 0, "denominator": 1, "ratio": 0.0,
+    }
+
+
 def test_pending_and_proposal_authority_are_preserved(report):
     assert _assertion(report, "R11", "pending-authority-labeled")["status"] == "passed"
     assert _assertion(report, "R13", "proposal-authority-labeled")["status"] == "passed"
@@ -201,6 +244,8 @@ def test_every_observation_has_request_and_session_identity(report):
         for observation in case["observations"]:
             assert observation["session_id"]
             assert observation["request_id"]
+            assert observation["host"]
+            assert observation["surface"]
 
 
 def test_r03_uses_production_title_and_content_ranker(report):
