@@ -138,6 +138,68 @@ class TestFastPathAndTTL:
         result = anchors.verify_anchors(str(repo), force=True)
         assert result == {"reanchored": 0, "proposed": 0}
 
+    def test_existing_directory_prefix_survives_without_git_calls(self, repo, monkeypatch):
+        _write(repo, "pkg/a.py")
+        _git(repo, "add", "pkg/a.py")
+        _commit(repo)
+        _seed_entry(repo, "Decision for pkg", source_files=["pkg/"])
+        calls = []
+        monkeypatch.setattr(anchors, "_run_git", lambda *a, **k: calls.append(a) or None)
+
+        assert anchors.verify_anchors(str(repo), force=True) == {
+            "reanchored": 0, "proposed": 0}
+        assert calls == []
+
+    def test_missing_directory_prefix_proposes_without_file_rename_lookup(
+            self, repo, monkeypatch):
+        _write(repo, "pkg/a.py")
+        _git(repo, "add", "pkg/a.py")
+        _commit(repo)
+        _seed_entry(repo, "Decision for pkg", source_files=["pkg/"])
+        os.remove(repo / "pkg" / "a.py")
+        os.rmdir(repo / "pkg")
+        calls = []
+        monkeypatch.setattr(anchors, "_run_git", lambda *a, **k: calls.append(a) or None)
+
+        assert anchors.verify_anchors(str(repo), force=True) == {
+            "reanchored": 0, "proposed": 1}
+        assert calls == []
+        assert "pkg/ no longer exist" in _reload(repo)["proposed_lifecycle"]["reason"]
+
+    def test_prefix_replaced_by_regular_file_is_treated_as_missing(
+            self, repo, monkeypatch):
+        _write(repo, "pkg/a.py")
+        _git(repo, "add", "pkg/a.py")
+        _commit(repo)
+        _seed_entry(repo, "Decision for pkg", source_files=["pkg/"])
+        os.remove(repo / "pkg" / "a.py")
+        os.rmdir(repo / "pkg")
+        _write(repo, "pkg", "replacement file\n")
+        calls = []
+        monkeypatch.setattr(anchors, "_run_git", lambda *a, **k: calls.append(a) or None)
+
+        assert anchors.verify_anchors(str(repo), force=True) == {
+            "reanchored": 0, "proposed": 1}
+        assert calls == []
+        assert "pkg/ no longer exist" in _reload(repo)["proposed_lifecycle"]["reason"]
+
+    def test_missing_prefix_is_dropped_when_another_anchor_survives(
+            self, repo, monkeypatch):
+        _write(repo, "pkg/a.py")
+        _write(repo, "keep.py")
+        _git(repo, "add", "pkg/a.py", "keep.py")
+        _commit(repo)
+        _seed_entry(repo, "Decision with mixed anchors", source_files=["pkg/", "keep.py"])
+        os.remove(repo / "pkg" / "a.py")
+        os.rmdir(repo / "pkg")
+        calls = []
+        monkeypatch.setattr(anchors, "_run_git", lambda *a, **k: calls.append(a) or None)
+
+        assert anchors.verify_anchors(str(repo), force=True) == {
+            "reanchored": 1, "proposed": 0}
+        assert calls == []
+        assert _reload(repo)["source_files"] == ["keep.py"]
+
 
 # ── rename re-anchor ──────────────────────────────────────────────────────────
 

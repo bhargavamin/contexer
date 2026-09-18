@@ -272,6 +272,22 @@ def rule_selects(rule: Mapping, path: str) -> bool:
     return not paths_glob or fnmatch.fnmatch(path, paths_glob)
 
 
+def source_anchor_matches(anchor: str, path: str) -> bool:
+    """Whether one exact-file or trailing-slash directory anchor governs ``path``."""
+    return bool(anchor and path and (
+        path.startswith(anchor) if anchor.endswith("/") else path == anchor))
+
+
+def source_anchor_hits(anchors, paths) -> set[str]:
+    """Named paths governed by source anchors, ignoring malformed legacy values."""
+    exact = {anchor for anchor in anchors
+             if isinstance(anchor, str) and anchor and not anchor.endswith("/")}
+    prefixes = tuple(anchor for anchor in anchors
+                     if isinstance(anchor, str) and anchor and anchor.endswith("/"))
+    return {path for path in paths if isinstance(path, str)
+            and (path in exact or (prefixes and path.startswith(prefixes)))}
+
+
 def _applicable(entry: Mapping, kind: str, rule, matched_files: list[str]) -> dict:
     rev = current_revision(entry) or {}
     return {"decision_id": str(entry.get("id") or ""),
@@ -295,8 +311,9 @@ def select_policies(decisions: list, request: Mapping) -> list[dict]:
     - an ARMED entry (a non-empty `guard_check`) applies when the request names no files at
       all - `commit`, `merge`, `deploy` and `shell` are repo-wide, and a rule scoped to a glob
       still governs the repo-wide operation - or when some named file matches its glob.
-    - an ADVISORY entry applies when its `source_files` anchors intersect the named files.
-      Prose, so it may warn and may never block: nothing here can machine-check a sentence.
+    - an ADVISORY entry applies when an exact-file or trailing-slash directory anchor in its
+      `source_files` governs a named file. Prose, so it may warn and may never block: nothing
+      here can machine-check a sentence.
 
     An armed entry whose glob selects none of the named files FALLS THROUGH to the advisory
     test rather than dropping out: the rule cannot judge these files, but the decision's own
@@ -321,8 +338,8 @@ def select_policies(decisions: list, request: Mapping) -> list[dict]:
                 selected.append(_applicable(entry, "armed", rule, matched))
                 continue
 
-        anchors = {f for f in (entry.get("source_files") or []) if isinstance(f, str)}
-        matched = [f for f in files if f in anchors]
+        hits = source_anchor_hits(entry.get("source_files") or [], files)
+        matched = [f for f in files if f in hits]
         if matched:
             selected.append(_applicable(entry, "advisory", None, matched))
     return sorted(selected, key=lambda p: p["decision_id"])

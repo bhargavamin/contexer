@@ -2435,11 +2435,12 @@ def _print_candidate_card(index: int, total: int, item: dict) -> None:
 
 
 def _prompt_edited_paths(repo: str) -> list[str] | None:
-    """The [E]dit sub-flow: prompt for a comma-separated file list and
+    """The [E]dit sub-flow: prompt for a comma-separated file or directory list and
     validate each entry the same way the write layer will see it - resolved
-    through _guard_relpath (rejecting ../-escaping and absolute spellings,
+    through _guard_anchor_relpath (rejecting ../-escaping and absolute spellings,
     exactly what _anchor_sources itself drops) THEN existence-checked, so a
-    path this calls valid is guaranteed to actually anchor. Prints the
+    path this calls valid is guaranteed to actually anchor. Directories return with
+    the trailing-slash prefix marker. Prints the
     dropped (invalid) entries. Returns the valid paths (possibly empty), or
     None on Ctrl-C/EOF."""
     from contexer import guard_engine
@@ -2451,8 +2452,10 @@ def _prompt_edited_paths(repo: str) -> list[str] | None:
     typed = [path.strip() for path in raw.split(",") if path.strip()]
     valid, invalid = [], []
     for path in typed:
-        resolved = guard_engine._guard_relpath(repo, path)
-        if guard_engine._escapes_repo(resolved) or not (Path(repo) / resolved).is_file():
+        resolved = guard_engine._guard_anchor_relpath(repo, path)
+        target = Path(repo) / resolved
+        valid_target = target.is_dir() if resolved.endswith("/") else target.is_file()
+        if guard_engine._escapes_repo(resolved) or not valid_target:
             invalid.append(path)
         else:
             valid.append(resolved)

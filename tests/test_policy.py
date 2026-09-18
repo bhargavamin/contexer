@@ -380,6 +380,13 @@ class TestAdvisoryApplicability:
         entries = [_entry(source_files=["src/app.py"])]
         assert policy.select_policies(entries, _request(files=["z.py"])) == []
 
+    def test_a_directory_anchor_selects_descendants_only(self):
+        entries = [_entry(source_files=["src/"])]
+        [hit] = policy.select_policies(
+            entries, _request(files=["src/app.py", "src_extra/app.py"]))
+        assert hit["kind"] == "advisory"
+        assert hit["matched_files"] == ["src/app.py"]
+
     def test_an_unanchored_prose_decision_never_selects_on_a_file_request(self):
         assert policy.select_policies([_entry()], _request(files=["z.py"])) == []
 
@@ -599,6 +606,14 @@ class TestEvaluatePolicies:
         assert result["verdict"] == "warn"
         assert [m["kind"] for m in result["matches"]] == ["advisory"]
         assert result["matches"][0]["line"] is None
+
+    def test_a_directory_anchored_advisory_warns_for_a_descendant(self):
+        request = _request(files=["auth/jwt.py"], artifact=_diff("anything\n"))
+        selected = policy.select_policies([_entry(source_files=["auth/"])], request)
+        result = policy.evaluate_policies(selected, request)
+        assert result["verdict"] == "warn"
+        assert result["evaluation_status"] == "complete"
+        assert result["matches"][0]["kind"] == "advisory"
 
     def test_an_advisory_alongside_a_blocking_rule_yields_the_worst_verdict(self):
         entries = [_entry("d1", guard_check=_armed(pattern="TODO")),
