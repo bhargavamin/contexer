@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.48.0](https://github.com/bhargavamin/contexer/compare/v0.47.0...v0.48.0) (2026-09-18)
+
+
+### Features
+
+* **anchors:** support directory prefixes ([#301](https://github.com/bhargavamin/contexer/issues/301)) ([bbde31e](https://github.com/bhargavamin/contexer/commit/bbde31e6770d0869bc04cec0b3b1da7fbc1ac77d))
+* **share:** send session lineage to Teams ([0acf9ec](https://github.com/bhargavamin/contexer/commit/0acf9ec6681cfbd829dfd522017f613285cf0d67))
+* **share:** send session lineage to Teams ([9b7995d](https://github.com/bhargavamin/contexer/commit/9b7995d8fba41ff34809919426ba30edcb435748))
+
+
+### Bug Fixes
+
+* **share:** disambiguate preview escapes ([b18f4b7](https://github.com/bhargavamin/contexer/commit/b18f4b71cf50493949830436b5593d43b5a6a9e1))
+* **share:** escape session controls in preview ([10077f8](https://github.com/bhargavamin/contexer/commit/10077f87a952f66032d8942fca0ec525a007b499))
+
+
+### Documentation
+
+* **readme:** clarify features and add Loom demos ([5456b24](https://github.com/bhargavamin/contexer/commit/5456b2419da3dda49213248e823913b83e4656b5))
+* **readme:** clarify features and add Loom demos ([b859f26](https://github.com/bhargavamin/contexer/commit/b859f263a2958592703fedfdb17408efc59a2e1e))
+* **readme:** restore decision and enforcement positioning ([5676247](https://github.com/bhargavamin/contexer/commit/5676247f358dc6a0c099d8eb8eb94623bad04bb0))
+* **readme:** restore decision and enforcement positioning ([5d9ebf8](https://github.com/bhargavamin/contexer/commit/5d9ebf8f772a4ce2a1d8bb3dddf981892d4edd24))
+
 ## [0.47.0](https://github.com/bhargavamin/contexer/compare/v0.46.0...v0.47.0) (2026-09-15)
 
 
