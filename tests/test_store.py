@@ -4303,10 +4303,11 @@ class TestRetrievalIndex:
         store.update_decision(tmp_repo, "We chose postgres for the orders schema", RV1_SESSION, "architecture")
         idx = store._read_retrieval_index(tmp_repo)
         assert idx is not None
-        assert idx["v"] == 2 and idx["n_docs"] == 1
+        assert idx["v"] == store._RETRIEVAL_INDEX_VERSION and idx["n_docs"] == 1
         (doc,) = idx["docs"].values()
         assert "db" in doc["topics"]
         assert "postgres" in doc["tf"]
+        assert "postgres" in doc["title_tf"]
 
     def test_reflects_current_content_after_revision(self, tmp_repo):
         store.update_decision(tmp_repo, "Use redis for caching the product feed", RV1_SESSION, "architecture")
@@ -4331,7 +4332,7 @@ class TestRetrievalIndex:
         store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
         p = store._index_path(tmp_repo)
         payload = json.loads(p.read_text())
-        payload["v"] = 3
+        payload["v"] = store._RETRIEVAL_INDEX_VERSION + 1
         p.write_text(json.dumps(payload))
         assert store._read_retrieval_index(tmp_repo) is None
 
@@ -4339,11 +4340,11 @@ class TestRetrievalIndex:
         # A v1 index predates source_files/path_artifacts/title per doc (issue #187 fix
         # round 1). It must be rejected outright — not accepted and half-served against docs
         # missing the new fields — so the whole per-prompt path falls back to legacy until
-        # the repo's next _save rebuilds the index at v2.
+        # the repo's next _save rebuilds the index at the current version.
         store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
         p = store._index_path(tmp_repo)
         payload = json.loads(p.read_text())
-        assert payload["v"] == 2
+        assert payload["v"] == store._RETRIEVAL_INDEX_VERSION
         payload["v"] = 1
         for doc in payload["docs"].values():
             doc.pop("source_files", None)
@@ -4375,6 +4376,19 @@ def _downgrade_index_to_v1(repo):
     p.write_text(json.dumps(payload))
 
 
+def _downgrade_index_to_v2(repo):
+    """Rewrite the current sidecar as the real pre-title-field v2 shape."""
+    p = store._index_path(repo)
+    payload = json.loads(p.read_text())
+    payload["v"] = 2
+    payload.pop("title_df", None)
+    payload.pop("title_avgdl", None)
+    for doc in payload["docs"].values():
+        doc.pop("title_tf", None)
+        doc.pop("title_len", None)
+    p.write_text(json.dumps(payload))
+
+
 class TestIndexSelfHeal:
     """`ensure_retrieval_index`: the session-start rebuild that stops a version bump from
     silently demoting an existing repo to the legacy longest-word keyword path forever."""
@@ -4386,9 +4400,25 @@ class TestIndexSelfHeal:
 
         assert store.ensure_retrieval_index(tmp_repo) is True
         idx = store._read_retrieval_index(tmp_repo)
-        assert idx is not None and idx["v"] == 2 and idx["n_docs"] == 1
+        assert (idx is not None
+                and idx["v"] == store._RETRIEVAL_INDEX_VERSION
+                and idx["n_docs"] == 1)
         (doc,) = idx["docs"].values()
         assert "source_files" in doc and "path_artifacts" in doc and "title" in doc
+        assert "title_tf" in doc and "title_len" in doc and "title_df" in idx
+
+    def test_rebuilds_pre_title_v2_index(self, tmp_repo):
+        store.update_decision(
+            tmp_repo, "Use lexical scoring because it is local", RV1_SESSION,
+            "architecture", title="Use BM25 for prompt retrieval")
+        _downgrade_index_to_v2(tmp_repo)
+        assert store._read_retrieval_index(tmp_repo) is None
+
+        assert store.ensure_retrieval_index(tmp_repo) is True
+        idx = store._read_retrieval_index(tmp_repo)
+        assert idx["v"] == store._RETRIEVAL_INDEX_VERSION
+        (doc,) = idx["docs"].values()
+        assert "bm25" in doc["title_tf"] and "bm25" in idx["title_df"]
 
     def test_rebuilds_missing_index(self, tmp_repo):
         store.update_decision(tmp_repo, "Use postgres for storage layer", RV1_SESSION, "architecture")
@@ -4483,7 +4513,7 @@ class TestIndexSelfHeal:
 
         monkeypatch.setattr(store, "_retrieval_log", boom)
         assert store.ensure_retrieval_index(tmp_repo) is False   # never raises
-        assert store._read_retrieval_index(tmp_repo)["v"] == 2   # rebuild still landed
+        assert store._read_retrieval_index(tmp_repo)["v"] == store._RETRIEVAL_INDEX_VERSION
 
     def test_retrieval_log_survives_a_non_utf8_log_file(self, tmp_repo):
         store.STORE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -4516,7 +4546,7 @@ class TestIndexSelfHeal:
         _downgrade_index_to_v1(tmp_repo)
 
         store.session_start_payload(tmp_repo)
-        assert store._read_retrieval_index(tmp_repo)["v"] == 2
+        assert store._read_retrieval_index(tmp_repo)["v"] == store._RETRIEVAL_INDEX_VERSION
 
     def test_session_start_heals_on_resume_and_compact(self, tmp_repo):
         # Both sources return early / take shortened paths, but their LATER prompts still
@@ -4526,7 +4556,7 @@ class TestIndexSelfHeal:
                                   RV1_SESSION, "architecture")
             _downgrade_index_to_v1(tmp_repo)
             store.session_start_payload(tmp_repo, source=source)
-            assert store._read_retrieval_index(tmp_repo)["v"] == 2, source
+            assert store._read_retrieval_index(tmp_repo)["v"] == store._RETRIEVAL_INDEX_VERSION, source
 
     def test_healed_index_restores_bm25_ranking_over_longest_word_lookup(self, tmp_repo):
         # The behaviour the fix exists for. Legacy renders through get_context(query=<the
@@ -5624,7 +5654,7 @@ class TestFileRoute:
         store.save(tmp_repo, data)
 
         index = store._read_retrieval_index(tmp_repo)
-        assert index is not None and index["v"] == 2
+        assert index is not None and index["v"] == store._RETRIEVAL_INDEX_VERSION
 
         prompt = "fix the bug in contexer/mod_0250.py that touches contexer/shared_05.py"
         store._prompt_file_hits(tmp_repo, prompt, set(), index)   # warm up
@@ -5656,6 +5686,32 @@ class TestTopicAliasRetry:
         _seed_rv1(tmp_repo, RV1_CORPUS)
         result = store.get_context(tmp_repo, query="jwt")
         assert "JWT refresh tokens" in result
+
+    def test_multiword_literal_miss_falls_back_to_bm25(self, tmp_repo, monkeypatch):
+        _seed_rv1(tmp_repo, [
+            ("Encrypt webhook payload archives with rotating envelope keys", "architecture"),
+            ("Encrypt webhook payload archives only for legacy export samples", "architecture"),
+        ])
+        calls = []
+        real_rank = retrieval.prompt_rank
+
+        def traced_rank(query_terms, index):
+            calls.append(list(query_terms))
+            return real_rank(query_terms, index)
+
+        monkeypatch.setattr(retrieval, "prompt_rank", traced_rank)
+        result = store.get_context(tmp_repo, query="webhook archives rotating keys")
+        assert len(calls) == 1
+        assert "rotating envelope keys" in result
+        assert "legacy export samples" in result
+
+    def test_multiword_fallback_retrieves_title_only_subject(self, tmp_repo):
+        store.update_decision(
+            tmp_repo, "Lexical scoring stays local and deterministic", "title-subject",
+            "architecture", title="Use BM25 for prompt retrieval")
+        result = store.get_context(tmp_repo, query="retrieval bm25")
+        assert "Use BM25 for prompt retrieval" in result
+        assert "No matching decisions" not in result
 
     def test_no_result_query_logs_no_followup(self, tmp_repo):
         _seed_rv1(tmp_repo, RV1_CORPUS)

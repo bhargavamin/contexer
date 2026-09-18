@@ -4533,6 +4533,7 @@ _STRONG_SCORE_FRAC = 0.5    # a candidate is strong only within this fraction of
 _STRONG_MIN_HITS = 2        # ...and with at least this many distinct query-term hits
 _STRONG_CAP = 3             # never inject more than this many decisions per prompt
 _RETRIEVAL_LOG_CAP = 200    # pointer/usage log is tail-capped
+_RETRIEVAL_INDEX_VERSION = 3
 
 
 
@@ -4564,7 +4565,9 @@ def _build_retrieval_index(data: dict) -> dict:
     from contexer import conflicts, guard_engine
     docs: dict[str, dict] = {}
     df: dict[str, int] = {}
+    title_df: dict[str, int] = {}
     total_len = 0
+    total_title_len = 0
     for e in data.get("entries", []):
         if e.get("type") != "decision":
             continue
@@ -4588,31 +4591,44 @@ def _build_retrieval_index(data: dict) -> dict:
         prop_content = ((e.get("proposed_revision") or {}).get("content", "")
                         if conflicts.has_open_conflict(e) else "")
         toks = retrieval.index_tokens(f"{content} {prop_content}" if prop_content else content)
+        title = e.get("title") or revisions.derive_title(content)
+        title_toks = retrieval.index_tokens(title)
         tf: dict[str, int] = {}
         for t in toks:
             tf[t] = tf.get(t, 0) + 1
+        title_tf: dict[str, int] = {}
+        for t in title_toks:
+            title_tf[t] = title_tf.get(t, 0) + 1
         for t in tf:
             df[t] = df.get(t, 0) + 1
+        for t in title_tf:
+            title_df[t] = title_df.get(t, 0) + 1
         total_len += len(toks)
+        total_title_len += len(title_toks)
         docs[did] = {
             "tf": tf, "len": len(toks), "topics": retrieval.derive_topics(content),
+            "title_tf": title_tf, "title_len": len(title_toks),
             "subtype": e.get("subtype", ""), "status": status,
             "source_files": list(e.get("source_files") or []),
             "path_artifacts": guard_engine._guard_content_artifacts(content),
-            "title": e.get("title") or revisions.derive_title(content),
+            "title": title,
         }
     n_docs = len(docs)
     avgdl = (total_len / n_docs) if n_docs else 0.0
-    # v2 (issue #187 fix round 1): docs gained source_files/path_artifacts/title. Bumped
-    # (not left at v1 with new optional keys) so a pre-#187 v1 index on disk is rejected by
-    # _read_retrieval_index as "wrong version" and the WHOLE per-prompt path falls back to
-    # legacy - not just the file route half-served against docs missing the new fields. The
-    # established pattern (see _read_retrieval_index's docstring): never rebuild inline. Repair
-    # comes from the repo's next save (every write rebuilds every doc's fields from scratch)
-    # or, for a repo nobody writes to, from ensure_retrieval_index at the next session start -
-    # a version bump strands EVERY already-indexed repo at once, so save alone is not a
-    # sufficient self-heal.
-    return {"v": 2, "n_docs": n_docs, "avgdl": avgdl, "df": df, "docs": docs}
+    title_avgdl = (total_title_len / n_docs) if n_docs else 0.0
+    # v3 adds a separate per-decision title field. Keeping title terms outside content tf
+    # preserves content-ranker parity for Guard while prompt_rank can retrieve a title-only
+    # subject and reward only the decision that owns the matching title. The version bump
+    # deliberately sends old sidecars through the established session-start self-heal path.
+    return {
+        "v": _RETRIEVAL_INDEX_VERSION,
+        "n_docs": n_docs,
+        "avgdl": avgdl,
+        "title_avgdl": title_avgdl,
+        "df": df,
+        "title_df": title_df,
+        "docs": docs,
+    }
 
 
 def _write_retrieval_index(repo_path: str, data: dict) -> None:
@@ -4635,20 +4651,24 @@ def _read_retrieval_index(repo_path: str) -> dict | None:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError, UnicodeDecodeError):
         return None
-    if not isinstance(data, dict) or data.get("v") != 2 or not isinstance(data.get("docs"), dict):
+    if (not isinstance(data, dict)
+            or data.get("v") != _RETRIEVAL_INDEX_VERSION
+            or not isinstance(data.get("docs"), dict)
+            or not isinstance(data.get("title_df"), dict)):
         return None
     return data
 
 
 def ensure_retrieval_index(repo_path: str) -> bool:
     """Rebuild the index sidecar when it is missing / corrupt / wrong-version. True only
-    when this call actually produced a readable v2 index.
+    when this call actually produced a readable current-version index.
 
     Why this exists, and why it is NOT in `_read_retrieval_index`: the per-prompt reader
     stays strictly read-only, because rebuilding inline would put a whole-store scan on the
     prompt path. The documented self-heal was "the repo's next `save` rebuilds it", which
     is right for a fresh repo but strands an EXISTING one the moment the index VERSION is
-    bumped (v1 -> v2 at #187 fix round 1): every already-indexed repo is rejected as
+    bumped (for example v1 -> v2 at #187 or v2 -> v3 for title fields): every
+    already-indexed repo is rejected as
     wrong-version and silently demoted to `_legacy_prompt_context` - whose keyword pick is
     the three LONGEST words of the prompt - until someone happens to capture a decision
     there. A repo nobody writes to never recovers at all. So the rebuild runs once per
@@ -5365,7 +5385,10 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
     # BM25's own hits >= _STRONG_MIN_HITS (2) bar without genuine additional overlap.
     art_tokens = retrieval.index_tokens(" ".join(artifacts))
     query_terms = retrieval.index_tokens(prompt) + art_tokens + art_tokens   # artifacts double-weighted
-    ranked = retrieval.bm25_rank(query_terms, index)
+    # Prompt retrieval fuses content BM25 with each decision's own title field. The generic
+    # content ranker used by Guard stays unchanged, while a title-only subject can be found and
+    # an incidental rare word in another decision cannot borrow that title's relevance.
+    ranked = retrieval.prompt_rank(query_terms, index)
     ranked = [r for r in ranked if r[0] not in ws]
 
     strong: list[str] = list(anchor_ids)
@@ -5378,8 +5401,16 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
         question_only = is_question and not is_rationale and not is_project
         allow_strong = not question_only or ranked[0][3] >= 1
         bm25_strong: list[str] = []
-        if allow_strong:
-            for did, score, hits, _dh in ranked[:_STRONG_CANDIDATES]:
+        # A title hit belongs to this exact decision and is authored as its concise subject,
+        # so a rationale/project question may trust the top title-ranked candidate even when
+        # its body deliberately uses different wording. Do this before the generic two-hit
+        # loop; otherwise a lower-ranked body matching two incidental words wins merely
+        # because the correct title-only candidate has one lexical hit.
+        if (allow_strong and (is_rationale or is_project)
+                and ranked[0][4] == 0 and ranked[0][5] >= 1):
+            bm25_strong = [ranked[0][0]]
+        elif allow_strong:
+            for did, score, hits, _dh, _content_hits, _title_hits in ranked[:_STRONG_CANDIDATES]:
                 if score >= _STRONG_SCORE_FRAC * top_score and hits >= _STRONG_MIN_HITS:
                     bm25_strong.append(did)
         # Rationale/project boost: a single-keyword "why X?" / "what's the goal for X?" often
@@ -5596,6 +5627,18 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
                 d for d in decisions
                 if set(re.findall(r"[a-z0-9]+", d.get("content", "").lower())) & aliases
             ]
+        # A model recovering from an insufficient prompt injection naturally supplies a
+        # multiword subject ("bm25 algorithm"), while the historical filter above treats it
+        # as one literal phrase. On a literal miss, reuse the prompt ranker so content and
+        # title terms are matched independently and returned in relevance order. The index
+        # reader remains read-only/fail-soft; a missing or stale sidecar keeps the old miss.
+        if not matched:
+            index = _read_retrieval_index(repo_path)
+            query_terms = retrieval.index_tokens(query)
+            if index is not None and query_terms:
+                allowed = {d.get("id"): d for d in decisions if d.get("id")}
+                matched = [allowed[did] for did, *_ in retrieval.prompt_rank(query_terms, index)
+                           if did in allowed]
         decisions = matched
 
     display_limit = limit if limit > 0 else (_FILTERED_DISPLAY if is_filtered else _UNFILTERED_DISPLAY)
