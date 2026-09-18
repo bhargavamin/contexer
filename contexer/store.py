@@ -34,6 +34,8 @@ GLOBAL_SLUG = "_global"           # reserved slug for cross-repo decisions
 _UNFILTERED_DISPLAY = 10          # entries shown when no query/type filter applied
 _FILTERED_DISPLAY = 25            # entries shown when a filter is active
 _BACKLOG_ESCALATE = 10            # pending-review count at which surfacing tone firms up
+_GUIDANCE_PROVENANCE_KEY = "_transient_guidance_provenance"
+_GUIDANCE_FINGERPRINT_VERSION = 1
 
 
 # ── the store directory: one reader, one builder ───────────────────────────────────────
@@ -384,6 +386,7 @@ def load(repo_path: str) -> dict:
         # Valid-but-non-object JSON ([], null, 42) parses fine but would crash every
         # downstream data["entries"] access - treat the same as corruption.
         if isinstance(data, dict) and _entries_error(data.get("entries")) is None:
+            _capture_guidance_provenance(data)
             # Transparently upgrade legacy entries to the revision model so every reader
             # sees the normalized shape. Idempotent + in-memory; persisted on next save.
             _migrate_entries(data)
@@ -430,6 +433,7 @@ def load_for_update(repo_path: str) -> dict:
                 or ("assessed_inventory" in scan
                     and not re.fullmatch(r"[a-f0-9]{64}", str(scan["assessed_inventory"])))):
             raise ValueError("Malformed bootstrap analysis/applicability state; refusing to overwrite it")
+    _capture_guidance_provenance(data)
     _migrate_entries(data)
     return data
 
@@ -456,7 +460,12 @@ def save(repo_path: str, data: dict) -> None:
     # never routes through here - save_global writes it directly.)
     data["repo_path"] = canonical_store_key(data.get("repo_path") or repo_path)
     path = _store_path(repo_path)
-    atomic_write(path, json.dumps(data, indent=2, ensure_ascii=False))
+    serializable = {k: v for k, v in data.items() if k != _GUIDANCE_PROVENANCE_KEY}
+    atomic_write(path, json.dumps(serializable, indent=2, ensure_ascii=False))
+    # Only a successful store publication makes revision UUIDs authoritative.  Legacy
+    # migrations synthesize UUIDs in memory, so marking before atomic_write would let a
+    # failed save leak an identity that no reader can reproduce.
+    _capture_guidance_provenance(data)
     # The retrieval index is a disposable sidecar maintained ONLY here - every store
     # writer already holds the store lock, so per-prompt readers never rebuild it.
     _write_retrieval_index(repo_path, data)
@@ -2400,6 +2409,75 @@ def _migrate_entries(data: dict) -> None:
     for entry in data.get("entries", []):
         _migrate_decision(entry)
     data["schema_version"] = _SCHEMA_VERSION
+
+
+def _capture_guidance_provenance(data: dict) -> None:
+    """Remember which revision UUIDs were present in the serialized snapshot.
+
+    Migration deliberately creates revision objects for legacy entries in memory. Those
+    UUIDs are not persisted identity until a successful save, and differ on every load.
+    This top-level transient map is captured before migration and stripped by ``save``.
+    """
+    # Current-schema snapshots cannot contain migration-synthesized revisions: every
+    # revision object in them was parsed from disk. Keep the hot read path O(1).
+    if data.get("schema_version") == _SCHEMA_VERSION:
+        data[_GUIDANCE_PROVENANCE_KEY] = True
+        return
+    persisted: dict[str, list[str]] = {}
+    for entry in data.get("entries", []):
+        did = entry.get("id")
+        if not did:
+            continue
+        ids = [str(rev.get("revision_id")) for rev in entry.get("revisions", [])
+               if isinstance(rev, dict) and rev.get("revision_id")]
+        persisted[str(did)] = ids
+    data[_GUIDANCE_PROVENANCE_KEY] = persisted
+
+
+def _revision_identity_is_persisted(data: dict | None, entry: dict) -> bool:
+    """Whether this entry's current revision UUID came from the loaded snapshot."""
+    if data is None or _GUIDANCE_PROVENANCE_KEY not in data:
+        # Callers can construct normalized data directly (tests/imports). There was no
+        # migration boundary to distrust, so an existing revision object is authoritative.
+        return revisions.current_revision(entry) is not None
+    current = revisions.current_revision(entry) or {}
+    provenance = data.get(_GUIDANCE_PROVENANCE_KEY)
+    if provenance is True:
+        return bool(current.get("revision_id"))
+    return current.get("revision_id") in set(
+        (provenance or {}).get(str(entry.get("id") or ""), []))
+
+
+def _guidance_fingerprint(entry: dict, data: dict | None = None) -> str:
+    """Versioned identity of the guidance a prompt renderer would currently deliver.
+
+    Volatile recurrence/session/timestamp fields are intentionally absent. For a raw
+    legacy entry, the normalized content/view projection is stable while migration's
+    temporary revision UUID is not; after a successful save, the persisted UUID becomes
+    part of identity and subsequent revisions (including A -> B -> A) remain distinct.
+    """
+    from contexer import conflicts
+
+    projected = dict(entry)
+    projected.pop("bootstrap_check_unavailable", None)
+    title, body, extras = conflicts._conflict_view(projected)
+    current = revisions.current_revision(entry) or {}
+    payload = {
+        "version": _GUIDANCE_FINGERPRINT_VERSION,
+        "revision_id": (current.get("revision_id", "")
+                        if _revision_identity_is_persisted(data, entry) else "legacy"),
+        "status": entry_status(entry),
+        "authority": {
+            "created_by": entry.get("created_by", ""),
+            "approved_by": entry.get("approved_by", ""),
+            "revision_source": current.get("source", ""),
+        },
+        "subtype": entry.get("subtype", ""),
+        "view": {"title": title, "body": body, "extras": extras},
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return f"guidance-v{_GUIDANCE_FINGERPRINT_VERSION}:" + hashlib.sha256(
+        raw.encode("utf-8")).hexdigest()
 
 
 def _new_decision_entry(content: str, session_id: str, subtype: str,
@@ -4836,6 +4914,8 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     data = load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     global_rules = get_global_decisions()
+    compact_rehydrated = (_rehydrate_working_set(repo_path, session_id)
+                          if source == "compact" and session_id else "")
 
     if source == "resume":
         if decisions:
@@ -4916,7 +4996,7 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
             # This branch is reachable exactly when reconciliation stored no decision, which is
             # what a `partial`/`error` pass looks like from here - so it is the branch where
             # dropping the diagnostic would hide it in the case it was written for.
-            return {"status": reconcile_note.strip(), "context": ""}
+            return {"status": reconcile_note.strip(), "context": compact_rehydrated}
         _arm_offer(repo_path)
         lines = _build_bootstrap_context(repo_path)
         sys_parts = []
@@ -4929,6 +5009,8 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
                     sys_parts.append(f"    {body}")
             sys_parts.append("")
         sys_parts.extend(lines)
+        if compact_rehydrated:
+            sys_parts.append(compact_rehydrated)
         if reconsidering:
             sys_parts.append(_pending_review_notice(len(reconsidering)))
         global_note = f" ({_pl(len(global_rules), 'global rule')} active)" if global_rules else ""
@@ -5034,10 +5116,8 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     # B2: compact re-injects the normal rules above; also rehydrate the CONTENT of the
     # working set the router built up pre-compaction, since additionalContext replay
     # otherwise loses which decisions were already surfaced this session.
-    if source == "compact" and session_id:
-        rehydrated = _rehydrate_working_set(repo_path, session_id)
-        if rehydrated:
-            sys_parts.append(rehydrated)
+    if compact_rehydrated:
+        sys_parts.append(compact_rehydrated)
 
     constraints = [d for d in pre_loaded if d.get("subtype") == "constraint"]
     conventions = [d for d in pre_loaded if d.get("subtype") == "convention"]
@@ -5152,18 +5232,21 @@ def post_compact_payload(repo_path: str, session_id: str = "") -> dict:
     (via _rehydrate_working_set - same helper Claude's SessionStart(compact) path uses) so
     Gemini's before_agent reload and Codex's post-compact path get the same rehydration
     Claude gets, instead of losing the router's pre-compaction state on replay."""
+    # Compaction is a delivery boundary even when this repo currently has no local
+    # decisions: the ledger may still contain a tracked global strong delivery.
+    rehydrated = _rehydrate_working_set(repo_path, session_id) if session_id else ""
     data = load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     if not decisions:
         if _offer_already_made(repo_path):
-            return {"status": "", "context": ""}
+            return {"status": "", "context": rehydrated}
         _arm_offer(repo_path)
-        return {"status": "", "context": "\n".join(_build_bootstrap_context(repo_path))}
+        bootstrap_context = "\n".join(_build_bootstrap_context(repo_path))
+        context = "\n\n".join(p for p in (bootstrap_context, rehydrated) if p)
+        return {"status": "", "context": context}
     context = get_context(repo_path)
-    if session_id:
-        rehydrated = _rehydrate_working_set(repo_path, session_id)
-        if rehydrated:
-            context = f"{context}\n\n{rehydrated}" if context else rehydrated
+    if rehydrated:
+        context = f"{context}\n\n{rehydrated}" if context else rehydrated
     return {"status": "Contexer: context reloaded after compaction", "context": context}
 
 
@@ -5218,7 +5301,7 @@ _STRONG_SCORE_FRAC = 0.5    # a candidate is strong only within this fraction of
 _STRONG_MIN_HITS = 2        # ...and with at least this many distinct query-term hits
 _STRONG_CAP = 3             # never inject more than this many decisions per prompt
 _RETRIEVAL_LOG_CAP = 200    # pointer/usage log is tail-capped
-_RETRIEVAL_INDEX_VERSION = 3
+_RETRIEVAL_INDEX_VERSION = 4
 
 
 
@@ -5297,11 +5380,12 @@ def _build_retrieval_index(data: dict) -> dict:
             "source_files": list(e.get("source_files") or []),
             "path_artifacts": guard_engine._guard_content_artifacts(content),
             "title": title,
+            "guidance_fingerprint": _guidance_fingerprint(e, data),
         }
     n_docs = len(docs)
     avgdl = (total_len / n_docs) if n_docs else 0.0
     title_avgdl = (total_title_len / n_docs) if n_docs else 0.0
-    # v3 adds a separate per-decision title field. Keeping title terms outside content tf
+    # v4 adds the current rendered-guidance fingerprint. Keeping title terms outside content tf
     # preserves content-ranker parity for Guard while prompt_rank can retrieve a title-only
     # subject and reward only the decision that owns the matching title. The version bump
     # deliberately sends old sidecars through the established session-start self-heal path.
@@ -5422,31 +5506,140 @@ def _ws_path(repo_path: str, session_id: str) -> Path:
     return sidecar_path("working_set", slug=repo_slug(repo_path), session=safe)
 
 
+_WORKING_SET_VERSION = 2
+_WORKING_SET_MAX_BYTES = 256 * 1024
+_WORKING_SET_FIELD_MAX = 256
+_WORKING_SET_SCOPES = frozenset({"personal", "global"})
+
+
+def _valid_ws_string(value: object) -> bool:
+    return isinstance(value, str) and 0 < len(value) <= _WORKING_SET_FIELD_MAX
+
+
+def _recent_unique_ids(values: list[str]) -> list[str]:
+    """Most-recent spelling of each id, preserving oldest-to-newest result order."""
+    seen: set[str] = set()
+    recent: list[str] = []
+    for did in reversed(values):
+        if did not in seen:
+            seen.add(did)
+            recent.append(did)
+    recent.reverse()
+    return recent[-MAX_ENTRIES:]
+
+
+def _read_working_set(repo_path: str, session_id: str) -> dict:
+    """Validated ledger state; old/future/malformed identity rows become hints only."""
+    empty = {"injected": [], "records": []}
+    if not session_id:
+        return empty
+    path = _ws_path(repo_path, session_id)
+    try:
+        if path.stat().st_size > _WORKING_SET_MAX_BYTES:
+            return empty
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return empty
+    if not isinstance(data, dict):
+        return empty
+    raw_ids = data.get("injected")
+    injected = []
+    if isinstance(raw_ids, list):
+        injected = _recent_unique_ids([i for i in raw_ids if _valid_ws_string(i)])
+    if data.get("v") != _WORKING_SET_VERSION or not isinstance(data.get("records"), list):
+        return {"injected": injected, "records": []}
+    records: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    # Read newest first so duplicate rows cannot resurrect older credit.
+    for row in reversed(data["records"][-MAX_ENTRIES:]):
+        if not isinstance(row, dict):
+            continue
+        scope, did, fingerprint = row.get("scope"), row.get("id"), row.get("fingerprint")
+        if (scope not in _WORKING_SET_SCOPES or not _valid_ws_string(did)
+                or (fingerprint is not None and not _valid_ws_string(fingerprint))):
+            continue
+        key = (scope, did)
+        if key in seen:
+            continue
+        seen.add(key)
+        records.append({"scope": scope, "id": did, "fingerprint": fingerprint})
+    records.reverse()
+    return {"injected": injected, "records": records}
+
+
+def _write_working_set(repo_path: str, session_id: str, records: list[dict],
+                       hints: list[str] | None = None) -> bool:
+    """Write a bounded v2 ledger. Returns persistence success; never blocks output."""
+    if not session_id:
+        return False
+    rows = records[-MAX_ENTRIES:]
+    hint_ids = _recent_unique_ids((hints or []) + [r["id"] for r in rows])
+    try:
+        ensure_store_dir()
+        while True:
+            payload = {"v": _WORKING_SET_VERSION, "injected": hint_ids,
+                       "records": rows, "ts": time.time()}
+            raw = json.dumps(payload, separators=(",", ":"))
+            if len(raw.encode("utf-8")) <= _WORKING_SET_MAX_BYTES:
+                break
+            # Compatibility hints carry no suppression credit, so shed them first.
+            credited_ids = {r["id"] for r in rows}
+            removable = next((i for i, did in enumerate(hint_ids)
+                              if did not in credited_ids), None)
+            if removable is not None:
+                hint_ids.pop(removable)
+            elif rows:
+                rows = rows[1:]
+                hint_ids = _recent_unique_ids(hint_ids + [r["id"] for r in rows])
+            else:
+                return False
+        atomic_write(_ws_path(repo_path, session_id), raw)
+        return True
+    except OSError:
+        return False
+
+
 def working_set_ids(repo_path: str, session_id: str) -> list[str]:
     """Decision ids already injected this session (fail-soft; [] when no session id)."""
-    if not session_id:
-        return []
-    try:
-        data = json.loads(_ws_path(repo_path, session_id).read_text(encoding="utf-8"))
-        ids = data.get("injected") if isinstance(data, dict) else None
-        return ids if isinstance(ids, list) else []
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        return []
+    return _read_working_set(repo_path, session_id)["injected"]
+
+
+def _working_set_records(repo_path: str, session_id: str) -> list[dict]:
+    return _read_working_set(repo_path, session_id)["records"]
+
+
+def _ws_has_credit(records: list[dict], scope: str, did: str,
+                   fingerprint: str | None) -> bool:
+    return bool(fingerprint) and any(
+        r["scope"] == scope and r["id"] == did and r.get("fingerprint") == fingerprint
+        for r in records)
+
+
+def _ws_record_deliveries(repo_path: str, session_id: str, delivered: list[dict]) -> bool:
+    """MRU-upsert actual full-render receipts, one row per scoped decision."""
+    if not session_id or not delivered:
+        return False
+    state = _read_working_set(repo_path, session_id)
+    rows = list(state["records"])
+    for row in delivered:
+        if (row.get("scope") not in _WORKING_SET_SCOPES
+                or not _valid_ws_string(row.get("id"))
+                or not _valid_ws_string(row.get("fingerprint"))):
+            continue
+        rows = [old for old in rows
+                if (old["scope"], old["id"]) != (row["scope"], row["id"])]
+        rows.append({"scope": row["scope"], "id": row["id"],
+                     "fingerprint": row["fingerprint"]})
+    return _write_working_set(repo_path, session_id, rows, state["injected"])
 
 
 def _ws_add(repo_path: str, session_id: str, ids: list[str]) -> None:
-    """Record injected ids for this session so they are not re-injected. Skipped (and no
-    file created) when session_id is empty - dedup off, still correct."""
+    """Compatibility writer: ID-only observations are restoration hints, never credit."""
     if not session_id or not ids:
         return
-    existing = working_set_ids(repo_path, session_id)
-    merged = existing + [i for i in ids if i not in existing]
-    try:
-        ensure_store_dir()
-        atomic_write(_ws_path(repo_path, session_id),
-                      json.dumps({"injected": merged, "ts": time.time()}))
-    except OSError:
-        pass
+    state = _read_working_set(repo_path, session_id)
+    merged = state["injected"] + [i for i in ids if _valid_ws_string(i)]
+    _write_working_set(repo_path, session_id, state["records"], merged)
 
 
 # ── Edited-files signal (guard anchor accrual, issue #175 Task 2) ───────────────
@@ -5591,40 +5784,36 @@ def _standing_topic_map(repo_path: str, decisions: list) -> str:
 
 
 def _rehydrate_working_set(repo_path: str, session_id: str) -> str:
-    """The content of at most the _REHYDRATE_CAP most-recently-injected working-set
-    decisions (current content, active statuses only), under a heading. '' when there is
-    no session id / working set / nothing still active to show."""
-    from contexer import conflicts   # function-level: mirrors anchors.verify_anchors' call site
-    ids = working_set_ids(repo_path, session_id)
-    if not ids:
+    """Reset pre-compaction credit and replay up to ten historical full deliveries.
+
+    Selection uses history, including legacy ID-only hints. Credit is cleared before
+    rendering and restored only for rows present in the returned text. This also resolves
+    explicitly tracked global rows through the global store.
+    """
+    if not session_id:
         return ""
-    recent = ids[-_REHYDRATE_CAP:]
-    data = load(repo_path)
-    by_id = {e.get("id"): e for e in data.get("entries", []) if e.get("type") == "decision"}
-    lines = []
-    conflicted = False
-    for did in recent:
-        e = by_id.get(did)
-        if not e or entry_status(e) not in ("approved", "suggested"):
-            continue
-        subtype_tag = f" [{e['subtype']}]" if e.get("subtype") else ""
-        entry_id = e.get("id", "")[:8]
-        id_tag = f" (id={entry_id})" if entry_id else ""   # _CONFLICT_GUIDE points at it
-        title, body, extras = conflicts._conflict_view(e)
-        if e.get("bootstrap"):
-            from contexer import bootstrap
-            extras = bootstrap.render(e, repo_path) + (extras if conflicts.has_open_conflict(e) else [])
-        lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag} {title}{id_tag}")
-        if body is not None:
-            lines.append(f"    {body}")
-        for extra in extras:
-            lines.append(f"    {extra}")
-        conflicted = conflicted or conflicts.has_open_conflict(e)
-    if not lines:
+    state = _read_working_set(repo_path, session_id)
+    rows = list(state["records"])
+    keyed = {(r["scope"], r["id"]) for r in rows}
+    history: list[str | dict] = list(rows)
+    for did in state["injected"]:
+        if not any(key[1] == did for key in keyed):
+            history.append(did)  # ambiguous legacy hint: preserve local-first lookup
+    if not history:
         return ""
-    if conflicted:
-        lines.append(f"\n{conflicts._CONFLICT_GUIDE}")
-    return "## Rehydrated working context:\n" + "\n".join(lines)
+
+    # A successful write invalidates every old-window fingerprint, including rows omitted
+    # by the bounded replay. On write failure the documented best-effort limitation applies.
+    cleared = [{"scope": r["scope"], "id": r["id"], "fingerprint": None} for r in rows]
+    _write_working_set(repo_path, session_id, cleared, state["injected"])
+
+    recent = history[-_REHYDRATE_CAP:]
+    rendered, receipts = _render_prompt_decisions_with_records(
+        repo_path, recent, active_only=True)
+    if not rendered:
+        return ""
+    _ws_record_deliveries(repo_path, session_id, receipts)
+    return "## Rehydrated working context:\n" + rendered
 
 
 def migrate_worktree_strays(repo_path: str) -> int:
@@ -5796,35 +5985,68 @@ def log_followup_if_matching(repo_path: str, query: str, found: bool = True) -> 
         pass
 
 
-def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
-    """Render the given decisions in the same two-line format `get_context` uses: a bullet
-    line ending in the title, then a `    `-indented line with the current content. Skips
-    ignored / missing entries; empty string when nothing renders.
+def _render_prompt_decisions_with_records(
+    repo_path: str,
+    ids: list[str | dict],
+    *,
+    previous_records: list[dict] | None = None,
+    active_only: bool = False,
+) -> tuple[str, list[dict]]:
+    """Render and receipt decisions from the same loaded local/global snapshots.
 
-    `ids` normally come from the repo's own BM25 index (repo-store-only by construction), but
-    the file route's anchor tier (#187, `_prompt_file_hits`) can hand back a
-    `decisions_for_files` hit scoped "global" - a decision that lives in the GLOBAL store, not
-    this repo's. So any id not found
-    in the repo store falls back to a global-store lookup, mirroring `get_context`'s own
-    `files=` two-store merge. A no-op extra read for the pure-BM25 case (nothing is ever
-    missing there)."""
-    from contexer import conflicts   # function-level: mirrors anchors.verify_anchors' call site
-    data = load(repo_path)
-    by_id = {e.get("id"): e for e in data.get("entries", []) if e.get("type") == "decision"}
-    missing = [d for d in ids if d not in by_id]
-    if missing:
-        global_data = load_global()
-        by_id.update({e.get("id"): e for e in global_data.get("entries", [])
-                     if e.get("type") == "decision" and e.get("id") in missing})
+    A dict request may pin ``scope`` for compaction restoration. String requests retain
+    the existing local-first resolution used by prompt retrieval. Missing/filtered rows
+    produce neither text nor credit.
+    """
+    from contexer import conflicts
+
+    local_data = load(repo_path)
+    local_by_id = {e.get("id"): e for e in local_data.get("entries", [])
+                   if e.get("type") == "decision"}
+    global_data: dict | None = None
+    global_by_id: dict[str, dict] = {}
+
+    def _ensure_global() -> dict:
+        nonlocal global_data, global_by_id
+        if global_data is None:
+            global_data = load_global()
+            global_by_id = {e.get("id"): e for e in global_data.get("entries", [])
+                            if e.get("type") == "decision"}
+        return global_data
+    previous = {(r["scope"], r["id"]): r.get("fingerprint")
+                for r in (previous_records or [])}
     lines: list[str] = []
+    receipts: list[dict] = []
     conflicted = False
-    for did in ids:
-        e = by_id.get(did)
-        if not e or entry_status(e) == "ignored":
+    for request in ids:
+        if isinstance(request, dict):
+            did = request.get("id")
+            requested_scope = request.get("scope")
+        else:
+            did = request
+            requested_scope = None
+        if requested_scope == "global":
+            owner = _ensure_global()
+            scope, e = "global", global_by_id.get(did)
+        elif requested_scope == "personal":
+            scope, e, owner = "personal", local_by_id.get(did), local_data
+        elif did in local_by_id:
+            scope, e, owner = "personal", local_by_id.get(did), local_data
+        else:
+            owner = _ensure_global()
+            scope, e = "global", global_by_id.get(did)
+        if e is None:
             continue
+        status = entry_status(e)
+        if status == "ignored" or (active_only and status not in ("approved", "suggested")):
+            continue
+        fingerprint = _guidance_fingerprint(e, owner)
+        prior = previous.get((scope, did))
+        if prior and prior != fingerprint:
+            lines.append("Updated context for this decision; use the current status and choice below.")
         subtype_tag = f" [{e['subtype']}]" if e.get("subtype") else ""
-        st = entry_status(e)
-        status_tag = " [suggested]" if st == "suggested" else " [pending]" if st == "pending_approval" else ""
+        status_tag = " [suggested]" if status == "suggested" else \
+            " [pending]" if status == "pending_approval" else ""
         entry_id = e.get("id", "")[:8]
         id_tag = f" (id={entry_id})" if entry_id else ""
         title, body, extras = conflicts._conflict_view(e)
@@ -5835,9 +6057,25 @@ def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
         for extra in extras:
             lines.append(f"    {extra}")
         conflicted = conflicted or conflicts.has_open_conflict(e)
+        receipts.append({"scope": scope, "id": did, "fingerprint": fingerprint})
     if conflicted:
         lines.append(f"\n{conflicts._CONFLICT_GUIDE}")
-    return "\n".join(lines)
+    return "\n".join(lines), receipts
+
+
+def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
+    """Render the given decisions in the same two-line format `get_context` uses: a bullet
+    line ending in the title, then a `    `-indented line with the current content. Skips
+    ignored / missing entries; empty string when nothing renders.
+
+    `ids` normally come from the repo's own BM25 index (repo-store-only by construction), but
+    the file route's anchor tier (#187, `_prompt_file_hits`) can hand back a
+    `decisions_for_files` hit scoped "global" - a decision that lives in the GLOBAL store, not
+    this repo's. So any id not found
+    in the repo store falls back to a global-store lookup, mirroring `get_context`'s own
+    `files=` two-store merge. The global snapshot is loaded lazily only when a requested id
+    is absent locally or its recorded scope is explicitly global."""
+    return _render_prompt_decisions_with_records(repo_path, ids)[0]
 
 
 # Structured classification of an injection, replacing the old startswith/regex scrape of
@@ -5907,9 +6145,9 @@ def _index_file_lookup(repo_path: str, index: dict, file_artifacts: list[str]) -
     replaces ran ~7.7ms p50 / ~8.6ms p95 (over the ~5ms per-prompt budget) - this index-backed
     lookup measured ~0.91ms p50 / ~0.93ms p95 at the same scale, ~8x faster.
 
-    Returns hit dicts shaped like a `decisions_for_files` hit (`decision_id`, `reason`,
-    `title`) - no `scope`/`status`/`files_matched`, since `_prompt_file_hits` never reads
-    those fields. Repo-scope only: the retrieval index only ever covers this repo's own
+    Returns hit dicts shaped like a `decisions_for_files` hit plus the indexed `scope` and
+    `guidance_fingerprint` used for exact working-set comparison. Repo-scope only: the
+    retrieval index only ever covers this repo's own
     decisions (exactly like the rest of the BM25 ladder) - `_prompt_file_hits` layers a small
     LIVE scan over the global store on top, mirroring how the global store is always a
     separate, smaller-scale fallback path everywhere else in this router too."""
@@ -5928,18 +6166,20 @@ def _index_file_lookup(repo_path: str, index: dict, file_artifacts: list[str]) -
         source_files = set(doc.get("source_files") or [])
         if guard_engine._source_anchor_hits(source_files, canon_set):
             hits.append({"decision_id": did, "reason": "source_files match",
-                        "title": doc.get("title", "")})
+                        "title": doc.get("title", ""), "scope": "personal",
+                        "guidance_fingerprint": doc.get("guidance_fingerprint")})
             continue
         for artifact in doc.get("path_artifacts") or []:
             if guard_engine._guard_artifact_matches(artifact, canon_set, canon_by_base):
                 hits.append({"decision_id": did,
                             "reason": guard_engine._guard_artifact_reason(artifact),
-                            "title": doc.get("title", "")})
+                            "title": doc.get("title", ""), "scope": "personal",
+                            "guidance_fingerprint": doc.get("guidance_fingerprint")})
                 break
     return hits
 
 
-def _prompt_file_hits(repo_path: str, prompt: str, ws: set[str],
+def _prompt_file_hits(repo_path: str, prompt: str, ws: set[str] | list[dict],
                        index: dict | None) -> tuple[list[str], list[tuple[str, str]], list[str]]:
     """Path/module-shaped files named IN THE PROMPT itself (issue #187 - "fix the pairing bug
     in contexer/guard_engine.py"), routed deterministically through the same anchor/content-
@@ -5969,8 +6209,8 @@ def _prompt_file_hits(repo_path: str, prompt: str, ws: set[str],
     `decisions_for_files` scan against both stores, exactly as before this fast path existed -
     the established fallback pattern (never rebuild the index inline to serve one prompt).
 
-    Both tiers: working-set ids dropped up front (never re-surface something already injected
-    this session), ordered by hit order, deduped by decision id (a decision matching via BOTH
+    Both tiers: only hits whose scoped fingerprint was fully delivered this session are
+    dropped up front, ordered by hit order, deduped by decision id (a decision matching via BOTH
     a source_files anchor for one file and a content mention for another still lands in
     anchor_ids only - `source_files match` always wins the reason for that decision, same as
     `decisions_for_files`' own per-decision reason resolution). Fail-soft throughout: any
@@ -5989,9 +6229,15 @@ def _prompt_file_hits(repo_path: str, prompt: str, ws: set[str],
 
         if index is not None:
             global_entries = load_global().get("entries") or []
-            raw_hits = (_index_file_lookup(repo_path, index, file_artifacts)
-                       + guard_engine.decisions_for_files(repo_path, file_artifacts,
-                                                          decisions=global_entries))
+            global_by_id = {e.get("id"): e for e in global_entries}
+            global_hits = guard_engine.decisions_for_files(
+                repo_path, file_artifacts, decisions=global_entries)
+            for hit in global_hits:
+                hit["scope"] = "global"
+                entry = global_by_id.get(hit.get("decision_id"))
+                hit["guidance_fingerprint"] = (
+                    _guidance_fingerprint(entry) if entry is not None else None)
+            raw_hits = _index_file_lookup(repo_path, index, file_artifacts) + global_hits
         else:
             raw_hits = guard_engine.decisions_for_files(repo_path, file_artifacts)
 
@@ -6000,7 +6246,10 @@ def _prompt_file_hits(repo_path: str, prompt: str, ws: set[str],
         seen: set[str] = set()
         for hit in raw_hits:
             did = hit.get("decision_id")
-            if not did or did in ws or did in seen:
+            suppressed = (did in ws if isinstance(ws, set) else
+                          _ws_has_credit(ws, hit.get("scope", "personal"), did,
+                                         hit.get("guidance_fingerprint")))
+            if not did or suppressed or did in seen:
                 continue
             seen.add(did)
             if hit.get("reason") == "source_files match":
@@ -6054,7 +6303,7 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
     # extraction), so digit-bearing terms like k8s / oauth2 reach the ranker. Artifacts
     # stay double-weighted. The legacy `keywords`/`ordered_kws` are kept for gating and the
     # overview/global fallbacks below - only this vector changes.
-    ws = set(working_set_ids(repo_path, session_id))
+    ws = _working_set_records(repo_path, session_id)
 
     # File route (#187): a prompt naming a path/module-shaped file ("fix the pairing bug in
     # contexer/guard_engine.py") consults the anchor/content-reference lookup deterministically
@@ -6084,7 +6333,10 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
     # content ranker used by Guard stays unchanged, while a title-only subject can be found and
     # an incidental rare word in another decision cannot borrow that title's relevance.
     ranked = retrieval.prompt_rank(query_terms, index)
-    ranked = [r for r in ranked if r[0] not in ws]
+    ranked = [r for r in ranked
+              if not _ws_has_credit(ws, "personal", r[0],
+                                    (index.get("docs", {}).get(r[0]) or {}).get(
+                                        "guidance_fingerprint"))]
 
     strong: list[str] = list(anchor_ids)
     if ranked:
@@ -6123,9 +6375,10 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
                 strong.append(did)
     strong = strong[:_STRONG_CAP]
     if strong:
-        rendered = _render_prompt_decisions(repo_path, strong)
+        rendered, receipts = _render_prompt_decisions_with_records(
+            repo_path, strong, previous_records=ws)
         if rendered:
-            _ws_add(repo_path, session_id, strong)
+            _ws_record_deliveries(repo_path, session_id, receipts)
             # Suffix (not part of the pinned header prefix): the block normally avoids a
             # redundant fetch, but a lexical candidate can still be a false positive. Tell
             # the model to judge relevance and recover through Contexer before reading files.
@@ -6142,7 +6395,7 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
     if prompt_topics:
         counts: dict[str, int] = {}
         for did, doc in index.get("docs", {}).items():
-            if did in ws:
+            if _ws_has_credit(ws, "personal", did, doc.get("guidance_fingerprint")):
                 continue
             for t in set(doc.get("topics", [])) & prompt_topics:
                 counts[t] = counts.get(t, 0) + 1

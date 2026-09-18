@@ -125,7 +125,8 @@ KINDS: tuple[Kind, ...] = (
 
 
     # ── session bookkeeping: the session it belonged to is over ────────────────────────
-    Kind("working_set",      ".ws_{slug}_{session}.json",  SESSION,   "per-session working set; dedup is done"),
+    Kind("working_set",      ".ws_{slug}_{session}.json",  SESSION,   "per-session delivered-guidance identity "
+                                                                      "ledger and restoration history"),
     Kind("retrieval_log",    ".retrieval_{slug}.jsonl",    SESSION,   "per-repo retrieval log, tail-capped"),
     Kind("reconcile_log",    ".reconcile_{slug}.jsonl",    SESSION,   "per-repo reconciliation receipt log, tail-capped"),
     Kind("bootstrap_offered", ".bootstrap_offered_{slug}", SESSION,   "once-per-session offer flag"),

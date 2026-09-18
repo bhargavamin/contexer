@@ -1,0 +1,468 @@
+"""Contract 03: revision/effective-view-aware prompt delivery bookkeeping."""
+
+import copy
+import json
+
+import pytest
+
+from contexer import conflicts, review, revisions, store
+
+
+SESSION = "contract-03"
+
+
+def _approved(repo: str, content: str, *, title: str = "", source_files=None) -> str:
+    stored, did = store.update_decision(
+        repo, content, SESSION, "architecture", created_by="human", title=title,
+        source_files=source_files,
+    )
+    assert stored and did
+    return did
+
+
+def _approved_direct(repo: str, content: str, *, title: str = "") -> str:
+    """Seed distinct fixtures without exercising capture's novelty consolidation."""
+    data = store.load(repo)
+    entry = store._new_decision_entry(
+        content, SESSION, "architecture", created_by="human", title=title)
+    data["entries"].append(entry)
+    store.save(repo, data)
+    return entry["id"]
+
+
+def _revise(repo: str, did: str, content: str, *, title: str = "") -> str:
+    data = store.load(repo)
+    entry = store.entry_by_id(data["entries"], did)
+    revision = revisions.append_revision(
+        entry, content, source="human", approved_at="2026-09-18T12:00:00+00:00",
+        title=title,
+    )
+    entry["status"] = "approved"
+    entry["approved_by"] = "human"
+    store.save(repo, data)
+    return revision["revision_id"]
+
+
+def _prompt(repo: str, sid: str = "same-session") -> str:
+    return store.get_context_for_prompt(
+        repo, "Why use checkout reservation leases for inventory?", sid)
+
+
+class TestGuidanceFingerprint:
+    def test_semantic_identity_table(self, tmp_repo):
+        did = _approved(
+            tmp_repo, "Use checkout reservation leases for inventory consistency",
+            title="Checkout reservation leases",
+        )
+        data = store.load(tmp_repo)
+        entry = store.entry_by_id(data["entries"], did)
+        original = store._guidance_fingerprint(entry, data)
+
+        for field, value in [
+            ("occurrence_count", 99),
+            ("timestamp", "2099-01-01T00:00:00+00:00"),
+            ("updated_at", "2099-01-02T00:00:00+00:00"),
+            ("session_ids", ["other"]),
+        ]:
+            changed = copy.deepcopy(entry)
+            changed[field] = value
+            assert store._guidance_fingerprint(changed, data) == original
+
+        for mutate in [
+            lambda e: e.__setitem__("title", "Different checkout policy"),
+            lambda e: e.__setitem__("status", "suggested"),
+            lambda e: e.__setitem__("approved_by", "different-authority"),
+            lambda e: e.__setitem__("subtype", "constraint"),
+        ]:
+            changed = copy.deepcopy(entry)
+            mutate(changed)
+            assert store._guidance_fingerprint(changed, data) != original
+
+    def test_effective_conflict_view_changes_but_hidden_title_only_proposal_does_not(self,
+                                                                                     tmp_repo):
+        did = _approved(tmp_repo, "Use checkout leases for inventory consistency")
+        data = store.load(tmp_repo)
+        entry = store.entry_by_id(data["entries"], did)
+        original = store._guidance_fingerprint(entry, data)
+
+        hidden = copy.deepcopy(entry)
+        hidden["proposed_revision"] = {
+            "content": revisions.current_content(hidden), "title": "Hidden proposed title",
+            "created_at": "2026-09-18T00:00:00+00:00", "source": "human",
+        }
+        assert store._guidance_fingerprint(hidden, data) == original
+
+        visible = copy.deepcopy(entry)
+        visible["proposed_revision"] = {
+            "content": "Use 45-second checkout leases for inventory consistency",
+            "title": "45-second checkout leases",
+            "created_at": "2026-09-18T00:00:00+00:00", "source": "human",
+        }
+        assert store._guidance_fingerprint(visible, data) != original
+
+    def test_proposal_edits_memo_choices_and_removal_change_effective_identity(self, tmp_repo):
+        did = _approved(tmp_repo, "Use 30-second checkout leases for inventory consistency")
+        data = store.load(tmp_repo)
+        entry = store.entry_by_id(data["entries"], did)
+        fingerprints = [store._guidance_fingerprint(entry, data)]
+        entry["proposed_revision"] = review.build_proposal(
+            entry, "Use 45-second checkout leases for inventory consistency",
+            "architecture", SESSION, "2026-09-18T10:00:00+00:00", source="human")
+        fingerprints.append(store._guidance_fingerprint(entry, data))
+        entry["proposed_revision"]["content"] = \
+            "Use 60-second checkout leases for inventory consistency"
+        fingerprints.append(store._guidance_fingerprint(entry, data))
+        pair = conflicts._conflict_pair_key(entry)
+        entry["conflict_memo"] = {
+            "pair": pair, "choice": "standing", "created_at": "2026-09-18T11:00:00+00:00",
+        }
+        fingerprints.append(store._guidance_fingerprint(entry, data))
+        entry["conflict_memo"]["choice"] = "update"
+        fingerprints.append(store._guidance_fingerprint(entry, data))
+        entry.pop("proposed_revision")
+        fingerprints.append(store._guidance_fingerprint(entry, data))
+        assert all(left != right for left, right in zip(fingerprints, fingerprints[1:]))
+        assert fingerprints[-1] == fingerprints[0]  # ledger keeps only the latest row
+
+    def test_stable_bootstrap_caveat_participates_but_transient_check_failure_does_not(
+        self, tmp_repo
+    ):
+        entry = store.build_inferred_entry(
+            "Observed checkout queue topology", SESSION, "architecture", "suggested")
+        data = {"repo_path": tmp_repo, "entries": [entry]}
+        entry["bootstrap"] = {
+            "kind": "observed", "assessment": "supported", "scope": "checkout queue",
+            "sources": [],
+        }
+        supported = store._guidance_fingerprint(entry, data)
+        entry["bootstrap_check_unavailable"] = "temporary filesystem denial"
+        assert store._guidance_fingerprint(entry, data) == supported
+        entry["bootstrap"]["assessment"] = "contradicted"
+        entry["bootstrap"]["question"] = "Which checkout queue is intended?"
+        assert store._guidance_fingerprint(entry, data) != supported
+
+    def test_raw_legacy_migration_uuid_is_not_identity_and_never_serializes_provenance(
+        self, tmp_repo
+    ):
+        raw = {
+            "repo_path": tmp_repo,
+            "entries": [{
+                "id": "legacy-one", "type": "decision", "subtype": "architecture",
+                "content": "Use checkout reservation leases for inventory consistency",
+                "title": "Checkout reservation leases", "status": "approved",
+                "created_by": "human", "timestamp": "2026-01-01T00:00:00+00:00",
+                "revision": 1,
+            }],
+        }
+        path = store._store_path(tmp_repo)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        first = store.load(tmp_repo)
+        second = store.load(tmp_repo)
+        assert first["entries"][0]["current_revision_id"] != second["entries"][0][
+            "current_revision_id"]
+        assert store._guidance_fingerprint(first["entries"][0], first) == \
+            store._guidance_fingerprint(second["entries"][0], second)
+
+        assert store.ensure_retrieval_index(tmp_repo)
+        sid = "raw-legacy"
+        prompt = "Why use checkout reservation leases for inventory?"
+        assert "checkout reservation" in store.get_context_for_prompt(tmp_repo, prompt, sid).lower()
+        assert store.get_context_for_prompt(tmp_repo, prompt, sid) == ""
+
+        store.save(tmp_repo, first)
+        serialized = json.loads(path.read_text(encoding="utf-8"))
+        assert store._GUIDANCE_PROVENANCE_KEY not in serialized
+        persisted = store.load(tmp_repo)
+        assert store._guidance_fingerprint(persisted["entries"][0], persisted) == \
+            store._read_retrieval_index(tmp_repo)["docs"]["legacy-one"]["guidance_fingerprint"]
+        assert "Updated context for this decision" in \
+            store.get_context_for_prompt(tmp_repo, prompt, sid)
+        assert store.get_context_for_prompt(tmp_repo, prompt, sid) == ""
+
+    def test_failed_legacy_save_does_not_promote_temporary_revision_identity(
+        self, tmp_repo, monkeypatch
+    ):
+        raw = {"repo_path": tmp_repo, "entries": [{
+            "id": "legacy-failed", "type": "decision", "subtype": "architecture",
+            "content": "Use checkout leases", "status": "approved", "created_by": "human",
+            "timestamp": "2026-01-01T00:00:00+00:00", "revision": 1,
+        }]}
+        path = store._store_path(tmp_repo)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        data = store.load(tmp_repo)
+        entry = data["entries"][0]
+        before = store._guidance_fingerprint(entry, data)
+
+        monkeypatch.setattr(store, "atomic_write", lambda *_args: (_ for _ in ()).throw(
+            OSError("denied")))
+        with pytest.raises(OSError, match="denied"):
+            store.save(tmp_repo, data)
+        assert store._guidance_fingerprint(entry, data) == before
+        assert store._revision_identity_is_persisted(data, entry) is False
+
+
+class TestVersionAwarePromptDelivery:
+    def test_a_then_b_same_session_then_b_suppressed(self, tmp_repo):
+        did = _approved(
+            tmp_repo, "Use 30-second checkout reservation leases for inventory",
+            title="Checkout reservation leases",
+        )
+        first = _prompt(tmp_repo)
+        assert "30-second" in first
+        _revise(
+            tmp_repo, did, "Use 45-second checkout reservation leases for inventory",
+            title="Checkout reservation leases",
+        )
+        second = _prompt(tmp_repo)
+        assert "Updated context for this decision" in second
+        assert "45-second" in second
+        assert _prompt(tmp_repo) == ""
+
+    def test_a_to_b_to_a_is_a_new_delivery(self, tmp_repo):
+        did = _approved(tmp_repo, "Use 30-second checkout reservation leases for inventory")
+        assert "30-second" in _prompt(tmp_repo)
+        _revise(tmp_repo, did, "Use 45-second checkout reservation leases for inventory")
+        assert "45-second" in _prompt(tmp_repo)
+        _revise(tmp_repo, did, "Use 30-second checkout reservation leases for inventory")
+        replay = _prompt(tmp_repo)
+        assert "Updated context for this decision" in replay and "30-second" in replay
+
+    def test_file_anchor_replays_current_revision(self, tmp_repo):
+        did = _approved(
+            tmp_repo, "checkout/reservations.py uses 30-second inventory leases",
+            source_files=["checkout/reservations.py"],
+        )
+        sid = "anchor-session"
+        prompt = "fix checkout/reservations.py lease handling"
+        assert "30-second" in store.get_context_for_prompt(tmp_repo, prompt, sid)
+        _revise(tmp_repo, did, "checkout/reservations.py uses 45-second inventory leases")
+        replay = store.get_context_for_prompt(tmp_repo, prompt, sid)
+        assert "Updated context for this decision" in replay and "45-second" in replay
+
+    def test_pointer_and_cap_excluded_candidate_receive_no_credit(self, tmp_repo):
+        _approved(tmp_repo, "We use PostgreSQL as the primary datastore")
+        sid = "pointer-session"
+        pointer = store.get_context_for_prompt(tmp_repo, "why the schema design here?", sid)
+        assert pointer.startswith("[Contexer] Related stored decisions:")
+        assert store._working_set_records(tmp_repo, sid) == []
+
+        ids = [_approved_direct(
+            tmp_repo, f"Caching option {i} controls checkout latency budget behavior",
+            title=f"Checkout cache option {i}",
+        ) for i in range(4)]
+        cap_sid = "cap-session"
+        store.get_context_for_prompt(
+            tmp_repo, "why does caching checkout latency budget behavior matter?", cap_sid)
+        credited = {row["id"] for row in store._working_set_records(tmp_repo, cap_sid)}
+        assert len(credited) == store._STRONG_CAP
+        assert any(did not in credited for did in ids)
+
+    def test_selected_but_ignored_before_render_gets_no_credit(self, tmp_repo, monkeypatch):
+        did = _approved(tmp_repo, "Use checkout reservation leases for inventory")
+        original = store._render_prompt_decisions_with_records
+
+        def disappear(repo_path, ids, **kwargs):
+            data = store.load(repo_path)
+            store.entry_by_id(data["entries"], did)["status"] = "ignored"
+            store.atomic_write(store._store_path(repo_path), json.dumps({
+                k: v for k, v in data.items() if k != store._GUIDANCE_PROVENANCE_KEY
+            }))
+            return original(repo_path, ids, **kwargs)
+
+        monkeypatch.setattr(store, "_render_prompt_decisions_with_records", disappear)
+        assert _prompt(tmp_repo, "render-race") == ""
+        assert store._working_set_records(tmp_repo, "render-race") == []
+
+    def test_store_update_between_render_and_record_does_not_credit_new_view(
+        self, tmp_repo, monkeypatch
+    ):
+        did = _approved(tmp_repo, "Use 30-second checkout reservation leases for inventory")
+        original = store._ws_record_deliveries
+        changed = False
+
+        def update_then_record(repo_path, session_id, delivered):
+            nonlocal changed
+            if not changed:
+                changed = True
+                _revise(repo_path, did, "Use 45-second checkout reservation leases for inventory")
+            return original(repo_path, session_id, delivered)
+
+        monkeypatch.setattr(store, "_ws_record_deliveries", update_then_record)
+        assert "30-second" in _prompt(tmp_repo, "snapshot-race")
+        replay = _prompt(tmp_repo, "snapshot-race")
+        assert "45-second" in replay
+
+
+class TestWorkingSetV2:
+    def test_legacy_and_future_rows_are_hints_without_suppression_credit(self, tmp_repo):
+        did = _approved(tmp_repo, "Use checkout reservation leases for inventory")
+        for sid, payload in [
+            ("legacy", {"injected": [did], "ts": 0}),
+            ("future", {"v": 999, "injected": [did], "records": [{
+                "scope": "personal", "id": did, "fingerprint": "invented",
+            }]}),
+        ]:
+            path = store._ws_path(tmp_repo, sid)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            assert store.working_set_ids(tmp_repo, sid) == [did]
+            assert store._working_set_records(tmp_repo, sid) == []
+            assert "checkout reservation" in _prompt(tmp_repo, sid).lower()
+
+    @pytest.mark.parametrize("payload", [
+        "not-json",
+        json.dumps([]),
+        json.dumps({"v": 2, "injected": "wrong", "records": "wrong"}),
+        json.dumps({"v": 2, "injected": [], "records": [{
+            "scope": "alien", "id": "x", "fingerprint": "y",
+        }]}),
+    ])
+    def test_malformed_rows_never_suppress(self, tmp_repo, payload):
+        path = store._ws_path(tmp_repo, "malformed")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(payload, encoding="utf-8")
+        assert store._working_set_records(tmp_repo, "malformed") == []
+
+    def test_empty_session_creates_no_file(self, tmp_repo):
+        did = _approved(tmp_repo, "Use checkout reservation leases for inventory")
+        store._ws_record_deliveries(tmp_repo, "", [{
+            "scope": "personal", "id": did, "fingerprint": "guidance-v1:x",
+        }])
+        assert not store._ws_path(tmp_repo, "").exists()
+
+    def test_scoped_mru_rows_are_count_and_byte_bounded(self, tmp_repo):
+        sid = "bounded"
+        deliveries = [{
+            "scope": "personal", "id": f"decision-{i:04d}",
+            "fingerprint": "guidance-v1:" + (f"{i:064x}" * 4)[:240],
+        } for i in range(store.MAX_ENTRIES + 25)]
+        assert store._ws_record_deliveries(tmp_repo, sid, deliveries)
+        path = store._ws_path(tmp_repo, sid)
+        rows = store._working_set_records(tmp_repo, sid)
+        assert len(rows) <= store.MAX_ENTRIES
+        assert path.stat().st_size <= store._WORKING_SET_MAX_BYTES
+        assert rows[-1]["id"] == deliveries[-1]["id"]
+
+        # The same opaque id in two stores is two identities, never one dedup row.
+        store._ws_record_deliveries(tmp_repo, sid, [{
+            "scope": "global", "id": rows[-1]["id"],
+            "fingerprint": "guidance-v1:global",
+        }])
+        scoped = {(row["scope"], row["id"]) for row in store._working_set_records(tmp_repo, sid)}
+        assert ("personal", rows[-1]["id"]) in scoped
+        assert ("global", rows[-1]["id"]) in scoped
+
+    def test_oversized_sidecar_and_fields_fail_toward_replay(self, tmp_repo):
+        sid = "oversized"
+        path = store._ws_path(tmp_repo, sid)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(" " * (store._WORKING_SET_MAX_BYTES + 1), encoding="utf-8")
+        assert store._read_working_set(tmp_repo, sid) == {"injected": [], "records": []}
+        assert store._ws_record_deliveries(tmp_repo, "oversized-field", [{
+            "scope": "personal", "id": "x" * (store._WORKING_SET_FIELD_MAX + 1),
+            "fingerprint": "guidance-v1:valid",
+        }])
+        assert store._working_set_records(tmp_repo, "oversized-field") == []
+
+
+class TestCompactionDeliveryBoundary:
+    def test_only_ten_replayed_rows_keep_credit_and_omitted_can_replay(self, tmp_repo):
+        subjects = [
+            "alpha beacon", "bravo compass", "charlie delta", "echo forest",
+            "golf harbor", "india jungle", "kilo lantern", "mango nectar",
+            "orbit prairie", "quartz river", "silver tundra", "violet willow",
+        ]
+        ids = [_approved_direct(
+            tmp_repo, f"Use checkout reservation lease {subject} for inventory consistency",
+            title=f"Checkout lease {subject}",
+        ) for subject in subjects]
+        data = store.load(tmp_repo)
+        by_id = {e["id"]: e for e in data["entries"]}
+        receipts = [{
+            "scope": "personal", "id": did,
+            "fingerprint": store._guidance_fingerprint(by_id[did], data),
+        } for did in ids]
+        sid = "compact-cap"
+        assert store._ws_record_deliveries(tmp_repo, sid, receipts)
+        replay = store._rehydrate_working_set(tmp_repo, sid)
+        assert replay.count("\n- [") <= store._REHYDRATE_CAP
+        rows = store._working_set_records(tmp_repo, sid)
+        credited = {r["id"] for r in rows if r["fingerprint"]}
+        assert credited == set(ids[-store._REHYDRATE_CAP:])
+        assert ids[0] not in credited
+
+    def test_global_only_history_survives_both_empty_store_offer_branches(self, tmp_repo):
+        _, gid = store.update_global_decision(
+            "Global checkout reservation guidance", SESSION, "constraint", created_by="human")
+        rendered, receipts = store._render_prompt_decisions_with_records(tmp_repo, [gid])
+        assert "Global checkout" in rendered and receipts[0]["scope"] == "global"
+
+        for offered in (False, True):
+            sid = f"global-only-{offered}"
+            store._ws_record_deliveries(tmp_repo, sid, receipts)
+            if offered:
+                store._arm_offer(tmp_repo)
+            else:
+                store._offer_flag(tmp_repo).unlink(missing_ok=True)
+            payload = store.post_compact_payload(tmp_repo, sid)
+            assert "Global checkout reservation guidance" in payload["context"]
+            assert store._ws_has_credit(
+                store._working_set_records(tmp_repo, sid), "global", gid,
+                receipts[0]["fingerprint"],
+            )
+
+        claude_sid = "global-only-claude"
+        store._ws_record_deliveries(tmp_repo, claude_sid, receipts)
+        claude_payload = store._local_session_start_payload(
+            tmp_repo, "compact", claude_sid, "claude")
+        assert "Global checkout reservation guidance" in claude_payload["context"]
+
+    def test_missing_local_is_not_restored_and_old_credit_is_cleared(self, tmp_repo):
+        did = _approved(tmp_repo, "Use checkout reservation leases for inventory")
+        data = store.load(tmp_repo)
+        entry = store.entry_by_id(data["entries"], did)
+        fingerprint = store._guidance_fingerprint(entry, data)
+        sid = "deleted-before-compact"
+        store._ws_record_deliveries(tmp_repo, sid, [{
+            "scope": "personal", "id": did, "fingerprint": fingerprint,
+        }])
+        data["entries"] = []
+        store.save(tmp_repo, data)
+        payload = store.post_compact_payload(tmp_repo, sid)
+        assert "Use checkout reservation" not in payload["context"]
+        row = store._working_set_records(tmp_repo, sid)[0]
+        assert row["id"] == did and row["fingerprint"] is None
+
+    def test_ordinary_resume_does_not_reset_credit(self, tmp_repo):
+        did = _approved(tmp_repo, "Use checkout reservation leases for inventory")
+        data = store.load(tmp_repo)
+        entry = store.entry_by_id(data["entries"], did)
+        receipt = {"scope": "personal", "id": did,
+                   "fingerprint": store._guidance_fingerprint(entry, data)}
+        sid = "resume-keeps-credit"
+        store._ws_record_deliveries(tmp_repo, sid, [receipt])
+        store._local_session_start_payload(tmp_repo, "resume", sid, "claude")
+        assert store._working_set_records(tmp_repo, sid) == [receipt]
+
+    def test_denied_compaction_write_returns_replay_and_discloses_stale_credit_behavior(
+        self, tmp_repo, monkeypatch
+    ):
+        did = _approved(tmp_repo, "Use checkout reservation leases for inventory")
+        rendered, receipts = store._render_prompt_decisions_with_records(tmp_repo, [did])
+        sid = "compact-denied"
+        store._ws_record_deliveries(tmp_repo, sid, receipts)
+        original = store.atomic_write
+
+        def deny_ws(path, text):
+            if path == store._ws_path(tmp_repo, sid):
+                raise OSError("denied")
+            return original(path, text)
+
+        monkeypatch.setattr(store, "atomic_write", deny_ws)
+        payload = store.post_compact_payload(tmp_repo, sid)
+        assert rendered in payload["context"]
+        # Explicit residual limitation: the old row may survive when reset/receipt writes fail.
+        assert store._working_set_records(tmp_repo, sid) == receipts

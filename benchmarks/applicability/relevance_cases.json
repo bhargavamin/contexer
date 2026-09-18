@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "fixture_version": "1.0.4",
+  "fixture_version": "1.0.5",
   "reference_revision": "5676247f358dc6a0c099d8eb8eb94623bad04bb0",
   "cases": [
     {
@@ -132,6 +132,12 @@
           "session_id": "session-r02"
         },
         {
+          "action_id": "revision-b-repeat-same-session",
+          "kind": "prompt",
+          "prompt": "Why use checkout reservations?",
+          "session_id": "session-r02"
+        },
+        {
           "action_id": "revision-b-fresh-session",
           "kind": "prompt",
           "prompt": "Why use checkout reservations?",
@@ -161,9 +167,15 @@
           "action_id": "revision-b-same-session",
           "decision_id": "r02-revision",
           "revision_id": "00000000-0000-0000-0000-00000000002b",
-          "tier": "prompt_full",
-          "known_gap": "revision-id-working-set-dedup",
-          "owner": "revision-dedup contract"
+          "tier": "prompt_full"
+        },
+        {
+          "key": "same-session-suppresses-unchanged-current-revision",
+          "kind": "omits_decision",
+          "action_id": "revision-b-repeat-same-session",
+          "decision_id": "r02-revision",
+          "revision_id": "00000000-0000-0000-0000-00000000002b",
+          "tier": "prompt_full"
         },
         {
           "key": "fresh-session-receives-current-revision",

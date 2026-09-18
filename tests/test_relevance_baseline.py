@@ -57,7 +57,7 @@ def test_report_schema_and_version_provenance(report):
     assert len(report["code_revision"]) == 40
     assert len(report["fixture_sha256"]) == 64
     assert len(report["runner_sha256"]) == 64
-    assert report["fixture_version"] == "1.0.4"
+    assert report["fixture_version"] == "1.0.5"
     assert report["runner_version"] == "2"
 
 
@@ -65,7 +65,6 @@ def test_only_registered_gaps_remain(report):
     assert report["summary"]["unexpected_failures"] == []
     assert {item["gap"] for item in report["summary"]["known_gaps"]} == {
         "ordinary-task-trigger-gap",
-        "revision-id-working-set-dedup",
     }
 
 
@@ -76,11 +75,6 @@ def test_only_registered_gaps_remain(report):
             "R01", "imperative-supplies-payment-decision",
             marks=pytest.mark.xfail(strict=True, raises=AssertionError,
                                     reason="ordinary-task-trigger-gap; later experiment"),
-        ),
-        pytest.param(
-            "R02", "same-session-receives-current-revision",
-            marks=pytest.mark.xfail(strict=True, raises=AssertionError,
-                                    reason="revision-id-working-set-dedup; revision contract"),
         ),
     ],
 )
@@ -229,7 +223,7 @@ def test_metrics_count_delivery_per_request_not_candidates(report):
     assert rows[("R17-cap-and-candidate-coverage", "prompt")]["denominator"] == 5
     assert rows[("R01-imperative-vs-rationale", "imperative")]["numerator"] == 0
     assert rows[("R01-imperative-vs-rationale", "rationale")]["numerator"] == 1
-    assert rows[("R02-revision-working-set", "revision-b-same-session")]["numerator"] == 0
+    assert rows[("R02-revision-working-set", "revision-b-same-session")]["numerator"] == 1
     assert rows[("R02-revision-working-set", "revision-b-fresh-session")]["numerator"] == 1
 
 
@@ -325,7 +319,7 @@ def test_main_writes_only_when_output_is_explicit(tmp_path, capsys):
     before = set(tmp_path.iterdir())
     assert baseline.main(["--format", "text"]) == 0
     assert set(tmp_path.iterdir()) == before
-    assert "known gaps: 2" in capsys.readouterr().out
+    assert "known gaps: 1" in capsys.readouterr().out
     output = tmp_path / "report.json"
     assert baseline.main(["--format", "json", "--output", str(output)]) == 0
     assert json.loads(output.read_text(encoding="utf-8"))["schema_version"] == 1
