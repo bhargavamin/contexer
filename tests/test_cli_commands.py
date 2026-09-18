@@ -1583,6 +1583,23 @@ class TestGuardAnchors:
                       if e["id"] == entry["id"])
         assert loaded["source_files"] == ["auth/"]
 
+    def test_edit_rejects_regular_file_with_trailing_slash(
+            self, guard_repo, monkeypatch, capsys):
+        from contexer import store
+        _gwrite(guard_repo, "auth/jwt.py", "token = 0\n")
+        entry = _gseed(guard_repo, "See auth/jwt.py for the JWT auth decision")
+
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        _input_sequence(monkeypatch, "E", "auth/jwt.py/")
+        _run_main("guard", "anchors")
+
+        out = capsys.readouterr().out
+        assert "Not found in working tree, dropped: auth/jwt.py/" in out
+        assert "No valid files given, skipping." in out
+        loaded = next(e for e in store.load(str(guard_repo))["entries"]
+                      if e["id"] == entry["id"])
+        assert not loaded.get("source_files")
+
     def test_edit_rejects_paths_escaping_the_repo(self, guard_repo, monkeypatch, capsys,
                                                     tmp_path):
         """The [E]dit validation must agree with the write layer (_anchor_sources):

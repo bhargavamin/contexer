@@ -295,11 +295,15 @@ def verify_anchors(repo_path: str, force: bool = False) -> dict:
                     missing: list[str] = []
                     renamed = False
                     for f in files:
-                        if (repo_root / f).exists():
-                            surviving.append(f)
-                            continue
+                        target_path = repo_root / f
                         if f.endswith("/"):
-                            missing.append(f)
+                            if target_path.is_dir():
+                                surviving.append(f)
+                            else:
+                                missing.append(f)
+                            continue
+                        if target_path.exists():
+                            surviving.append(f)
                             continue
                         target = _confident_rename(repo_path, f, repo_root, _call)
                         if target is not None:

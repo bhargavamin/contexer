@@ -277,18 +277,12 @@ def _artifact_path_match(artifact: str, staged: str) -> bool:
 
 def _source_anchor_matches(anchor: str, relpath: str) -> bool:
     """Whether one canonical source anchor governs one canonical file path."""
-    return bool(anchor and relpath and (
-        relpath.startswith(anchor) if anchor.endswith("/") else relpath == anchor))
+    return policy.source_anchor_matches(anchor, relpath)
 
 
 def _source_anchor_hits(anchors, relpaths) -> set[str]:
     """Canonical queried paths governed by any exact-file or directory-prefix anchor."""
-    exact = {a for a in anchors
-             if isinstance(a, str) and a and not a.endswith("/")}
-    prefixes = tuple(a for a in anchors
-                     if isinstance(a, str) and a and a.endswith("/"))
-    return {p for p in relpaths if isinstance(p, str)
-            and (p in exact or (prefixes and p.startswith(prefixes)))}
+    return policy.source_anchor_hits(anchors, relpaths)
 
 
 # ── Commit-time guard: Tier-1 advisory engine (Task 2) — pairing, throttle, ──

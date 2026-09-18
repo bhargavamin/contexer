@@ -2454,7 +2454,8 @@ def _prompt_edited_paths(repo: str) -> list[str] | None:
     for path in typed:
         resolved = guard_engine._guard_anchor_relpath(repo, path)
         target = Path(repo) / resolved
-        if guard_engine._escapes_repo(resolved) or not (target.is_file() or target.is_dir()):
+        valid_target = target.is_dir() if resolved.endswith("/") else target.is_file()
+        if guard_engine._escapes_repo(resolved) or not valid_target:
             invalid.append(path)
         else:
             valid.append(resolved)
