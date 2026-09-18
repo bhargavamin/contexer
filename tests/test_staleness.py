@@ -372,6 +372,8 @@ def test_share_projection_carries_source_files_but_never_anchor_commit(repo):
     assert entry["source_files"] and entry["anchor_commit"]
     projected = store._share_projection(entry, redact_on=False)
     assert projected["source_files"] == entry["source_files"]
+    assert projected["session_id"] == "s1"
+    assert "session_ids" not in projected
     assert "anchor_commit" not in projected
 
 
