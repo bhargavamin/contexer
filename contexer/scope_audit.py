@@ -42,9 +42,18 @@ _MAX_ENTRIES_SHOWN = 10       # per store, per session — every human surface h
 
 def _text(value: object) -> str:
     """A string, whatever the store actually held. Entries are read RAW here — never through
-    `load` — so a field can be a JSON null, a number, or a list, and every one of those
+    `load` - so a field can be a JSON null, a number, or a list, and every one of those
     reaches a sort key or a slice further down."""
     return value if isinstance(value, str) else ""
+
+
+# Session ids that are LITERALS rather than sessions, so sharing one across two repos says
+# nothing about where a writer was aiming - the same reasoning that excludes memory imports
+# below (whose own sentinel stays with `_is_memory_import`, its owner). `unknown` is what
+# `evidence.emit_hook_event` writes when the host supplied no session id; `reconcile` is what
+# `reconcile.py` stamps on a decision whose evidence named none. Both are shared by every repo
+# that has one, so counting them would flag every such pair forever.
+_SENTINEL_SESSIONS = frozenset({"unknown", "reconcile"})
 
 
 def _is_memory_import(entry: dict) -> bool:
@@ -90,12 +99,12 @@ def _sessions_in(path: Path) -> tuple[str, dict[str, list[dict]]]:
         # audit on one malformed entry. A number is hashable and would survive that far only
         # to break the slicing in format_audit, so both are coerced away at the same point.
         sid = _text(e.get("session_id"))
-        if not sid or _is_memory_import(e):
+        if not sid or sid in _SENTINEL_SESSIONS or _is_memory_import(e):
             continue
         # Per-entry guard, not just around the parse: these entries are RAW json, never run
         # through load's _migrate_entries, so revision-model helpers can meet shapes they
         # were never handed in a live store (`{"revisions": ["oops"]}` raises inside
-        # revisions.current_content). A malformed entry must cost its own title, not the whole audit —
+        # revisions.current_content). A malformed entry must cost its own title, not the whole audit -
         # `_run_guarded` would otherwise surface a traceback from a read-only report.
         try:
             title = e.get("title") or revisions.derive_title(revisions.current_content(e))
@@ -128,14 +137,14 @@ def _repo_identity(repo: str, path: Path) -> str:
     string are one repo, not two.
 
     Needed because a store file is not the unit of identity. A linked git worktree shares the
-    main worktree's store via `_canonical_store_key`, but a PRE-FIX stray (written before that
+    main worktree's store via `canonical_store_key`, but a PRE-FIX stray (written before that
     canonicalization, in a repo nobody has reopened since — `migrate_worktree_strays` only
     folds it in at that repo's next session start) still sits beside the canonical file under
     its own slug. Counting both would report a session as split across two stores when every
     decision is correctly scoped, and send the developer off to retire records that are fine.
 
     `realpath` on top of the canonical key is load-bearing, not belt-and-braces: the two sides
-    resolve differently. A main worktree fast-paths out of `_canonical_store_key` with its
+    resolve differently. A main worktree fast-paths out of `canonical_store_key` with its
     path UNCHANGED, while a linked worktree goes through `git rev-parse --path-format=absolute`,
     which returns the fully resolved path — so on a host where the repo lives under a symlink
     (`/tmp` -> `/private/tmp` on macOS) the canonical keys differ by that prefix alone and
@@ -145,7 +154,7 @@ def _repo_identity(repo: str, path: Path) -> str:
     KNOWN LIMIT, deliberately not papered over: this can only merge a worktree that still
     EXISTS. Once the directory is removed or pruned there is no `.git` file to read and
     `git worktree list` no longer enumerates it, so nothing on disk ties the stray back to its
-    main worktree — `_canonical_store_key` returns the dead path unchanged and the stray stays
+    main worktree — `canonical_store_key` returns the dead path unchanged and the stray stays
     a separate identity. `migrate_worktree_strays` cannot fold such a stray either, for the
     same reason. Merging it would mean guessing from path shape, and worktrees can live
     anywhere. So the report labels that store as missing instead (see `format_audit`) and lets
@@ -153,7 +162,7 @@ def _repo_identity(repo: str, path: Path) -> str:
     if not repo:
         return str(path)
     try:
-        return os.path.realpath(store._canonical_store_key(repo)) or repo
+        return os.path.realpath(store.canonical_store_key(repo)) or repo
     except Exception:
         return repo
 

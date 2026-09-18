@@ -26,6 +26,13 @@ class TestClassification:
         ".guard_dismissed_x.json",        # explicit human dismissals
         ".pending_review_x",              # only a NEW pending decision re-arms it
         ".outbox.lock", ".shared.lock", ".team_auth.lock",   # dotted lock slugs
+        ".reconcile_x.lock",              # evidence consumer lock
+        ".team_share_policy_repo-1.json",
+        ".team-proposal-outbox.json", ".team-proposal-receipts.jsonl",
+        ".team-proposal-attention.json", ".team-proposal-diagnostics.jsonl",
+        ".team_share_policy_repo-1.lock", ".team-proposal-outbox.lock",
+        ".team-proposal-drainer.lock", ".team-proposal-receipts.lock",
+        ".team-proposal-attention.lock",
         "ui.json", "ui.log",             # console daemon owns these
     ])
     def test_durable_names_are_never_sweepable(self, name):
@@ -35,14 +42,14 @@ class TestClassification:
         ".ws_x_y.json", ".retrieval_x.jsonl", ".bootstrap_offered_x", ".edited_x.json",
         ".resume_mining", ".gemini_first_prompt_x",
         ".gemini_pending_capture", ".gemini_pending_reload",
-        ".team_pending_x.json",
+        ".team_pending_x.json", ".reconcile_x.jsonl",
     ])
     def test_session_bookkeeping_expires(self, name):
         assert sidecars.lifetime_for(name) == sidecars.SESSION
 
     @pytest.mark.parametrize("name", [
         ".team_x.json", ".team_seen_x_claude.json", ".insight_x", ".anchor_verify_x",
-        ".miner_verify_x", ".memory_synced_x", ".guard_advised_x.json",
+        ".miner_verify_x", ".memory_synced_x", ".guard_advised_x.json", ".spool_maintained_x",
         ".retrieval_index_x.json",        # rebuildable; the card called it so
     ])
     def test_cold_repo_caches_expire_later(self, name):
@@ -108,13 +115,26 @@ class TestClassification:
         "shared_markers":   ("share._shared_path", {}),
         "team_creds":       ("auth._creds_path", {}),
         "guard_dismissed":  ("guard_engine._guard_dismissed_path", {"slug": None}),
+        "reconcile_lock":   (None, {"slug": None}),       # reconcile builds through filename
+        "update_check":     ("updates.state_path", {}),
+        "share_policy":     ("share_policy.policy_path", {"slug": None}),
+        "proposal_outbox":  ("share_policy.proposal_outbox_path", {}),
+        "proposal_receipts": ("share_policy.proposal_receipts_path", {}),
+        "proposal_attention": ("share_policy.proposal_attention_path", {}),
+        "proposal_diagnostics": ("share_policy.proposal_diagnostics_path", {}),
+        "share_policy_lock": ("share_policy.policy_lock_path", {"slug": None}),
+        "proposal_outbox_lock": ("share_policy.proposal_outbox_lock_path", {}),
+        "proposal_drainer_lock": ("share_policy.proposal_drainer_lock_path", {}),
+        "proposal_receipts_lock": ("share_policy.proposal_receipts_lock_path", {}),
+        "proposal_attention_lock": ("share_policy.proposal_attention_lock_path", {}),
         "console_state":    (None, {}),                      # ui/daemon.py keeps its own literal
         "console_log":      (None, {}),                      # (import allowlist; see sidecars.py)
         "working_set":      (None, {"slug": None, "session": "abc"}),   # _ws_path hashes the id
         "retrieval_log":    (None, {"slug": None}),          # built inline in two places
+        "reconcile_log":    (None, {"slug": None}),          # reconcile builds through filename
         "bootstrap_offered": ("store._offer_flag", {"slug": None}),
         "edited_files":     ("store._edited_files_path", {"slug": None}),
-        "resume_mining":    (None, {}),                      # built inline at two session-start sites
+        "resume_mining":    (None, {}),                      # legacy GC-only marker
         "pending_capture":  (None, {}),                      # adapters/claude.py touches it
         "gemini_capture":   (None, {}),                      # adapters/gemini.py marker helper
         "gemini_reload":    (None, {}),
@@ -123,9 +143,10 @@ class TestClassification:
         "team_cache":       ("team_context._cache_path", {"slug": None}),
         "team_seen":        ("team_context._seen_path", {"slug": None, "consumer": "claude"}),
         "memory_synced":    (None, {"slug": None}),          # adapters/claude.py sync_memory
-        "insight":          ("store._insight_cache_path", {"slug": None}),
+        "insight":          (None, {"slug": None}),
         "anchor_verify":    ("anchors._anchor_verify_stamp_path", {"slug": None}),
         "miner_verify":     ("store._miner_verify_stamp_path", {"slug": None}),
+        "spool_maintained": ("spool._maintenance_stamp", {"slug": None}),
         "guard_advised":    ("guard_engine._guard_advised_path", {"slug": None}),
         "retrieval_index":  ("store._index_path", {"slug": None}),
     }
@@ -147,9 +168,11 @@ class TestClassification:
     def test_the_declared_name_matches_what_the_code_actually_writes(self, tmp_repo):
         """Direction two: for every kind with a builder, the builder's name equals the
         template's. This is what catches a declaration that has drifted from the code."""
-        from contexer import anchors, auth, guard_engine, share, team_context
+        from contexer import (anchors, auth, guard_engine, share, share_policy, spool,
+                              team_context, updates)
         mods = {"store": store, "share": share, "auth": auth, "anchors": anchors,
-                "guard_engine": guard_engine, "team_context": team_context}
+                "guard_engine": guard_engine, "team_context": team_context,
+                "share_policy": share_policy, "updates": updates, "spool": spool}
         slug = store.repo_slug(tmp_repo)
         checked = 0
         for kind, (producer, fields) in self.PRODUCERS.items():

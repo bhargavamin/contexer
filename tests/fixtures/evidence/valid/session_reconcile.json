@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "event_id": "0b7d1c2e-1111-4a2b-8c3d-000000000009",
+  "session_id": "sess-7c1f",
+  "repo_key": "_Users_dev_contexer",
+  "kind": "session_reconcile",
+  "occurred_at": "2026-08-24T10:00:00+00:00",
+  "source": "claude_session_end",
+  "summary": "Reconciled 4 candidates at session end",
+  "files": [],
+  "content_hash": null,
+  "attributes": {
+    "candidates": 4
+  }
+}

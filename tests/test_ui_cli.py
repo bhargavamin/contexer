@@ -10,7 +10,7 @@ import webbrowser
 
 import pytest
 
-from contexer import cli
+from contexer import cli, updates
 from contexer.ui import daemon
 
 
@@ -24,7 +24,7 @@ def ui_home(tmp_path, monkeypatch):
     monkeypatch.setattr(daemon, "STATE_PATH", tmp_path / ".contexer" / "ui.json")
     monkeypatch.setattr(daemon, "LOG_PATH", tmp_path / ".contexer" / "ui.log")
     monkeypatch.setattr(daemon, "_configured_port", lambda: daemon.DEFAULT_PORT)
-    monkeypatch.setattr(cli, "_latest_pypi_version", lambda: None)
+    monkeypatch.setattr(updates, "refresh", lambda force=False: {})
     return tmp_path
 
 
@@ -101,7 +101,7 @@ class TestUiStart:
 
     def test_spawns_a_detached_daemon_on_the_configured_port(self, spawns):
         cli.ui_cmd([])
-        assert spawns[0]["argv"] == [sys.executable, "-m", "contexer.ui.server",
+        assert spawns[0]["argv"] == [sys.executable, "-P", "-m", "contexer.ui.server",
                                     "--port", str(daemon.DEFAULT_PORT)]
         assert spawns[0]["start_new_session"] is True
 
@@ -381,17 +381,15 @@ class TestUiDispatch:
     def test_main_routes_ui_and_forwards_the_flags(self, monkeypatch):
         seen = []
         monkeypatch.setattr(cli, "ui_cmd", lambda rest: seen.append(rest))
-        monkeypatch.setattr(sys, "argv", ["contexer", "ui", "--open", "--port", "45678"])
-        cli.main()
+        cli.dispatch(["ui", "--open", "--port", "45678"])
         assert seen == [["--open", "--port", "45678"]]
 
     def test_ui_is_guarded_against_a_root_owned_home(self, monkeypatch, capsys):
         def denied(rest):
             raise PermissionError(13, "denied", str(daemon.STATE_PATH))
         monkeypatch.setattr(cli, "ui_cmd", denied)
-        monkeypatch.setattr(sys, "argv", ["contexer", "ui"])
         with pytest.raises(SystemExit) as exc:
-            cli.main()
+            cli.dispatch(["ui"])
         assert exc.value.code == 1
         assert "never needs sudo" in capsys.readouterr().err
 

@@ -5,6 +5,7 @@ from pathlib import Path
 
 
 from contexer import memory_sync, store
+from tests.conftest import redirect_store_dir
 from contexer.adapters import claude
 
 FEEDBACK = """---
@@ -265,7 +266,7 @@ class TestAdapterSync:
 
     def test_sync_memory_imports_then_skips_unchanged(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        redirect_store_dir(monkeypatch, tmp_path / ".contexer")
         repo = str(tmp_path / "repo")
         mem = tmp_path / ".claude" / "projects" / re.sub(r"[^a-zA-Z0-9]", "-", repo) / "memory"
         mem.mkdir(parents=True)
@@ -275,5 +276,5 @@ class TestAdapterSync:
 
     def test_sync_memory_noop_without_dir(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+        redirect_store_dir(monkeypatch, tmp_path / ".contexer")
         assert claude.sync_memory(str(tmp_path / "repo")) == 0

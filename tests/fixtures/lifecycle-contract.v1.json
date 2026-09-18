@@ -1,0 +1,447 @@
+{
+  "$comment": "Canonical Contexer Teams decision-lifecycle V1 contract fixtures. Generated in the contexer-teams worktree and copied BYTE-IDENTICALLY into the Contexer client (tests/fixtures/). Both repositories assert on these bytes so the wire contract has one definition, not two hand-written interpretations. Wire spellings are snake_case on purpose: they are the exact OSS serializer shape (remote.bound_lifecycle).",
+  "contractVersion": 1,
+  "bounds": {
+    "maxEvents": 20,
+    "maxIdLength": 200,
+    "maxReasonLength": 300
+  },
+  "kinds": [
+    "retired",
+    "restored",
+    "superseded"
+  ],
+  "actors": [
+    "human",
+    "ai",
+    "scan",
+    "plan",
+    "bootstrap",
+    "memory"
+  ],
+  "capabilities": {
+    "full": {
+      "version": 1,
+      "revisions": true,
+      "tombstones": true,
+      "retirementReasons": true
+    },
+    "noReason": {
+      "version": 1,
+      "revisions": true,
+      "tombstones": true,
+      "retirementReasons": false
+    },
+    "revisionOnly": {
+      "version": 1,
+      "revisions": true,
+      "tombstones": false,
+      "retirementReasons": true
+    },
+    "tombstoneOnly": {
+      "version": 1,
+      "revisions": false,
+      "tombstones": true,
+      "retirementReasons": true
+    },
+    "absent": null
+  },
+  "events": {
+    "full": {
+      "event_id": "ev-1",
+      "kind": "retired",
+      "occurred_at": "2026-08-01T00:00:00+00:00",
+      "actor": "human",
+      "reason": "superseded by the new queue design",
+      "revision_id": "rev-3",
+      "replacement_decision_id": null
+    },
+    "minimal": {
+      "kind": "restored"
+    },
+    "superseded": {
+      "event_id": "ev-super",
+      "kind": "superseded",
+      "occurred_at": "2026-08-01T00:00:00+00:00",
+      "actor": "human",
+      "reason": "replaced by the queue-ownership rule",
+      "revision_id": "rev-3",
+      "replacement_decision_id": "dec-2"
+    }
+  },
+  "payloads": {
+    "singularValid": {
+      "type": "constraint",
+      "content": "never commit directly to main",
+      "repo": "github.com/a/b",
+      "decisionId": "dec-1",
+      "revision_id": "rev-3",
+      "lifecycle": [
+        {
+          "event_id": "ev-1",
+          "kind": "retired",
+          "occurred_at": "2026-08-01T00:00:00+00:00",
+          "actor": "human",
+          "reason": "superseded by the new queue design",
+          "revision_id": "rev-3",
+          "replacement_decision_id": null
+        }
+      ]
+    },
+    "batchValid": {
+      "decisions": [
+        {
+          "type": "constraint",
+          "content": "never commit directly to main",
+          "repo": "github.com/a/b",
+          "decisionId": "dec-1",
+          "revision_id": "rev-3",
+          "lifecycle": [
+            {
+              "event_id": "ev-1",
+              "kind": "retired",
+              "occurred_at": "2026-08-01T00:00:00+00:00",
+              "actor": "human",
+              "reason": "superseded by the new queue design",
+              "revision_id": "rev-3",
+              "replacement_decision_id": null
+            }
+          ]
+        },
+        {
+          "type": "constraint",
+          "content": "always run the migration in a transaction",
+          "repo": "github.com/a/b",
+          "decisionId": "dec-2",
+          "revision_id": "rev-9",
+          "lifecycle": [
+            {
+              "event_id": "ev-2",
+              "kind": "superseded",
+              "occurred_at": "2026-08-01T00:00:00+00:00",
+              "actor": "human",
+              "reason": "folded into the deploy checklist",
+              "revision_id": "rev-9",
+              "replacement_decision_id": "dec-3"
+            }
+          ]
+        }
+      ]
+    },
+    "legacy": {
+      "type": "constraint",
+      "content": "never commit directly to main",
+      "repo": "github.com/a/b",
+      "decisionId": "dec-1"
+    }
+  },
+  "invalid": {
+    "kind": {
+      "event_id": "ev-1",
+      "kind": "exfiltrated",
+      "occurred_at": "2026-08-01T00:00:00+00:00",
+      "actor": "human",
+      "reason": "superseded by the new queue design",
+      "revision_id": "rev-3",
+      "replacement_decision_id": null
+    },
+    "actor": {
+      "event_id": "ev-1",
+      "kind": "retired",
+      "occurred_at": "2026-08-01T00:00:00+00:00",
+      "actor": "alice@example.com",
+      "reason": "superseded by the new queue design",
+      "revision_id": "rev-3",
+      "replacement_decision_id": null
+    },
+    "timestamp": {
+      "event_id": "ev-1",
+      "kind": "retired",
+      "occurred_at": "the day before yesterday",
+      "actor": "human",
+      "reason": "superseded by the new queue design",
+      "revision_id": "rev-3",
+      "replacement_decision_id": null
+    },
+    "idLength": {
+      "event_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "kind": "retired",
+      "occurred_at": "2026-08-01T00:00:00+00:00",
+      "actor": "human",
+      "reason": "superseded by the new queue design",
+      "revision_id": "rev-3",
+      "replacement_decision_id": null
+    },
+    "reasonLength": {
+      "event_id": "ev-1",
+      "kind": "retired",
+      "occurred_at": "2026-08-01T00:00:00+00:00",
+      "actor": "human",
+      "reason": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "revision_id": "rev-3",
+      "replacement_decision_id": null
+    },
+    "eventCount": [
+      {
+        "event_id": "ev-0",
+        "kind": "retired",
+        "occurred_at": "2026-08-01T00:00:00+00:00",
+        "actor": "human",
+        "reason": "superseded by the new queue design",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      },
+      {
+        "event_id": "ev-1",
+        "kind": "retired",
+        "occurred_at": "2026-08-01T00:00:00+00:00",
+        "actor": "human",
+        "reason": "superseded by the new queue design",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      },
+      {
+        "event_id": "ev-2",
+        "kind": "retired",
+        "occurred_at": "2026-08-01T00:00:00+00:00",
+        "actor": "human",
+        "reason": "superseded by the new queue design",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      },
+      {
+        "event_id": "ev-3",
+        "kind": "retired",
+        "occurred_at": "2026-08-01T00:00:00+00:00",
+        "actor": "human",
+        "reason": "superseded by the new queue design",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      },
+      {
+        "event_id": "ev-4",
+        "kind": "retired",
+        "occurred_at": "2026-08-01T00:00:00+00:00",
+        "actor": "human",
+        "reason": "superseded by the new queue design",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      },
+      {
+        "event_id": "ev-5",
+        "kind": "retired",
+        "occurred_at": "2026-08-01T00:00:00+00:00",
+        "actor": "human",
+        "reason": "superseded by the new queue design",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      },
+      {
+        "event_id": "ev-6",
+        "kind": "retired",
+        "occurred_at": "2026-08-01T00:00:00+00:00",
+        "actor": "human",
+        "reason": "superseded by the new queue design",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      },
+      {
+        "event_id": "ev-7",
+        "kind": "retired",
+        "occurred_at": "2026-08-01T00:00:00+00:00",
+        "actor": "human",
+        "reason": "superseded by the new queue design",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      },
+      {
+        "event_id": "ev-8",
+        "kind": "retired",
+        "occurred_at": "2026-08-01T00:00:00+00:00",
+        "actor": "human",
+        "reason": "superseded by the new queue design",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      },
+      {
+        "event_id": "ev-9",
+        "kind": "retired",
+        "occurred_at": "2026-08-01T00:00:00+00:00",
+        "actor": "human",
+        "reason": "superseded by the new queue design",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      },
+      {
+        "event_id": "ev-10",
+        "kind": "retired",
+        "occurred_at": "2026-08-01T00:00:00+00:00",
+        "actor": "human",
+        "reason": "superseded by the new queue design",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      },
+      {
+        "event_id": "ev-11",
+        "kind": "retired",
+        "occurred_at": "2026-08-01T00:00:00+00:00",
+        "actor": "human",
+        "reason": "superseded by the new queue design",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      },
+      {
+        "event_id": "ev-12",
+        "kind": "retired",
+        "occurred_at": "2026-08-01T00:00:00+00:00",
+        "actor": "human",
+        "reason": "superseded by the new queue design",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      },
+      {
+        "event_id": "ev-13",
+        "kind": "retired",
+        "occurred_at": "2026-08-01T00:00:00+00:00",
+        "actor": "human",
+        "reason": "superseded by the new queue design",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      },
+      {
+        "event_id": "ev-14",
+        "kind": "retired",
+        "occurred_at": "2026-08-01T00:00:00+00:00",
+        "actor": "human",
+        "reason": "superseded by the new queue design",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      },
+      {
+        "event_id": "ev-15",
+        "kind": "retired",
+        "occurred_at": "2026-08-01T00:00:00+00:00",
+        "actor": "human",
+        "reason": "superseded by the new queue design",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      },
+      {
+        "event_id": "ev-16",
+        "kind": "retired",
+        "occurred_at": "2026-08-01T00:00:00+00:00",
+        "actor": "human",
+        "reason": "superseded by the new queue design",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      },
+      {
+        "event_id": "ev-17",
+        "kind": "retired",
+        "occurred_at": "2026-08-01T00:00:00+00:00",
+        "actor": "human",
+        "reason": "superseded by the new queue design",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      },
+      {
+        "event_id": "ev-18",
+        "kind": "retired",
+        "occurred_at": "2026-08-01T00:00:00+00:00",
+        "actor": "human",
+        "reason": "superseded by the new queue design",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      },
+      {
+        "event_id": "ev-19",
+        "kind": "retired",
+        "occurred_at": "2026-08-01T00:00:00+00:00",
+        "actor": "human",
+        "reason": "superseded by the new queue design",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      },
+      {
+        "event_id": "ev-20",
+        "kind": "retired",
+        "occurred_at": "2026-08-01T00:00:00+00:00",
+        "actor": "human",
+        "reason": "superseded by the new queue design",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      }
+    ]
+  },
+  "sequences": {
+    "duplicateRetry": [
+      {
+        "event_id": "ev-retire",
+        "kind": "retired",
+        "occurred_at": "2026-08-01T00:00:00+00:00",
+        "actor": "human",
+        "reason": "the queue moved to Kafka",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      },
+      {
+        "event_id": "ev-retire",
+        "kind": "retired",
+        "occurred_at": "2026-08-01T00:00:00+00:00",
+        "actor": "human",
+        "reason": "the queue moved to Kafka",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      }
+    ],
+    "lateOlderEvent": [
+      {
+        "event_id": "ev-restore",
+        "kind": "restored",
+        "occurred_at": "2026-08-02T00:00:00+00:00",
+        "actor": "human",
+        "reason": "the migration was reverted",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      },
+      {
+        "event_id": "ev-stale-retire",
+        "kind": "retired",
+        "occurred_at": "2026-07-01T00:00:00+00:00",
+        "actor": "human",
+        "reason": "a push that arrived late",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      }
+    ],
+    "retireRestoreStaleRetire": [
+      {
+        "event_id": "ev-retire",
+        "kind": "retired",
+        "occurred_at": "2026-08-01T00:00:00+00:00",
+        "actor": "human",
+        "reason": "the queue moved to Kafka",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      },
+      {
+        "event_id": "ev-restore",
+        "kind": "restored",
+        "occurred_at": "2026-08-02T00:00:00+00:00",
+        "actor": "human",
+        "reason": "the migration was reverted",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      },
+      {
+        "event_id": "ev-stale-retire",
+        "kind": "retired",
+        "occurred_at": "2026-07-01T00:00:00+00:00",
+        "actor": "human",
+        "reason": "a push that arrived late",
+        "revision_id": "rev-3",
+        "replacement_decision_id": null
+      }
+    ]
+  }
+}

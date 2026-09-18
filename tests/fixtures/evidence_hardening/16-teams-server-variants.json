@@ -1,0 +1,54 @@
+{
+  "name": "16-teams-server-variants",
+  "issue": 5,
+  "summary": "Lifecycle-capable, old, mis-advertising and rolled-back Teams servers.",
+  "servers": [
+    {
+      "variant": "lifecycle_capable",
+      "advertised": {
+        "decisionLifecycle": {
+          "version": 1,
+          "revisions": true,
+          "tombstones": true,
+          "retirementReasons": true
+        }
+      },
+      "expect_lifecycle_on_wire": true,
+      "expect_revision_id_on_wire": true
+    },
+    {
+      "variant": "old",
+      "advertised": {},
+      "expect_lifecycle_on_wire": false,
+      "expect_revision_id_on_wire": false
+    },
+    {
+      "variant": "mis_advertising",
+      "advertised": {
+        "decisionLifecycle": {
+          "version": "v1",
+          "revisions": "yes",
+          "tombstones": false,
+          "retirementReasons": true
+        }
+      },
+      "expect_lifecycle_on_wire": false,
+      "expect_revision_id_on_wire": false
+    },
+    {
+      "variant": "rolled_back",
+      "advertised": {
+        "decisionLifecycle": {
+          "version": 1,
+          "revisions": true,
+          "tombstones": true,
+          "retirementReasons": true
+        }
+      },
+      "rolled_back_to": {},
+      "expect_lifecycle_on_wire": true,
+      "expect_revision_id_on_wire": true,
+      "expect_lifecycle_after_rollback": false
+    }
+  ]
+}

@@ -89,9 +89,8 @@ class TestSessionStartUnderReadOnlyStoreDir:
         assert "decision" in json.dumps(expected)  # guards against asserting {} == {}
 
     def test_resume_without_context_still_injects_mining_instructions(self, tmp_repo, monkeypatch):
-        # This branch writes the .resume_mining flag; the flag only silences a duplicate
-        # bootstrap offer, so failing to write it must not cost the session the branch's
-        # entire reason for existing.
+        # Resumed bootstrap context must survive read-only bookkeeping too;
+        # inability to persist an offer marker must not suppress these instructions.
         _deny_store_writes(monkeypatch)
         payload = store.session_start_payload(tmp_repo, source="resume")
         assert payload["context"]
@@ -115,7 +114,7 @@ class TestSessionStartUnderReadOnlyStoreDir:
         # reload branch's flag-consume actually runs. Losing this one costs the session
         # its rehydrated pre-compaction context, the review nudge, and the rationale.
         store.STORE_DIR.mkdir(parents=True, exist_ok=True)
-        arm = (store.STORE_DIR / gemini._PENDING_RELOAD).touch
+        arm = store.sidecar_path("gemini_reload").touch
 
         # First call drains the fire-once state (the pending-review nudge fires once per
         # armed flag) so both compared runs start from the same steady state.

@@ -5,15 +5,16 @@ import time
 import pytest
 
 import contexer.remote as remote
-from contexer import config, store, team_context
+from contexer import config, lifecycle, store, team_context
 from contexer.remote import RemoteContext, RemoteDecision, RemoteUnavailableError
 
 TEAM = config.Profile(mode="team", endpoint="https://t/mcp", token="tok")
 
 
-def _rd(id, content, scope="team", type="architecture", title=None):
+def _rd(id, content, scope="team", type="architecture", title=None, source_retired=False):
     return RemoteDecision(id=id, type=type, title=title, content=content, rationale=None,
-                          repo="github.com/a/b", agent=None, scope=scope)
+                          repo="github.com/a/b", agent=None, scope=scope,
+                          source_retired=source_retired)
 
 
 class _FakeRS:
@@ -342,6 +343,73 @@ def test_sync_still_surfaces_changed_rows(team_env, monkeypatch):
                                         "last_poll_at": 0})
     _fake_rs(monkeypatch, ctx=RemoteContext([_rd("t1", "new wording")], [], "c2"))
     assert [d["content"] for d in team_context.poll(team_env, profile=TEAM)] == ["new wording"]
+
+
+def test_divergence_marker_open_and_clear_survive_cache_delta_log(team_env, monkeypatch):
+    """The background refresh and prompt hook are different processes; the transition must ride
+    the bounded sync log, not only the in-memory return value of `_sync`."""
+    monkeypatch.setattr(config, "load_profile", lambda path=None: TEAM)
+    team_context._save_cache(team_env, {
+        "repo_key": "github.com/a/b", "cursor": "c1",
+        "decisions": [team_context._row_to_dict(_rd("t1", "team rule", source_retired=False))],
+        "seq": 0, "sync_log": [],
+    })
+    _fake_rs(monkeypatch, ctx=RemoteContext(
+        [_rd("t1", "team rule", source_retired=True)], [], "c2"))
+    team_context._refresh_worker(team_env)
+    team_context._write_seen(team_env, "claude", 0)
+    opened = team_context.poll_nonblocking(team_env, "claude", profile=TEAM)
+    assert opened[0]["source_retired"] is True
+    assert opened[0]["_source_retired_change"] == "opened"
+
+    _fake_rs(monkeypatch, ctx=RemoteContext(
+        [_rd("t1", "team rule", source_retired=False)], [], "c3"))
+    team_context._refresh_worker(team_env)
+    cleared = team_context.poll_nonblocking(team_env, "claude", profile=TEAM)
+    assert cleared[0]["source_retired"] is False
+    assert cleared[0]["_source_retired_change"] == "resolved"
+
+
+def test_first_visible_approved_row_already_diverged_is_logged_as_opened(team_env, monkeypatch):
+    """Approval may happen after retirement, so the marked copy has no prior cached version."""
+    monkeypatch.setattr(config, "load_profile", lambda path=None: TEAM)
+    team_context._save_cache(team_env, {
+        "repo_key": "github.com/a/b", "cursor": "c1", "decisions": [],
+        "seq": 0, "sync_log": [],
+    })
+    _fake_rs(monkeypatch, ctx=RemoteContext(
+        [_rd("t1", "newly approved", source_retired=True)], [], "c2"))
+    team_context._refresh_worker(team_env)
+    team_context._write_seen(team_env, "claude", 0)
+    rows = team_context.poll_nonblocking(team_env, "claude", profile=TEAM)
+    assert rows[0]["_source_retired_change"] == "opened"
+
+
+def test_divergence_open_and_clear_never_mutate_local_store_lifecycle_or_proposals(
+        team_env, monkeypatch):
+    stored, entry_id = store.update_decision(
+        team_env, "Keep local deployment approval", "session-local",
+        subtype="constraint", created_by="human")
+    assert stored and entry_id
+    assert lifecycle.propose_lifecycle(
+        team_env, entry_id, "retire", "local proposal must remain local", source="human")["ok"]
+    before = store._store_path(team_env).read_bytes()
+
+    team_context._save_cache(team_env, {
+        "repo_key": "github.com/a/b", "cursor": "c1",
+        "decisions": [team_context._row_to_dict(_rd("t1", "team rule"))],
+    })
+    _fake_rs(monkeypatch, ctx=RemoteContext(
+        [_rd("t1", "team rule", source_retired=True)], [], "c2"))
+    team_context._sync(team_env, TEAM)
+    _fake_rs(monkeypatch, ctx=RemoteContext(
+        [_rd("t1", "team rule", source_retired=False)], [], "c3"))
+    team_context._sync(team_env, TEAM)
+
+    assert store._store_path(team_env).read_bytes() == before
+    entry = next(e for e in store.load(team_env)["entries"] if e["id"] == entry_id)
+    assert entry["status"] == "approved"
+    assert entry["proposed_lifecycle"]["reason"] == "local proposal must remain local"
 
 
 # ── exponential backoff on consecutive sync failures ──────────────────────────────

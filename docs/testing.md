@@ -7,7 +7,8 @@ Two, both deselected in CI for different reasons:
 - **`slow`** — `tests/test_bench_*.py`, the stubbed benchmark harness. ~45s, exercises
   `benchmarks/`, which isn't in the coverage target. Runs in its own CI job.
 - **`perf`** - wall-clock latency assertions (`p99 < 5ms`, `mean < 1ms`, ...) in
-  `test_benchmark.py`, `test_benchmark_extended.py` and `test_store.py`. These calibrate
+  `test_benchmark.py`, `test_benchmark_extended.py`, `test_benchmark_evidence.py` and
+  `test_store.py`. These calibrate
   against fixed hardware and **cannot** hold on shared runners; they never run in CI, and
   `tests/conftest.py` also skips them whenever coverage is on (see below).
 
@@ -92,6 +93,7 @@ Run in this order when verifying a significant change:
 | `test_cli_commands.py` | CLI commands — `status`, `version`, `reinstall`, `uninstall --purge`, dispatch, and `status` resilience against corrupt config/store files | When touching `cli.py` |
 | `test_benchmark.py` | Hit/miss rates, token cost, novelty filter at scale, rationale injection accuracy | When changing filter logic or `get_context_for_prompt` |
 | `test_benchmark_extended.py` | Noise tolerance, edge cases for constraint detection and rationale matching | When changing `_is_prescriptive_constraint`, `_sanitize_directive`, or `get_context_for_prompt` |
+| `test_benchmark_evidence.py` | Spool append cost (flat, and under concurrent writers), reconciliation at the 1000-event spool bound, policy selection/evaluation at the 500-decision store cap, and the exit gate that the prompt path never loads evidence | When changing `spool.py`, `candidates.py`, `reconcile.py` or `policy.py` |
 
 ## What each test suite validates
 
@@ -101,15 +103,15 @@ Run in this order when verifying a significant change:
 - `_sanitize_directive` — profanity stripping, frustration opener removal, trailing filler, caps normalisation, sarcasm exclusion
 - `capture_user_constraint` — full pipeline: detect → sanitize → store (returns tuple)
 - `get_session_start_context` — constraints/conventions pre-loaded, arch/patterns deferred, bootstrap offered when no context
-- `bootstrap_scan` — repo file scanning, `is_simple_repo` suppression, gap question generation
+- Bootstrap evidence/reporting is tested in `test_bootstrap_inferred.py`; obsolete familiarity/gap-question tests were removed with the unused implementation.
 - `get_context_for_prompt` — rationale injection, project-context overview fallback
 - `TestAtomicSave` / `TestCorruptionRecovery` — atomic write invariants (temp file + `os.replace`, 0o600, failure cleanup) and corrupt-store recovery (truncated JSON reads as empty, next save rewrites a valid file)
 
 **`test_e2e.py`** — integration tests simulating the full hook lifecycle:
 - Install writes correct hooks (SessionStart, PostCompact, UserPromptSubmit)
-- Bootstrap triggers on new repo, stays silent when context exists
+- Bootstrap triggers regardless of existing decisions until a valid interpretation report completes
 - `get_post_compact_context` re-offers bootstrap after `/compact` with no context
-- Bootstrap instructions tell Claude to ALWAYS show the offer, even for task prompts
+- The first-run notice and automatic first-prompt bootstrap request are independent deliveries
 - Constraint capture and decision storage across sessions
 
 **`test_benchmark.py` / `test_benchmark_extended.py`** — accuracy benchmarks:

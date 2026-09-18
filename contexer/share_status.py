@@ -86,13 +86,17 @@ class ShareStatus:
     """The outcome of one share, one batch share, or one global-rules share.
 
     Every count is a number of DECISIONS, and they partition what was handled:
-    `sent + at_capacity + invalid + lost + queued` is what the operation accounted for.
+    `sent + at_capacity + invalid + contested + lost + queued` is what the operation accounted for.
 
     - `sent`         the service saved it
     - `at_capacity`  the service had no room, so it was queued and will retry
     - `invalid`      the service rejected it permanently, so it was dropped, never retried
+    - `contested`    a lifecycle event id belongs to another decision, so nothing was saved
     - `lost`         it is neither stored remotely NOR queued: its share intent is gone
     - `queued`       it was queued without being offered to the service (a chunk failed first)
+
+    `lifecycle_pending` and `lifecycle_lost` describe the optional lifecycle delta after the
+    base decision synced; they do not participate in the base-decision partition above.
 
     `lost` is the one a caller most needs and could never read before. `unknown_ids` are ids the
     caller asked for that match no local decision; they are reported rather than dropped.
@@ -103,7 +107,10 @@ class ShareStatus:
     queued: int = 0
     at_capacity: int = 0
     invalid: int = 0
+    contested: int = 0
     lost: int = 0
+    lifecycle_pending: int = 0
+    lifecycle_lost: int = 0
     total: int = 0
     unknown_ids: tuple[str, ...] = ()
     server_id: str = ""
@@ -191,8 +198,17 @@ def _shortfall(s: ShareStatus) -> str:
     if s.invalid:
         out += (f"; {s.invalid} were rejected by the server (unsupported type or content) "
                 "and skipped")
+    if s.contested:
+        out += (f"; {s.contested} were refused because a lifecycle event id is already recorded "
+                "against another decision, and were skipped - nothing of them was saved")
     if s.lost:
         out += f"; {s.lost} could NOT be queued (outbox write failed) and are unsaved"
+    if s.lifecycle_pending:
+        out += (f"; {s.lifecycle_pending} lifecycle update(s) were refused and remain queued "
+                "until the server protocol changes")
+    if s.lifecycle_lost:
+        out += (f"; {s.lifecycle_lost} lifecycle update(s) were refused and could NOT be queued "
+                "- re-share after the server supports them")
     return out
 
 
@@ -208,8 +224,8 @@ def _describe_share(s: ShareStatus) -> str:
             return f"Nothing to share: no matching local decision (unknown id(s): {shown})."
         return "Nothing to share: no matching local decision."
     if s.outcome == SYNCED:
-        return (f"Synced decision to your personal cloud context (server id={s.server_id}) - "
-                "teammates won't see this until team promotion ships.")
+        return (f"Synced decision to your personal cloud context (server id={s.server_id})"
+                f"{_shortfall(s)} - teammates won't see this until team promotion ships.")
     if s.outcome == QUEUED:
         return ("Share failed (see the warning above for why). Queued - it will retry "
                 "automatically at the next session start.")

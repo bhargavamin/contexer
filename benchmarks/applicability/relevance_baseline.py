@@ -833,12 +833,13 @@ def _delivery_expectations(case: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def run_case(case: dict[str, Any]) -> dict[str, Any]:
-    old_store = store.STORE_DIR
+    old_store_dir = store.store_dir
     with tempfile.TemporaryDirectory(prefix=f"contexer-relevance-{case['family'].lower()}-") as tmp:
         sandbox = Path(tmp)
         repo_path = sandbox / case["repo_id"]
         repo_path.mkdir(parents=True)
-        store.STORE_DIR = sandbox / ".contexer"
+        sandbox_store = sandbox / ".contexer"
+        store.store_dir = lambda: sandbox_store
         try:
             entries = [_entry(item) for item in case.get("decisions", [])]
             store.save(str(repo_path), {"repo_path": str(repo_path), "entries": entries})
@@ -886,7 +887,7 @@ def run_case(case: dict[str, Any]) -> dict[str, Any]:
                 "action_details": details,
             }
         finally:
-            store.STORE_DIR = old_store
+            store.store_dir = old_store_dir
 
 
 def build_report(fixture: dict[str, Any] | None = None, *, reverse: bool = False) -> dict[str, Any]:

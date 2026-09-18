@@ -19,6 +19,37 @@ Global decisions apply across all repos. Use them for commit style, branch namin
 
 Only `constraint` and `convention` types can be stored globally. Architecture and pattern decisions are always repo-specific.
 
+## What Contexer notices without being asked
+
+Alongside the decisions your agent stores explicitly, Contexer keeps a small local record of the signals a session produced: rules you stated outright, files that were edited, and conclusions your agent reported about how something works.
+Nothing there is a decision yet.
+At the start of your next session Contexer groups those signals, and where they add up to something worth your attention it puts one item in the review queue described above.
+Every such item is pending review: never trusted, never replayed into a session, never linked to a file, and never able to block a commit until you approve it.
+
+Your agent can report a conclusion deliberately, which is what the `record_agent_conclusion` tool is for.
+Ask for it in plain language:
+
+```
+"record what you just worked out about the auth flow"
+```
+
+That records the claim as a signal, with your agent's own reasoning attached.
+It stores no decision by itself, changes nothing you have already approved, and a bare claim with no reasoning behind it is kept but is not proposed to you at all.
+
+This is honest rather than complete.
+Contexer cannot see your agent's answers, so a reported conclusion is exactly that, something your agent chose to report, not something Contexer observed.
+It has no way to see test results or diffs at all yet, and on Cursor it sees your prompts but not your file edits.
+
+`contexer status` prints one `coverage:` line per connected tool saying what that tool can actually observe:
+
+```
+  coverage:     claude: directives captured, file changes captured, conclusions agent-reported, test results unavailable, diffs unavailable
+  coverage:     cursor: directives captured, file changes unavailable, conclusions agent-reported, test results unavailable, diffs unavailable
+```
+
+It reports a capability, never a count, on purpose.
+"File changes unavailable" and "no file changes happened" are different facts, and a line that showed you a zero for both would hide a missing hook behind a quiet session.
+
 ## Query decisions
 
 ```
@@ -39,6 +70,27 @@ contexer review
 ```
 
 For each one you can **approve**, **edit**, **skip** (decide later), or **dismiss**. At session start Contexer reminds you, without blocking, when items are waiting.
+
+Under each decision, Contexer prints what approving it would actually do.
+The same block appears in `contexer review`, in the MCP `review_pending` tool, and on the decision's page in the console, so a decision never reads one way in the terminal and another in the browser.
+It names where the decision came from, which evidence supports it and how strongly, which files approving it would link (and which files it saw but will deliberately NOT link, with the reason), what this host was able to observe at all, similar decisions already stored, and the decision's own revision history.
+
+**Approving does not turn a decision into a commit block.**
+Approval makes a decision trusted context: it is replayed into sessions and it can raise an advisory warning at commit time.
+Turning one into a rule that actually stops a commit is a separate, explicit step you take yourself with `contexer guard arm`, and nothing in the review flow does it for you.
+The review block says so for each decision, and it will tell you when a rule is already armed.
+There is one case where answering the review does change what blocks a commit, and the block names it: a decision you armed earlier and then switched off still carries that rule, dormant, so approving or restoring it puts the rule back into service.
+Nothing in the review flow creates a rule that did not already exist, and `contexer guard disarm <id>` removes one.
+
+### Decisions you switched off, restated later
+
+If you retire or ignore a decision and then say the same thing again in a later session, Contexer does not quietly resurrect it and does not file it as a brand-new decision beside the old one.
+It asks you about the original.
+That question appears in the same review queue with its own choices: **restore**, **restore with edits** (your wording becomes the new version), **skip**, or **dismiss**.
+
+Dismiss means "not this time", not "never ask again", and the queue records that you were asked before, so a later restatement says how many times it has come up.
+Only your explicit answer ever brings a decision back.
+Restoring a decision that has no earlier approved state returns it as pending review rather than guessing it was approved, so you may be asked to approve it once it is back.
 
 Approving through the MCP tool (`approve_decision`) also accepts `source_files`: a list of repo-relative files that decision describes. Passing it links the decision to those files right away, instead of waiting for the one-time [`guard anchors`](#commit-time-guard) pass — see [commit-time guard](#commit-time-guard). It only applies to a single decision id at a time — which is the only kind there is: bulk approval (`"all"`, `"*"`, comma-lists) is refused, so decisions are reviewed and approved one at a time.
 
@@ -63,14 +115,22 @@ The store is plain JSON at `~/.contexer/`. Edit it directly if you prefer.
 | `contexer review` | Review decisions awaiting approval: approve, edit, skip, or dismiss each. Also surfaces possibly-overlapping constraint/convention rules — keep the best one and retire the rest with `approve_decision(id, action="ignore")`, which works on already-approved rules too (Contexer itself never merges or deletes) |
 | `contexer ui [--open]` | Start the local web console over every store on this machine and print its URL (`--open` also opens the browser). See [the local console](ui.md) |
 | `contexer ui --status\|--stop\|--port N\|--foreground\|--reset-token` | Report on, stop, re-port, run in the foreground, or re-credential the console |
+| `contexer pull` | Fetch your team's decisions for this repo into the local team cache. Local-first: a quiet no-op outside team mode, or when the cloud is unreachable. Must be run inside a git repository |
 | `contexer share` | Show a numbered list of shareable decisions and multi-select which to push (e.g. `1,3` or `all`) |
 | `contexer share <id[,id2…]> [--yes]` | Push the given decision(s) to your personal cloud. Previews what would leave your machine and confirms first; `--yes` skips the prompt. Set `skip_confirm = true` in `~/.contexer/config.toml` to always skip it |
 | `contexer reconcile <id> [--team NAME_OR_ID] [--yes]` | Preview a corrected local decision and submit it to the selected team for lead review |
+| `contexer share-policy show` | Show this repository's automatic proposal policy and queued work |
+| `contexer share-policy enable --team NAME_OR_ID [--include-existing]` | Preview and explicitly enable automatic proposals to one team; new decisions only unless `--include-existing` is supplied |
+| `contexer share-policy disable` | Stop creating automatic proposals for this repository without discarding queued work |
+| `contexer share-policy flush` | Try queued proposals now |
+| `contexer share-policy attention` | List proposals that need a human decision before they can continue |
+| `contexer share-policy retry <intent-id>` | Retry one proposal after resolving the reported issue |
 | `contexer share --all [--yes]` | Push every non-ignored decision in this repo (previews the list and confirms first). Global rules are *not* included - use `--global` |
 | `contexer share --global [--yes]` | Push your global rules (`~/.contexer/_global.json`) - the ones that apply to every repo. They go up unbound to any repo, so this is the one `share` that works outside a git repository |
 | `contexer guard [path…] [--explain]` | Check staged files against approved decisions at commit time — see [commit-time guard](#commit-time-guard) |
 | `contexer guard anchors [--list]` | One-time setup linking existing decisions to the files they're about — see [commit-time guard](#commit-time-guard) |
 | `contexer status` | Show connection status, store size, current repo; warns about corrupt config files, cleans stale temp files, and notifies when a newer version is on PyPI |
+| `contexer upgrade [--dry-run]` | Upgrade Contexer itself, then re-sync config. Prints the command instead of running it when it cannot upgrade you safely (a from-source or pip install). Restart your assistant afterwards |
 | `contexer reinstall` | Re-sync after an AI assistant update |
 | `contexer uninstall` | Disconnect; context store is kept |
 | `contexer uninstall --purge` | Remove everything including `~/.contexer/` |
@@ -135,7 +195,12 @@ Only an **approved** decision can be armed. A violated rule prints the file, the
 
 ### Approving decisions
 
-When you approve a decision (`contexer review` or the console), you may see a `would anchor: <files>` line under it. That's Contexer proposing to link the decision to the files you were just working on — approving accepts that link, making the guard's warnings for that decision precise and letting Contexer tell you later if those files changed without the decision being revisited. If the suggested files are wrong, edit or skip that part when you approve.
+When you approve a decision (`contexer review` or the console), `Would anchor: <files>` lists only structurally confirmed files—for example, a path named by the directive and observed in the session. Approving accepts that link, making Guard warnings precise and allowing staleness tracking.
+
+Files connected only by timing, including a file edited shortly after a fileless directive, are shown separately as `Possible files: … NOT anchored on approval`. Plain approval does not promote them, and they do not reach Guard, staleness, sharing, or Teams Check. If one really is governed by the decision, select it explicitly through `approve_decision(source_files=[...])`.
+
+Approving is also not arming.
+It never turns a decision into something that stops a commit; only `contexer guard arm` does that.
 
 ### Linking existing decisions to files (`guard anchors`)
 
@@ -174,6 +239,29 @@ Changed server heads stop for a fresh preview instead of being blindly retried.
 The currently approved team version remains active until the lead approves the candidate.
 Older Teams servers fall back to the compatible personal-sync-then-share flow.
 
+### Automatic team proposals
+
+Automatic proposals are off until you explicitly enable them for a repository:
+
+```bash
+contexer share-policy enable --team NAME_OR_ID
+```
+
+Before anything is enabled, Contexer shows the signed-in account, exact repository, destination
+team, and sharing scope, then requires a confirmation. The general `skip_confirm` setting does
+not bypass this approval. The default is future-only; add `--include-existing` if you also want
+currently approved local decisions to be proposed.
+
+The policy is bound to one account, one exact canonical repository, and one target team. It
+proposes only approved repository-local revisions; global rules are excluded. Every proposal
+still needs normal team review — enabling the policy never approves a team decision. If the
+account, repository, destination, or server capability no longer matches, Contexer stops that
+work and surfaces it through `contexer share-policy attention` instead of weakening the checks.
+
+Use `contexer share-policy show` to inspect the policy and queue, `disable` to stop creating new
+proposals, `flush` to try queued work immediately, and `retry <intent-id>` after resolving an
+attention item.
+
 When a future enriched team pull reports that a lead changed your linked decision in the web app,
 Contexer stores that wording as a local Suggested Update for review.
 It never overwrites your standing local revision.
@@ -205,7 +293,7 @@ What exists today: the **open-source (OSS)** version, **Personal Cloud**, and **
 
 - **Per-user, per-machine.** Your decisions live only in `~/.contexer/` on that machine. They don't follow you to your laptop and don't reach teammates.
 - **Soft storage cap.** Up to 500 entries per repo; beyond that, the least-reinforced decisions are evicted. There's no automatic staleness pruning — outdated decisions stay until you remove them.
-- **One network call.** `contexer status` checks PyPI for a newer version. Disable with `CONTEXER_NO_UPDATE_CHECK=1`. Nothing else leaves your machine.
+- **One network call, and it is anonymous.** Contexer checks PyPI for a newer version: on `contexer status` and `contexer upgrade`, and at most once a day in a background process started from a prompt hook, so the check never delays a prompt. It sends nothing about you or your code, only a plain request for the package's public release info. Disable it with `CONTEXER_NO_UPDATE_CHECK=1`. Nothing else leaves your machine.
 
 **Personal Cloud (available):**
 
@@ -217,7 +305,8 @@ What exists today: the **open-source (OSS)** version, **Personal Cloud**, and **
 
 **Every tier:**
 
-- **Capture is best-effort.** Only outright directives ("always/never/don't/create a rule") are auto-stored deterministically. Other decisions depend on the agent choosing to call the store tool, and it does miss things. Hence the *"store that decision"* escape hatch.
+- **Capture is best-effort.** Only outright directives ("always/never/don't/create a rule") are auto-stored deterministically. Other decisions depend on the agent choosing to call the store tool, and it does miss things. Hence the *"store that decision"* escape hatch. Contexer also keeps the session signals described [above](#what-contexer-notices-without-being-asked) and proposes review items from them, but that is a second net, not complete capture: it cannot see your agent's answers, test results or diffs, and what it does propose still waits for you.
+- **Directive capture is shape-aware, not semantic attribution.** Recognizable log, traceback, pytest, blockquote, attribution, changelog, grep, diff, fenced-code and closed harness-container shapes are excluded from clean human directives. An unbounded Contexer or usage-limit injection is refused as a whole because it has no safe extraction boundary. A novel or stripped-down container shape can still be ambiguous, so use explicit review for anything suspicious; automatic directive capture never arms Guard by itself.
 - **Deduplication is lexical, not semantic.** Duplicates are detected by token overlap, with no understanding of meaning — the same rule phrased with different words ("commit on approval" vs "commit automatically") can accumulate as separate entries. Containment restatements (re-typing a rule with extra words, or a terse version of it) are consolidated automatically; synonym phrasings are only flagged in the capture ack and surface in review for you to merge manually.
 - **Cursor parity is partial.** Cursor's hooks can't inject per-prompt context or restore after compaction; Cursor steering rides on the session-start nudge plus an always-apply rule file. See [integrations](integrations.md).
 - **Gemini compression is deferred.** Gemini CLI restores stored context on the next turn after compression, not immediately.

@@ -5,14 +5,22 @@ import shutil
 import sys
 from pathlib import Path
 
-from contexer import sidecars, store
+from contexer import evidence, store, updates
 from contexer.adapters import base
 
 NAME = "gemini"
 
+# What this host's installed hooks observe. `before_agent` captures directives and
+# `AfterTool(write_file|replace)` captures edits; nothing hands over the model's response.
+EVIDENCE_COVERAGE = {
+    "user_directives": "captured",              # capture_constraint, BeforeAgent
+    "file_changes": "captured",                 # after_write, AfterTool(write_file|replace)
+    "assistant_conclusions": "model_reported",  # the MCP tool, agent-invoked
+    "test_results": "unavailable",
+    "diffs": "unavailable",
+}
+
 # Fix 1: namespaced so it doesn't collide with Claude's ~/.contexer/.pending_capture flag.
-_PENDING_CAPTURE = sidecars.filename("gemini_capture")
-_PENDING_RELOAD = sidecars.filename("gemini_reload")
 _REMINDER = (
     "Contexer: you wrote or edited files last turn — call update_context for: "
     "(1) any NEW architecture/pattern/constraint/convention decisions; "
@@ -24,17 +32,39 @@ def is_present(home: Path) -> bool:
     return (home / ".gemini").exists()
 
 
-def _output(event: str, contexts: list[str]) -> str:
+def notify(text: str) -> dict | None:
+    """This host's user-facing notice channel: Gemini's `systemMessage`.
+
+    An earlier version returned None, reasoning that Gemini emits only `additionalContext`.
+    That described what THIS ADAPTER sent, not what the host offers, and it was wrong.
+    Gemini's hook reference lists `systemMessage` among its common output fields as
+    "Displayed immediately to the user in the terminal", and `suppressOutput` does not
+    suppress it. Gemini has a real user-facing channel and does not need the backstop.
+
+    Delivered from `SessionStart`, the event whose documentation names `systemMessage`
+    explicitly ("Shown at the start of the session"). The common-fields table and the host's
+    own source say every event carries it, but the per-event section for `BeforeAgent` does
+    not name it, and a notice is marked as said the moment it is handed over: choosing the
+    documented event means a wrong guess cannot silently swallow it.
+    """
+    return {"systemMessage": text} if text else None
+
+
+def _output(event: str, contexts: list[str], notice: dict | None = None) -> str:
+    """Hook output: model-facing context, plus optional user-facing fields from `notify`.
+
+    `suppressOutput` does NOT suppress `systemMessage`. Gemini's own best-practices doc is
+    explicit that it "only affects background logging" and that a `systemMessage` is still
+    displayed to the user in the terminal, so both can be sent together: the context goes to
+    the model, the notice goes to the developer.
+    """
     context = "\n\n".join(part for part in contexts if part)
-    if not context:
-        return json.dumps({"suppressOutput": True})
-    return json.dumps({
-        "suppressOutput": True,
-        "hookSpecificOutput": {
-            "hookEventName": event,
-            "additionalContext": context,
-        },
-    })
+    out: dict = {"suppressOutput": True}
+    if notice:
+        out.update(notice)
+    if context:
+        out["hookSpecificOutput"] = {"hookEventName": event, "additionalContext": context}
+    return json.dumps(out)
 
 
 def _session_marker(raw: str) -> Path | None:
@@ -49,7 +79,7 @@ def _session_marker(raw: str) -> Path | None:
     if not identity:
         return None
     digest = hashlib.sha256(str(identity).encode()).hexdigest()[:24]
-    return store.STORE_DIR / sidecars.filename("gemini_first", slug=digest)
+    return store.sidecar_path("gemini_first", slug=digest)
 
 
 def _anchor(repo: str) -> None:
@@ -94,11 +124,21 @@ def session_start(repo_path: str, raw: str) -> str:
     DIFFERENT repo between hook events. See `after_write`'s docstring for the full
     rationale; this mirrors it so SessionStart keys the same store `before_agent` and
     `after_write` do."""
+    notice = None
     try:
-        repo = store.hook_cwd_repo(repo_path)
+        # Outside the main try, and before the repo check: update state is machine-global, so
+        # a Gemini session started outside a git repo must still be told, and a failure here
+        # must never cost the context injection below.
+        updates.spawn_refresh()
+        notice = updates.deliver(notify)
+    except Exception:
+        notice = None
+    try:
+        repo = store.hook_repo_from_stdin(raw, repo_path)
         if not repo:
-            return _output("SessionStart", [])
+            return _output("SessionStart", [], notice)
         _anchor(repo)
+        base._scan_automatic_proposals(repo)
         # Fix 7: only reset the first-prompt marker on a genuinely new session.
         # Resume and /clear continue an existing session — preserve the marker so
         # before_agent does not re-run bootstrap and task capture on the next prompt.
@@ -107,10 +147,15 @@ def session_start(repo_path: str, raw: str) -> str:
             marker = _session_marker(raw)
             if marker is not None:
                 _flag_drop(marker)
-        payload = store.session_start_payload(repo, source)
-        return _output("SessionStart", [payload.get("context", "")])
+        # `host=NAME`: the shared payload now reconciles this repo's unconsumed evidence, so
+        # Gemini gains a SessionStart checkpoint beside the PreCompress and SessionEnd ones
+        # `_reconcile_evidence` already gives it. Those two stay: they are the safety net for
+        # a session that compresses or ends without ever starting again, and this one is the
+        # recovery net for a session that ended without either.
+        payload = store.session_start_payload(repo, source, "", NAME)
+        return _output("SessionStart", [payload.get("context", "")], notice)
     except Exception:
-        return _output("SessionStart", [])
+        return _output("SessionStart", [], notice)
 
 
 def before_agent(repo_path: str, raw: str) -> str:
@@ -128,10 +173,12 @@ def before_agent(repo_path: str, raw: str) -> str:
     so a hook firing in the home/config dir still resolves to nothing rather than a junk
     store."""
     try:
-        repo = store.hook_cwd_repo(repo_path)
+        repo = store.hook_repo_from_stdin(raw, repo_path)
         if not repo:
             return _output("BeforeAgent", [])
         _anchor(repo)
+        # Bounded local-only fallback; policy-disabled repos pay only one sidecar presence check.
+        base._scan_automatic_proposals(repo)
         prompt = store.prompt_from_hook_stdin(raw)
         session_id = store.session_from_hook_stdin(raw)
         contexts: list[str] = []
@@ -140,8 +187,8 @@ def before_agent(repo_path: str, raw: str) -> str:
         # "you edited files last turn" reminder redundant and misleading — the
         # write happened before compression, not on the immediately preceding turn.
         # When both flags are present, consume the capture flag silently.
-        reload_flag = store.STORE_DIR / _PENDING_RELOAD
-        pending = store.STORE_DIR / _PENDING_CAPTURE
+        reload_flag = store.sidecar_path("gemini_reload")
+        pending = store.sidecar_path("gemini_capture")
         if reload_flag.exists():
             _flag_drop(reload_flag)
             _flag_drop(pending)
@@ -175,9 +222,13 @@ def before_agent(repo_path: str, raw: str) -> str:
         # used rather than by re-resolving: this host deliberately does NOT run the
         # `resolve_repo` chain here (see the docstring above), and a stamp must never change
         # what it is describing.
-        repo_source = "hook-arg" if (repo_path or "").strip() else "hook-cwd"
-        entry_id, content, status = store.capture_user_constraint(
-            repo, prompt, session_id, near, repo_source=repo_source)
+        repo_source = "hook-payload" if raw else "hook-arg" if (repo_path or "").strip() \
+            else "hook-cwd"
+        # Same store call plus the shadow-mode user_directive event (see
+        # evidence.capture_directive): identical return, identical exceptions, so this
+        # hook's existing outer handler still owns what happens on failure.
+        entry_id, content, status = evidence.capture_directive(
+            repo, prompt, session_id, "gemini_prompt", near=near, repo_source=repo_source)
         if entry_id is not None:
             contexts.append(store.constraint_ack(content, status, entry_id, near))
 
@@ -200,24 +251,32 @@ def after_write(repo_path: str, raw: str) -> str:
 
     Repo resolution is `hook_cwd_repo`, NOT `resolve_repo` (Greptile P1, PR #181): this
     is a hook-invoked process, not the MCP server, so `_SESSION_REPO` is always empty here
-    and `resolve_repo` would fall through to the shared `.current_repo` pointer — which can
-    name a DIFFERENT repo entirely. In a non-git project the installed hook's `$REPO` shell
-    var is empty (see `_cmd`'s `git rev-parse --show-toplevel || true`), and non-git projects
-    are first-class stores keyed by absolute path, so silently recording under whatever repo
+    and `resolve_repo` would fall through to the shared `.current_repo` pointer - which can
+    name a DIFFERENT repo entirely. Hook wrappers pass PWD and the Python resolver combines
+    it with the host payload without spawning Git; non-git projects are first-class stores
+    keyed by absolute path, so silently recording under whatever repo
     the pointer happens to hold (or discarding the edit if it holds nothing sane) starves the
     real project's pending captures of anchor candidates. `hook_cwd_repo` falls back to this
     process's own cwd instead — which IS the project directory for a hook — guarded by
     `is_sane_repo` so a session opened in the home/config dir still records nothing. Matches
     claude.post_write's identical fallback for the sibling PostToolUse recording path."""
-    _flag_set(store.STORE_DIR / _PENDING_CAPTURE)
+    _flag_set(store.sidecar_path("gemini_capture"))
     try:
-        repo = store.hook_cwd_repo(repo_path)
+        repo = store.hook_repo_from_stdin(raw, repo_path)
         if repo:
             data = json.loads(raw)
             tool_input = data.get("tool_input") if isinstance(data, dict) else None
             fp = tool_input.get("file_path") if isinstance(tool_input, dict) else None
             if isinstance(fp, str) and fp:
-                store.record_edited_file(repo, fp)
+                # Shadow-mode evidence rides the SAME recorded path (record_edited_file's
+                # return), so this event and Claude's post_tool_use one differ only in
+                # `source`. Inside the existing handler: the reminder below is unaffected.
+                relpath = store.record_edited_file(repo, fp)
+                if relpath:
+                    evidence.emit_hook_event(
+                        repo, "file_changed",
+                        session_id=store.session_from_hook_stdin(raw),
+                        source="gemini_after_tool", files=[relpath])
     except Exception:
         pass
     return json.dumps({
@@ -233,12 +292,31 @@ def after_write(repo_path: str, raw: str) -> str:
     })
 
 
+def _reconcile_evidence(repo_path: str) -> None:
+    """Materialize recorded evidence into decisions pending review, at Gemini's own two
+    checkpoint events. Fail-soft to the point of swallowing an import error, and cheap in the
+    quiet case: `reconcile_session` reads no store until it has unconsumed evidence. The twin
+    of `claude._reconcile_evidence`, which rides on `sync_memory` because Claude's three
+    checkpoints all call it - Gemini has no such shared entrypoint, so it is wired per event."""
+    try:
+        from contexer import reconcile
+        repo = store.hook_cwd_repo(repo_path)
+        if repo:
+            reconcile.reconcile_session(repo, host=NAME)
+    except Exception:
+        pass
+
+
 def pre_compress(repo_path: str, raw: str) -> str:
     """Defer full context reload to the first turn after compression."""
     # Fix 3: only set the reload flag here. Compression is not a file write, so
-    # setting _PENDING_CAPTURE would inject a misleading "you edited files last turn"
-    # reminder alongside the reload. after_write owns _PENDING_CAPTURE.
-    _flag_set(store.STORE_DIR / _PENDING_RELOAD)
+    # setting the gemini_capture flag would inject a misleading "you edited files last
+    # turn" reminder alongside the reload. after_write owns that flag.
+    _flag_set(store.sidecar_path("gemini_reload"))
+    repo = store.hook_repo_from_stdin(raw, repo_path)
+    if repo:
+        _reconcile_evidence(repo)
+        base._scan_automatic_proposals(repo)
     return json.dumps({"suppressOutput": True})
 
 
@@ -250,14 +328,18 @@ def session_end(repo_path: str, raw: str) -> str:
             marker.unlink(missing_ok=True)
     except Exception:
         pass
+    repo = store.hook_repo_from_stdin(raw, repo_path)
+    if repo:
+        _reconcile_evidence(repo)
+        base._scan_automatic_proposals(repo)
     return json.dumps({"suppressOutput": True})
 
 
 def _cmd(entry: str) -> str:
     python = sys.executable
     return (
-        "REPO=$(git rev-parse --show-toplevel 2>/dev/null || true) && "
-        f'"{python}" -c "from contexer.adapters import gemini; import sys; '
+        'REPO="$PWD" && '
+        f'"{python}" -P -c "from contexer.adapters import gemini; import sys; '
         f'print(gemini.{entry}(sys.argv[1], sys.stdin.read()))" "$REPO"'
     )
 

@@ -13,6 +13,7 @@ import pytest
 
 import contexer.remote as remote
 from contexer import config, share, share_status, store
+from tests.conftest import redirect_store_dir
 from contexer.remote import (
     RemoteAuthError,
     RemoteRateLimitError,
@@ -176,6 +177,7 @@ def test_share_happy_path_wire_args(tmp_repo, monkeypatch):
     assert kw["repo"] == "github.com/a/b"
     assert kw["decision_id"] == did  # local id -> idempotent re-share
     assert kw["source"] == "ai"
+    assert kw["session_id"] == "s1"
 
 
 def test_share_happy_path_includes_title(tmp_repo, monkeypatch):
@@ -764,6 +766,7 @@ def test_share_degraded_enqueues_payload(tmp_repo, monkeypatch):
     assert "sync" in entry["content"].lower()
     assert entry["repo"] == "github.com/a/b"
     assert entry["source"] == "ai"
+    assert entry["session_id"] == "s1"
     assert entry["attempts"] == 0
     assert isinstance(entry["queued_at"], float)
 
@@ -828,6 +831,40 @@ def test_enqueue_caps_at_50_drops_oldest(tmp_repo):
     assert "d4" not in ids
     assert "d5" in ids  # oldest survivor
     assert "d54" in ids  # newest kept
+
+
+def test_enqueue_at_cap_never_evicts_a_pending_lifecycle_delta(tmp_repo, monkeypatch):
+    monkeypatch.setattr(share, "_OUTBOX_CAP", 2)
+    share._enqueue({"decision_id": "pending", "content": "history", "attempts": 0,
+                    "stage": "lifecycle_pending", "capability": "v1"})
+    share._enqueue({"decision_id": "ordinary-1", "content": "one", "attempts": 0})
+    share._enqueue({"decision_id": "ordinary-2", "content": "two", "attempts": 0})
+
+    entries = share._load_outbox()
+    assert [(e["decision_id"], e.get("stage")) for e in entries] == [
+        ("pending", "lifecycle_pending"), ("ordinary-2", None)]
+
+
+def test_enqueue_refuses_instead_of_evicting_when_cap_is_all_lifecycle(tmp_repo, monkeypatch):
+    monkeypatch.setattr(share, "_OUTBOX_CAP", 1)
+    share._enqueue({"decision_id": "pending", "content": "history", "attempts": 0,
+                    "stage": "lifecycle_pending", "capability": "v1"})
+
+    with pytest.raises(RuntimeError, match="no safely evictable row"):
+        share._enqueue({"decision_id": "new", "content": "new", "attempts": 0,
+                        "stage": "lifecycle_pending", "capability": "v2"})
+    assert [e["decision_id"] for e in share._load_outbox()] == ["pending"]
+
+
+def test_enqueue_does_not_report_success_after_evicting_its_own_ordinary_row(
+        tmp_repo, monkeypatch):
+    monkeypatch.setattr(share, "_OUTBOX_CAP", 1)
+    share._enqueue({"decision_id": "pending", "content": "history", "attempts": 0,
+                    "stage": "lifecycle_pending", "capability": "v1"})
+
+    with pytest.raises(RuntimeError, match="no safely evictable row"):
+        share._enqueue({"decision_id": "ordinary", "content": "body", "attempts": 0})
+    assert [e["decision_id"] for e in share._load_outbox()] == ["pending"]
 
 
 # ── outbox: drain_outbox ──────────────────────────────────────────────────────────
@@ -996,6 +1033,35 @@ def test_drain_outbox_source_files_gate_is_checked_at_drain_time(tmp_repo, monke
     assert captured["args"]["decisions"][0]["source_files"] == ["auth/jwt.py"]
 
 
+def test_drain_outbox_session_id_gate_is_checked_at_drain_time(tmp_repo, monkeypatch):
+    """A durable origin session is retained while queued, but the compatibility gate is
+    evaluated by the real serializer on every drain attempt."""
+    queued = {"decision_id": "d1", "type": "architecture", "content": "use jwt for auth",
+              "repo": "r", "rationale": None, "confidence": 80, "evidence": None,
+              "source": "ai", "title": None, "session_id": "session-origin",
+              "queued_at": 1.0, "attempts": 0}
+    share._enqueue(queued)
+    captured = {}
+
+    async def fake_call(endpoint, token, name, arguments, timeout):
+        captured.update(name=name, args=arguments)
+        return types.SimpleNamespace(
+            content=[], isError=False,
+            structuredContent={"results": [{"decisionId": "d1", "id": "srv-1"}], "skipped": []})
+
+    monkeypatch.setattr(remote, "_acall_tool", fake_call)
+    remote.reset_degradation_warnings()
+
+    monkeypatch.setattr(remote, "_WIRE_SESSION_ID", False)
+    assert share.drain_outbox(TEAM) == 1
+    assert "session_id" not in captured["args"]["decisions"][0]
+
+    share._enqueue(queued)
+    monkeypatch.setattr(remote, "_WIRE_SESSION_ID", True)
+    assert share.drain_outbox(TEAM) == 1
+    assert captured["args"]["decisions"][0]["session_id"] == "session-origin"
+
+
 def test_load_outbox_corrupt_file_reads_empty(tmp_repo):
     path = share._outbox_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1052,6 +1118,22 @@ def test_a_failed_queue_is_reported_as_not_queued_not_as_queued(tmp_repo, monkey
     status = share._finish_share(dec, "r", None, "https://example.test")
     assert status.outcome == share_status.NOT_QUEUED
     assert (status.lost, status.queued) == (1, 0)   # unsaved, and it does not claim a retry
+
+
+def test_share_reports_not_queued_when_lifecycle_rows_consume_the_cap(tmp_repo, monkeypatch):
+    monkeypatch.setattr(share, "_OUTBOX_CAP", 1)
+    share._enqueue({"decision_id": "pending", "content": "history", "attempts": 0,
+                    "stage": "lifecycle_pending", "capability": "v1"})
+    store.update_decision(tmp_repo, "a new decision cannot displace lifecycle history", "s1",
+                          subtype="constraint")
+    monkeypatch.setattr(store, "run_git", lambda repo, *a: "git@github.com:a/b.git")
+    _fake(monkeypatch, exc=RemoteUnavailableError("down"))
+
+    status = share.share(tmp_repo, profile=TEAM)
+
+    assert status.outcome == share_status.NOT_QUEUED
+    assert (status.lost, status.queued) == (1, 0)
+    assert [e["decision_id"] for e in share._load_outbox()] == ["pending"]
 
 
 def test_cancellation_still_wins_when_queueing_fails(tmp_repo, monkeypatch):
@@ -1258,6 +1340,41 @@ def test_mark_shared_recovers_from_corrupt_file(tmp_repo, monkeypatch):
 
 # ── CLI ──────────────────────────────────────────────────────────────────────────
 
+@pytest.mark.parametrize("flag", ["--help", "-h"])
+def test_cli_share_help_is_read_only(flag, monkeypatch, capsys):
+    """Help must return before repo/profile reads or any share/outbox replay."""
+    from contexer import cli, config
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("share help performed operational work")
+
+    monkeypatch.setattr(store, "git_root", unexpected)
+    monkeypatch.setattr(config, "load_profile", unexpected)
+    monkeypatch.setattr(share, "share", unexpected)
+    monkeypatch.setattr(share, "share_all", unexpected)
+    monkeypatch.setattr(share, "share_global", unexpected)
+
+    cli.share_cmd([flag])
+
+    out = capsys.readouterr().out
+    assert "Usage: contexer share" in out
+    assert "without contacting the cloud or replaying queued shares" in out
+
+
+def test_cli_share_rejects_unknown_option_before_operational_work(monkeypatch, capsys):
+    """A misspelled flag is not a decision id and cannot trigger an outbox drain."""
+    from contexer import cli
+
+    monkeypatch.setattr(store, "git_root", lambda *_: pytest.fail("resolved repo"))
+    monkeypatch.setattr(share, "share", lambda *_a, **_k: pytest.fail("pushed"))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.share_cmd(["--hlep"])
+
+    assert exc.value.code == 1
+    assert "Unknown option: --hlep" in capsys.readouterr().err
+
+
 def test_cli_share_prints_result(monkeypatch, capsys):
     from contexer import cli
     monkeypatch.setattr(store, "git_root", lambda p: "/repo")
@@ -1322,10 +1439,12 @@ def test_share_ids_reports_unknown_ids(tmp_repo, monkeypatch):
     assert [x["decision_id"] for x in fake.batches[0]] == ["good1234"]  # only the valid one shared
 
 
-def test_share_ids_empty_shares_most_recent(monkeypatch):
+def test_share_ids_empty_shares_most_recent(tmp_repo, monkeypatch):
+    # `tmp_repo` patches STORE_DIR as well as providing the path: `share_ids` takes the outbox
+    # lock before dispatch, so the test must never create `.outbox.lock` in the real store.
     monkeypatch.setattr(share, "share", lambda repo, did="", **k:
                         _ok_status(server_id=f"recent:{did}"))
-    assert share.share_ids("/repo", [], profile=TEAM).server_id == "recent:"
+    assert share.share_ids(tmp_repo, [], profile=TEAM).server_id == "recent:"
 
 
 def _ok_status(sent=1, **kw):
@@ -1334,8 +1453,6 @@ def _ok_status(sent=1, **kw):
     These tests replace a share function to check WHICH ids the CLI passed and that it printed
     what came back. They used to return a bare sentence, because a sentence was the return type."""
     return share_status.ShareStatus(share_status.SYNCED, sent=sent, total=sent, **kw)
-
-
 def _three_shareable(monkeypatch):
     from contexer import config
     monkeypatch.setattr(store, "git_root", lambda p: "/repo")
@@ -2316,7 +2433,7 @@ def test_mark_shared_serializes_concurrent_writers(tmp_path, monkeypatch):
 
     Without the lock each writer reads the same base, adds its own id, and the second save
     clobbers the first - leaving a genuinely-pushed decision looking unshared."""
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     ep = "http://localhost:8080/mcp"
     barrier = threading.Barrier(2)
 
@@ -2334,7 +2451,7 @@ def test_mark_shared_serializes_concurrent_writers(tmp_path, monkeypatch):
 
 def test_mark_shared_still_fail_soft_when_locking_unavailable(tmp_path, monkeypatch):
     # A marker is cosmetic: even with no fcntl (non-POSIX) it must record, never raise.
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     monkeypatch.setattr(store, "fcntl", None)
     share._mark_shared(["abc"], "http://localhost:8080/mcp")
     assert "abc" in share.shared_map("http://localhost:8080/mcp")
@@ -2346,7 +2463,7 @@ def test_mark_shared_survives_concurrency_without_posix_locks(tmp_path, monkeypa
     `store.store_lock` yields WITHOUT serializing when fcntl is missing (non-POSIX), so a
     read-modify-write design would still drop a concurrent writer's marker there. Appending
     self-contained lines has no read to lose, so both writers survive on every platform."""
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     monkeypatch.setattr(store, "fcntl", None)  # simulate a runtime with no advisory locks
     ep = "http://localhost:8080/mcp"
     barrier = threading.Barrier(4)
@@ -2366,7 +2483,7 @@ def test_mark_shared_survives_concurrency_without_posix_locks(tmp_path, monkeypa
 def test_shared_log_compacts_once_past_the_threshold(tmp_path, monkeypatch):
     # Append-only would grow without bound on repeated re-shares; compaction folds it back
     # to one record per (endpoint, id) while preserving every marker.
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     monkeypatch.setattr(share, "_SHARED_LOG_MAX_LINES", 10)
     ep = "http://localhost:8080/mcp"
     for _ in range(12):  # re-share the same two ids repeatedly
@@ -2388,7 +2505,7 @@ def test_shared_log_append_is_excluded_during_compaction(tmp_path, monkeypatch):
     discard. Both sides take the same lock, so the append waits instead of vanishing. The
     replace is stalled here to hold that window wide open - without the lock the fresh marker
     lands on the doomed inode and is lost."""
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     monkeypatch.setattr(share, "_SHARED_LOG_MAX_LINES", 10)
     ep = "http://localhost:8080/mcp"
     # Seed past the threshold via _append_shared (which never compacts), so compaction is

@@ -305,9 +305,9 @@ def test_supplied_fixture_data_controls_report_hash(fixture_data):
 
 
 def test_runner_restores_store_directory(fixture_data):
-    before = store.STORE_DIR
+    before = store.store_dir
     baseline.run_case(fixture_data["cases"][0])
-    assert store.STORE_DIR == before
+    assert store.store_dir is before
 
 
 def test_main_writes_only_when_output_is_explicit(tmp_path, capsys):

@@ -30,32 +30,33 @@ Contexer is wired in through two mechanisms: **MCP tools** the agent can call (t
 
 Constraints and conventions load every session because they apply to every task. Architecture and pattern decisions are fetched on demand when you ask about rationale, design, or past decisions.
 
-Capture is two-track, and you stay in control of both:
+Capture is three-track, and you stay in control of all three:
 
 - Directives you state outright ("always X", "never Y", "don't Z", "create a rule…") are auto-stored *deterministically* by a hook — no model guesswork, no decision stored behind your back.
 - Everything else relies on the agent noticing a decision and calling the store tool. That is best-effort by design; when the agent misses one, say *"store that decision"* and it's captured immediately.
+- Behind both, Contexer keeps a small local record of what a session produced: rules stated outright, files edited, and conclusions the agent reported about how something works.
+  At the start of your next session it groups those signals and, where they add up to something, puts one item in your review queue.
+  Nothing in that record is a decision on its own, and nothing it proposes is trusted, replayed, linked to a file or able to block a commit until you approve it.
 
-## Bootstrap: establishing trusted knowledge
+That third track is a recovery net, not complete capture.
+Contexer cannot see the agent's answers, so a reported conclusion is what the agent chose to report rather than something Contexer observed; it sees no test results and no diffs at all; and on Cursor it sees your prompts but not your file edits.
+`contexer status` prints a `coverage:` line per connected tool saying exactly this, stating a capability rather than a count so a missing hook can never look like a quiet session.
 
-When Contexer is used on a repository for the first time, it analyzes the project — measuring real conventions from configs, source statistics, and git history — and proposes a small set of engineering questions only a human can answer.
+## Bootstrap: useful context without an approval interview
 
-Examples:
+Bootstrap scans code/configuration and Markdown together, saves observed facts automatically,
+and asks the host agent to submit grounded interpretations with exact source excerpts.
+AI-inferred context is usable in later sessions, clearly labeled provisional and scoped; it
+cannot override human decisions, enforce checks, or qualify as human-approved automatic sharing.
 
-- Should infrastructure always be deployed with Terraform?
-- Is PostgreSQL the standard database?
-- Are deployments multi-cloud?
+Only concrete material conflicts require clarification. The agent shows both sides with
+evidence; otherwise it lists what was saved and offers an optional correction invitation.
+An explicit correction versions the original capture rather than creating a disconnected copy.
 
-Developers confirm or refine the answers. These approved decisions become the initial engineering knowledge for the repository.
-
-The offer is a numbered list of at most four options, asked as an interactive multiple-choice question where the host has one (Claude Code's `AskUserQuestion`) and as plain numbered text elsewhere. Answer with the number or with the keyword. Which options lead adapts to how well you know the repo, judged from its git history:
-
-- The repo has commits from you → **quick** (one question) and **full** (guided setup) lead, with **scan** kept for "I'm actually new to this repo" (scan plus one short question).
-- No commits from your git email (e.g. a freshly cloned project) → **scan** leads: it reads the code and docs to propose decisions, and asks one short question — what you plan to do here — instead of quizzing you on a repo you may not know.
-- Can't tell → it simply asks how well you know the repo, and its **scan** row ("I didn't build it, or it's my first time") asks up to two short questions: what you plan to do here, and what the repo does.
-
-The questions in guided setup are asked the same way: one at a time, each ending in an option to skip that one. A question leads with the scan's assumption to confirm only where that assumption actually answers it, and offers alternatives only where there are distinct ones to offer — otherwise it is simply asked openly.
-
-**Resumed sessions** (Claude Code's `--resume` / `--continue`) don't repeat any of this. The context is already in the conversation. If you installed Contexer mid-project, resuming an old session makes the agent mine that conversation for decisions already made and store them, no questions asked.
+The scan stays incomplete until the host submits its interpretation report. Changed evidence,
+unsupported hypotheses and historical documents cannot silently become current policy. External
+Markdown is read only from user-authorized locations. See [Bootstrap](bootstrap_context.md) for
+the source contract, bounded coverage, completion semantics and limitations.
 
 ## At session start
 
@@ -75,11 +76,22 @@ Before editing a file, an assistant can also ask Contexer which of your decision
 
 ## Trust and review
 
-AI-proposed architecture and constraint decisions — and any change to a decision you have already approved — are held for your review instead of being trusted automatically. They are stored, but not replayed into AI sessions until you approve them (`contexer review`).
+Outside the explicitly labeled bootstrap-context lane, AI-proposed architecture and constraint decisions — and any change to a decision you have already approved — are held for your review instead of being trusted automatically. They are stored, but not replayed into AI sessions until you approve them (`contexer review`).
 
 Approved decisions are versioned: a change never overwrites the previous value — it creates a new revision and the full history is preserved. AI sessions always replay the latest approved revision.
 
 Approving a decision can also link it to the files it describes: pass `source_files` when you approve it, or accept the file suggestion Contexer shows you on the review screen. That link is what makes the commit-time guard's warnings precise, and lets Contexer tell you later if a decision might be outdated because its files changed without it.
+
+Under every decision awaiting review, Contexer prints what approving it would actually do: where it came from, which evidence supports it and how strongly, which files it would link and which it saw but will deliberately not link, what this host could observe at all, and the decision's revision history.
+The same block is printed by `contexer review`, by the `review_pending` tool, and by the console, so the three surfaces cannot describe one decision differently.
+
+**Approving is not arming.**
+Approval makes a decision trusted context and lets it raise an advisory warning at commit time; it never creates a rule that stops a commit.
+That is a separate, explicit `contexer guard arm`, and no review action reaches it.
+
+A decision you retired or ignored, restated out loud in a later session, is neither resurrected silently nor stored again beside the original.
+Contexer asks you about the original instead, in the same review queue, with its own choices: restore, restore with your edits, skip, or dismiss.
+Dismiss means "not this time", and the queue remembers being asked, so a later restatement tells you how often it has come up.
 
 ## Commit-time guard
 
@@ -98,7 +110,7 @@ Most of the time this means a short warning naming the decisions related to what
 A decision's warnings get sharper once it's linked to the files it's about, and that link is what lets Contexer flag it as possibly outdated when those files change. Links come from two places:
 
 - **A one-time pass** (`contexer guard anchors`) over decisions you approved before this existed — it suggests files from the decision's own text and you confirm, edit, or skip each one.
-- **Automatically, going forward.** When you approve a new decision, Contexer proposes the files you were just working on as its link (shown as `would anchor: …` on the review screen), and approving accepts it.
+- **From confirmed evidence or explicit selection.** A file named by the decision and observed in the evidence is proposed as `would anchor: …`; approving accepts that structural link. Files that were merely edited nearby appear separately as possible and are not anchored by plain approval. To anchor one, select it explicitly with `approve_decision(source_files=[...])`.
 
 Either way, you always see the files before they're linked — nothing is linked to a decision you haven't reviewed.
 
@@ -135,7 +147,7 @@ The point isn't token compression. It's **eliminated rework across sessions**. T
 
 ## Privacy
 
-Everything lives as plain JSON in `~/.contexer/` on your own machine. Nothing about your code or decisions leaves your machine. The only network call Contexer makes is an optional version check against PyPI (`CONTEXER_NO_UPDATE_CHECK=1` disables it). Team sync is strictly opt-in and every outward push previews what would leave your machine first.
+Everything lives as plain JSON in `~/.contexer/` on your own machine. Nothing about your code or decisions leaves your machine. The only network call Contexer makes is an optional version check against PyPI, at most once a day, in a background process so it never delays a prompt (`CONTEXER_NO_UPDATE_CHECK=1` disables it). It sends nothing about you or your code, only a plain request for the package's public release info. Team sync is strictly opt-in and every outward push previews what would leave your machine first.
 
 ## Why it stays lightweight
 

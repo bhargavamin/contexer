@@ -20,6 +20,7 @@ import pytest
 import contexer.share as share_mod
 import contexer.share_status as share_status
 from contexer import config as _config_mod
+from tests.conftest import redirect_store_dir
 from contexer import review
 from contexer import server, store
 
@@ -28,6 +29,12 @@ def test_share_decision_is_async_tool():
     # Guards the fix: a regression back to a sync `def` would reintroduce the
     # asyncio.run-in-a-running-loop failure the MCP path hit.
     assert inspect.iscoroutinefunction(server.share_decision)
+
+
+def test_mcp_server_keeps_dependency_request_logs_off_host_pipes():
+    # FastMCP's INFO default enables httpx request lines containing the configured remote URL.
+    # Contexer's closed decision telemetry remains independent of this dependency-log threshold.
+    assert server.mcp.settings.log_level == "WARNING"
 
 
 def test_share_decision_short_circuits_without_repo(monkeypatch):
@@ -298,7 +305,7 @@ def test_resolve_conflict_no_repo(monkeypatch):
 @pytest.mark.parametrize("target", ["all", "ALL", "*", " all "])
 def test_approve_decision_all_is_refused(monkeypatch, tmp_path, target):
     from contexer import store
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path)
+    redirect_store_dir(monkeypatch, tmp_path)
     repo = "/bulk/repo"
     monkeypatch.setattr(server.store, "resolve_repo", lambda p: repo)
     for c in ("Never commit secrets", "Never log PII"):
@@ -311,7 +318,7 @@ def test_approve_decision_all_is_refused(monkeypatch, tmp_path, target):
 
 def test_approve_decision_comma_list_is_refused(monkeypatch, tmp_path):
     from contexer import store
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path)
+    redirect_store_dir(monkeypatch, tmp_path)
     repo = "/comma/repo"
     monkeypatch.setattr(server.store, "resolve_repo", lambda p: repo)
     for c in ("Never commit secrets", "Never log PII"):
@@ -325,7 +332,7 @@ def test_approve_decision_comma_list_is_refused(monkeypatch, tmp_path):
 
 def test_bulk_refusal_covers_ignore_too(monkeypatch, tmp_path):
     from contexer import store
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path)
+    redirect_store_dir(monkeypatch, tmp_path)
     repo = "/ignorebulk/repo"
     monkeypatch.setattr(server.store, "resolve_repo", lambda p: repo)
     store.update_decision(repo, "Never commit secrets", "s", "constraint")
@@ -337,13 +344,186 @@ def test_bulk_refusal_covers_ignore_too(monkeypatch, tmp_path):
 
 def test_approve_decision_single_id_still_works(monkeypatch, tmp_path):
     from contexer import store
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path)
+    redirect_store_dir(monkeypatch, tmp_path)
     repo = "/single/repo"
     monkeypatch.setattr(server.store, "resolve_repo", lambda p: repo)
     _ok, eid = store.update_decision(repo, "Never commit secrets", "s", "constraint")
 
     server.approve_decision(eid[:8], "approve")
     assert store.get_pending_decisions(repo) == []
+
+
+@pytest.mark.parametrize("action", ["approve", "edit"])
+def test_successful_server_approval_prompts_automatic_enqueue_after_store(
+        monkeypatch, action):
+    events = []
+    monkeypatch.setattr(server.store, "resolve_repo", lambda _path: "/repo")
+    monkeypatch.setattr(
+        server.store, "approve_decision",
+        lambda *_args, **_kwargs: events.append("store") or (True, "done"),
+    )
+    monkeypatch.setattr(
+        server.share_policy, "enqueue_after_local_mutation",
+        lambda repo, decision_id: events.append((repo, decision_id)),
+    )
+
+    assert server.approve_decision("12345678", action, "edited") == "done"
+    assert events == ["store", ("/repo", "12345678")]
+
+
+def test_nonapproval_server_action_never_prompts_automatic_enqueue(monkeypatch):
+    monkeypatch.setattr(server.store, "resolve_repo", lambda _path: "/repo")
+    monkeypatch.setattr(server.store, "approve_decision", lambda *_args, **_kwargs: (True, "done"))
+    monkeypatch.setattr(
+        server.share_policy, "enqueue_after_local_mutation",
+        lambda *_args: pytest.fail("ignore must not enqueue"),
+    )
+    assert server.approve_decision("12345678", "ignore") == "done"
+
+
+def test_server_update_enqueues_only_after_approved_store_mutation(monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        server.store, "resolve_repo_verbose", lambda _path: ("/repo", "argument"))
+    monkeypatch.setattr(server.store, "capture_lint", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(
+        server.store, "update_decision_with_meta",
+        lambda *_args, **_kwargs: events.append("store") or (True, "decision-1", {}),
+    )
+    monkeypatch.setattr(server.store, "get_pending_approval_prompt", lambda *_args: "")
+    monkeypatch.setattr(
+        server.share_policy, "enqueue_after_local_mutation",
+        lambda repo, decision_id: events.append((repo, decision_id)),
+    )
+
+    assert server.update_context("Prefer SQLite", "/repo") == "Stored. id=decision-1"
+    assert events == ["store", ("/repo", "decision-1")]
+
+
+def test_pending_server_update_does_not_prompt_automatic_enqueue(monkeypatch):
+    monkeypatch.setattr(
+        server.store, "resolve_repo_verbose", lambda _path: ("/repo", "argument"))
+    monkeypatch.setattr(server.store, "capture_lint", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(
+        server.store, "update_decision_with_meta", lambda *_args, **_kwargs: (True, "d1", {}))
+    monkeypatch.setattr(
+        server.store, "get_pending_approval_prompt", lambda *_args: "pending review")
+    monkeypatch.setattr(
+        server.share_policy, "enqueue_after_local_mutation",
+        lambda *_args: pytest.fail("pending decision must not enqueue"),
+    )
+    assert server.update_context("Never log secrets", "/repo") == "pending review"
+
+
+def test_update_context_rejects_forged_human_provenance_before_any_effect(
+        tmp_repo, monkeypatch):
+    from contexer import share_policy
+
+    policy = share_policy.build_policy(
+        repo_path=tmp_repo,
+        repo_key="github.com/org/repo",
+        endpoint="https://mcp.contexer.ai/mcp",
+        account_fingerprint="acctfp_v1_7M4Q2PX9C6N8",
+        team_id="40000000-0000-4000-8000-000000000001",
+        team_name="Platform",
+        entries=[],
+        include_existing=True,
+    )
+    share_policy.save_policy(tmp_repo, policy)
+    monkeypatch.setattr(
+        server.store, "resolve_repo_verbose",
+        lambda *_args: pytest.fail("rejected provenance must not resolve or write"),
+    )
+
+    message = server.update_context(
+        "Publish this arbitrary model-authored text", tmp_repo,
+        subtype="architecture", created_by="human",
+    )
+
+    assert message.startswith("Invalid created_by")
+    assert store.load(tmp_repo)["entries"] == []
+    assert not share_policy.proposal_outbox_path().exists()
+
+
+def test_server_restore_and_reconsider_enqueue_only_after_success(monkeypatch):
+    events = []
+    monkeypatch.setattr(server.store, "resolve_repo", lambda _path: "/repo")
+    monkeypatch.setattr(
+        server.lifecycle, "restore_decision",
+        lambda *_args: events.append("restore") or (True, "restored"),
+    )
+    monkeypatch.setattr(
+        server.lifecycle, "reconsider_decision",
+        lambda *_args: events.append("reconsider") or (True, "restored edited"),
+    )
+    monkeypatch.setattr(
+        server.share_policy, "enqueue_after_local_mutation",
+        lambda repo, decision_id: events.append((repo, decision_id)),
+    )
+
+    assert server.restore_decision("12345678", "/repo") == "restored"
+    assert server.reconsider_decision("87654321", "restore_edit", "/repo", "text") == \
+        "restored edited"
+    assert events == [
+        "restore", ("/repo", "12345678"),
+        "reconsider", ("/repo", "87654321"),
+    ]
+
+
+def test_model_callable_constraint_wrapper_cannot_create_automatic_intent(
+        tmp_repo, monkeypatch):
+    from contexer import share_policy
+
+    policy = share_policy.build_policy(
+        repo_path=tmp_repo,
+        repo_key="github.com/org/repo",
+        endpoint="https://mcp.contexer.ai/mcp",
+        account_fingerprint="acctfp_v1_7M4Q2PX9C6N8",
+        team_id="40000000-0000-4000-8000-000000000001",
+        team_name="Platform",
+        entries=[],
+        include_existing=True,
+    )
+    share_policy.save_policy(tmp_repo, policy)
+    monkeypatch.setattr(store, "run_git", lambda *_args: "https://github.com/org/repo.git")
+
+    message = server.capture_user_constraint(
+        "Always publish model supplied directives", tmp_repo)
+    scan = share_policy.scan_and_enqueue(tmp_repo)
+
+    assert "direct constraint capture is disabled" in message
+    assert store.load(tmp_repo)["entries"] == []
+    assert scan.scanned == 0 and scan.queued == 0
+    assert not share_policy.proposal_outbox_path().exists()
+
+
+def test_busy_automatic_outbox_never_blocks_or_rolls_back_server_approval(
+        tmp_repo, monkeypatch):
+    from contexer import share_policy
+
+    stored, entry_id = store.update_decision(
+        tmp_repo, "Never log secrets", "session", "constraint")
+    assert stored
+    policy = share_policy.build_policy(
+        repo_path=tmp_repo,
+        repo_key="github.com/org/repo",
+        endpoint="https://mcp.contexer.ai/mcp",
+        account_fingerprint="acctfp_v1_7M4Q2PX9C6N8",
+        team_id="40000000-0000-4000-8000-000000000001",
+        team_name="Platform",
+        entries=[],
+        include_existing=True,
+    )
+    share_policy.save_policy(tmp_repo, policy)
+    monkeypatch.setattr(store, "run_git", lambda *_args: "https://github.com/org/repo.git")
+
+    with share_policy._sidecar_lock(share_policy.proposal_outbox_lock_path()):
+        message = server.approve_decision(entry_id[:8], "approve", repo_path=tmp_repo)
+
+    approved = store.entry_by_id(store.load(tmp_repo)["entries"], entry_id)
+    assert approved is not None and store.entry_status(approved) == "approved"
+    assert "Approved" in message
+    assert not share_policy.proposal_outbox_path().exists()
 
 
 def test_store_no_longer_exposes_bulk_approval():
@@ -451,29 +631,25 @@ def test_get_context_passes_files_through(tmp_repo):
     assert result == store.get_context(tmp_repo, files=["auth/jwt.py"])
 
 
-def test_bootstrap_context_attaches_ask_shape_only_when_gaps_exist(monkeypatch):
-    """The gap-question ask shape rides the tool result, not the session-start injection:
-    it is unusable without gaps, while the injected block is paid on every context-less
-    session start including the skip path."""
-    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo/x")
-    monkeypatch.setattr(
-        server.store, "bootstrap_apply",
-        lambda *a, **k: {"gaps": [{"question": "What does this repo do?"}], "stored": 3},
-    )
-    with_gaps = json.loads(server.bootstrap_context("/repo/x"))
-    assert with_gaps["how_to_ask"] == store.GAP_ASK_GUIDE
-    assert with_gaps["gaps"] and with_gaps["stored"] == 3, "result passes through unchanged"
-
-    monkeypatch.setattr(server.store, "bootstrap_apply",
-                        lambda *a, **k: {"gaps": [], "stored": 3})
-    assert "how_to_ask" not in json.loads(server.bootstrap_context("/repo/x"))
+def test_bootstrap_context_delegates_grounded_report(monkeypatch):
+    from contexer import bootstrap
+    calls = []
+    monkeypatch.setattr(server.store, "resolve_repo_verbose", lambda p: ("/repo/x", "argument"))
+    monkeypatch.setattr(bootstrap, "run", lambda *a, **k: calls.append((a, k)) or {"stage": "interpreting"})
+    assert json.loads(server.bootstrap_context("/repo/x"))["stage"] == "interpreting"
+    assert calls[0][1]["findings"] is None
 
 
-def test_bootstrap_context_ask_shape_on_the_read_only_preview(monkeypatch):
-    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo/x")
-    monkeypatch.setattr(server.store, "bootstrap_scan",
-                        lambda *a, **k: {"gaps": [{"question": "Tests in scope?"}]})
-    assert "how_to_ask" in json.loads(server.bootstrap_context("/repo/x", apply=False))
+@pytest.mark.parametrize("source_paths", [None, ["billing.py"]])
+def test_bootstrap_preview_does_not_apply(monkeypatch, source_paths):
+    from contexer import bootstrap
+    calls = []
+    monkeypatch.setattr(server.store, "resolve_repo_verbose", lambda p: ("/repo/x", "argument"))
+    monkeypatch.setattr(bootstrap, "run", lambda *a, **k: calls.append(k) or {})
+    server.bootstrap_context("/repo/x", apply=False, source_paths=source_paths)
+    assert calls == [{"apply": False, "snapshot_id": "", "findings": None, "finish": False,
+                     "external_paths": None, "source_paths": source_paths, "repo_source": "argument",
+                     "assessed_delta": "", "run_id": "", "resolution": None}]
 
 
 # ── capture_lint: bounce narrative-shaped AI captures ───────────────────────
@@ -577,3 +753,136 @@ def test_session_id_falls_back_when_env_var_is_empty_string():
     seen = _session_id_from_subprocess({"CLAUDE_CODE_SESSION_ID": ""})
     assert seen != ""
     assert uuid.UUID(seen).version == 4
+
+
+# ── evaluate_policy ──────────────────────────────────────────────────────────────
+# The tool REPORTS. It refuses nothing, writes nothing, and raises nothing - a `block` is a
+# sentence for the model to relay to the developer, not a refusal, and an `allow` is not
+# permission to stop asking them.
+
+
+def _armed_secret_rule(tmp_repo):
+    from tests.test_policy_api import _arm, _seed
+    entry = _seed(tmp_repo, "Never commit credentials", title="No secrets")
+    _arm(tmp_repo, entry["id"], "secret")
+    return entry
+
+
+def test_evaluate_policy_reports_a_block_as_text_and_refuses_nothing(tmp_repo, monkeypatch):
+    from tests.test_policy_api import AWS_KEY
+    monkeypatch.setattr(store, "resolve_repo", lambda p: tmp_repo)
+    entry = _armed_secret_rule(tmp_repo)
+    before = store.load(tmp_repo)
+
+    out = server.evaluate_policy(tmp_repo, operation="commit", artifact_kind="diff",
+                                 artifact=f"+key={AWS_KEY}\n")
+
+    assert isinstance(out, str) and "verdict: block" in out
+    assert entry["id"] in out                       # names which decision objected
+    assert store.load(tmp_repo) == before           # a read tool: nothing written
+
+
+def test_evaluate_policy_redacts_the_artifact_out_of_what_it_returns(tmp_repo, monkeypatch):
+    from tests.test_policy_api import AWS_KEY
+    monkeypatch.setattr(store, "resolve_repo", lambda p: tmp_repo)
+    _armed_secret_rule(tmp_repo)
+    out = server.evaluate_policy(tmp_repo, operation="commit", artifact_kind="diff",
+                                 artifact=f"+AWS_ACCESS_KEY_ID={AWS_KEY}\n")
+    assert "verdict: block" in out and AWS_KEY not in out
+
+
+def test_evaluate_policy_returns_errors_instead_of_raising(tmp_repo, monkeypatch):
+    monkeypatch.setattr(store, "resolve_repo", lambda p: tmp_repo)
+    out = server.evaluate_policy(tmp_repo, operation="rm-rf")
+    assert "Not evaluated" in out and "operation must be one of" in out
+
+
+def test_evaluate_policy_reports_gaps_rather_than_a_clean_pass(tmp_repo, monkeypatch):
+    monkeypatch.setattr(store, "resolve_repo", lambda p: tmp_repo)
+    _armed_secret_rule(tmp_repo)
+    out = server.evaluate_policy(tmp_repo, operation="commit")   # no artifact at all
+    assert "evaluation_status: partial" in out and "omitted" in out
+
+
+def test_evaluate_policy_delegates_to_the_shared_facade(tmp_repo, monkeypatch):
+    # The tool must stay a wrapper: no policy logic of its own, no second selection path.
+    seen = {}
+
+    def fake(repo_path, **kw):
+        seen["repo_path"] = repo_path
+        seen.update(kw)
+        return {"verdict": "allow", "evaluation_status": "complete", "basis": "deterministic",
+                "matches": [], "unchecked": [], "policy_set_version": "sha256:x",
+                "repo_path": repo_path, "errors": []}
+
+    monkeypatch.setattr(server.policy_api, "evaluate_operation", fake)
+    server.evaluate_policy("/repo/x", intent="ship it", operation="deploy",
+                           files=["a.py"], artifact_kind="deployment", artifact="plan")
+    assert seen == {"repo_path": "/repo/x", "intent": "ship it", "operation": "deploy",
+                    "files": ["a.py"], "artifact_kind": "deployment", "artifact": "plan"}
+
+
+def test_evaluate_policy_docstring_is_self_approval_proofed():
+    """The one guardrail a tool docstring can carry: the model must not read `block` as a
+    refusal it should obey silently, nor `allow` as the developer's agreement."""
+    doc = server.evaluate_policy.__doc__
+    assert "ADVISORY" in doc
+    assert "does not refuse" in doc
+    assert "not permission" in doc
+
+
+# ── record_agent_conclusion ──────────────────────────────────────────────────
+
+def test_record_agent_conclusion_short_circuits_without_a_repo(monkeypatch):
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "")
+    monkeypatch.setattr(server.evidence, "record_agent_conclusion",
+                        lambda *a, **k: pytest.fail("reached the emitter with no repo"))
+    assert server.record_agent_conclusion("anything") == "Skipped - repo path not detected."
+
+
+def test_record_agent_conclusion_spools_evidence_and_writes_no_decision(tmp_repo, monkeypatch):
+    from contexer import spool
+
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: tmp_repo)
+
+    message = server.record_agent_conclusion(
+        "The codegen step overwrites src/generated/client.ts.",
+        rationale="It runs on every build.", files=["src/generated/client.ts"])
+
+    assert "EVIDENCE" in message and "not as a decision" in message
+    (event,) = spool.list_pending_evidence(tmp_repo, server.SESSION_ID)
+    assert event["kind"] == "agent_conclusion"
+    assert event["attributes"]["reported_by"] == "agent"
+    # The tool is an emitter, not a capture path: nothing reaches the store from here.
+    assert store.load(tmp_repo)["entries"] == []
+
+
+def test_record_agent_conclusion_delegates_rather_than_emitting_its_own_event(monkeypatch):
+    # A second hand-built event here would be a second schema to drift from evidence.py's.
+    seen = {}
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: "/repo/x")
+    monkeypatch.setattr(server.evidence, "record_agent_conclusion",
+                        lambda repo, summary, **kw: (seen.update(
+                            {"repo": repo, "summary": summary, **kw}) or (True, "ok")))
+
+    assert server.record_agent_conclusion("a conclusion", rationale="why", files=["a.py"]) == "ok"
+    assert seen == {"repo": "/repo/x", "summary": "a conclusion", "rationale": "why",
+                    "files": ["a.py"], "session_id": server.SESSION_ID}
+
+
+def test_record_agent_conclusion_reports_a_failed_append(tmp_repo, monkeypatch):
+    monkeypatch.setattr(server.store, "resolve_repo", lambda p: tmp_repo)
+    monkeypatch.setattr(server.evidence, "record_agent_conclusion",
+                        lambda *a, **k: (False, "NOT recorded - the conclusion could not be "
+                                                "spooled (disk is on fire)."))
+    assert "NOT recorded" in server.record_agent_conclusion("x")
+
+
+def test_record_agent_conclusion_docstring_never_promises_storage():
+    """The tool's instructions are the only thing standing between "record a conclusion" and
+    a model treating it as `update_context`. They must say what it is NOT."""
+    doc = server.record_agent_conclusion.__doc__
+    assert "evidence" in doc.lower()
+    assert "nothing is stored as a decision" in doc
+    assert "Do NOT call it for progress narration" in doc
+    assert "update_context instead" in doc

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "event_id": "0b7d1c2e-1111-4a2b-8c3d-000000000002",
+  "session_id": "sess-7c1f",
+  "repo_key": "_Users_dev_contexer",
+  "kind": "agent_conclusion",
+  "occurred_at": "2026-08-24T10:00:00+00:00",
+  "source": "claude_stop",
+  "summary": "The retrieval index sidecar is rebuilt only at session start",
+  "files": [
+    "contexer/store.py"
+  ],
+  "content_hash": null,
+  "attributes": {
+    "confidence": "medium"
+  }
+}

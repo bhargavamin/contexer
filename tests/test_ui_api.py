@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from contexer import config, store, team_context
+from tests.conftest import redirect_store_dir
 from contexer.ui import api, daemon, server
 
 TOKEN = "console-token-for-tests"
@@ -37,7 +38,7 @@ def console(tmp_path, monkeypatch):
     """A console daemon on an ephemeral port over an isolated ~/.contexer. Never the real one."""
     home = tmp_path / ".contexer"
     home.mkdir()
-    monkeypatch.setattr(store, "STORE_DIR", home)
+    redirect_store_dir(monkeypatch, home)
     monkeypatch.setattr(config, "CONFIG_PATH", home / "config.toml")
     monkeypatch.setattr(daemon, "STATE_PATH", home / "ui.json")
     monkeypatch.setattr(daemon, "LOG_PATH", home / "ui.log")
@@ -1267,7 +1268,7 @@ def test_a_login_job_is_killed_when_the_daemon_stops(tmp_path, monkeypatch):
     would otherwise still be able to write credentials nobody is waiting for."""
     home = tmp_path / ".contexer"
     home.mkdir()
-    monkeypatch.setattr(store, "STORE_DIR", home)
+    redirect_store_dir(monkeypatch, home)
     monkeypatch.setattr(config, "CONFIG_PATH", home / "config.toml")
     monkeypatch.setattr(daemon, "STATE_PATH", home / "ui.json")
     monkeypatch.setattr(daemon, "LOG_PATH", home / "ui.log")

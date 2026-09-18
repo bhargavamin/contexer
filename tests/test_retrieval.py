@@ -1,5 +1,9 @@
 """Unit tests for the pure lexical retrieval primitives."""
 
+import time
+
+import pytest
+
 from contexer import retrieval, store
 
 
@@ -68,6 +72,11 @@ class TestStoreDoesNotAliasThisLeaf:
         assert retrieval.extract_artifacts(content) == [
             "contexer", "guard", "engine", "guard", "engine", "contexer", "retrieval"]
 
+    def test_shell_script_path_is_a_structural_artifact(self):
+        assert retrieval.raw_path_artifacts(
+            "Always run migrations in deploy/migrate.sh before deploying."
+        ) == ["deploy/migrate.sh", "migrate.sh"]
+
     def test_the_index_sidecar_half_stayed_in_store(self):
         # The suite monkeypatches these THROUGH store; moving them would silently
         # break every such patch, so pin where they live.
@@ -85,13 +94,17 @@ class TestIndexTokens:
     def test_drops_stop_words(self):
         assert retrieval.index_tokens("why was the decision about postgres") == ["postgres"]
 
+    def test_arbitrary_content_words_are_not_hard_coded_away(self):
+        assert retrieval.index_tokens("why was the bm25 algorithm implemented?") == [
+            "bm25", "algorithm",
+        ]
+
     def test_empty_and_none_safe(self):
         assert retrieval.index_tokens("") == []
         assert retrieval.index_tokens(None) == []
 
     def test_keeps_duplicates_because_bm25_weights_them(self):
         assert retrieval.index_tokens("orders orders") == ["orders", "orders"]
-
 
 class TestDeriveTopics:
     def test_single_alias_hit(self):
@@ -194,6 +207,46 @@ class TestPromptRank:
         })
         ranked = retrieval.prompt_rank(["bm25"], idx)
         assert [row[0] for row in ranked] == ["subject", "noise"]
+
+    def test_title_score_is_attached_only_to_its_owner(self):
+        idx = _prompt_index({
+            "owner": (["lexical"], ["bm25"]),
+            "borrower": (["bm25"], ["unrelated"]),
+        })
+        ranked = retrieval.prompt_rank(["bm25"], idx)
+        assert ranked[0][0] == "owner"
+        by_id = {row[0]: row for row in ranked}
+        assert by_id["owner"][4:] == (0, 1)
+        assert by_id["borrower"][4:] == (1, 0)
+
+    def test_equal_scores_preserve_index_order(self):
+        idx = _prompt_index({
+            "first": (["bm25"], ["bm25"]),
+            "second": (["bm25"], ["bm25"]),
+        })
+        assert [row[0] for row in retrieval.prompt_rank(["bm25"], idx)] == [
+            "first", "second",
+        ]
+
+    @pytest.mark.perf
+    def test_two_field_rank_meets_prompt_latency_budget_at_store_cap(self):
+        idx = _prompt_index({
+            f"d{i:03d}": (
+                ["lexical", "scoring", f"feature{i:03d}", "shared"],
+                ["decision", f"feature{i:03d}", "retrieval"],
+            )
+            for i in range(500)
+        })
+        query = ["feature250", "retrieval"]
+        retrieval.prompt_rank(query, idx)  # warm caches
+        times = []
+        for _ in range(30):
+            started = time.perf_counter()
+            retrieval.prompt_rank(query, idx)
+            times.append((time.perf_counter() - started) * 1000)
+        times.sort()
+        p50 = times[len(times) // 2]
+        assert p50 < 5.0, f"two-field prompt rank too slow: p50={p50:.3f}ms"
 
 
 class TestExtractArtifacts:

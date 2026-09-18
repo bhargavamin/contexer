@@ -1,0 +1,73 @@
+{
+  "name": "18-wrong-session-and-wrong-repo-evidence",
+  "issue": null,
+  "summary": "Support evidence from another session or another repo never attaches.",
+  "events": [
+    {
+      "schema_version": 1,
+      "event_id": "813bec73-32a3-5803-9db9-cb71b17bf681",
+      "session_id": "sess-a",
+      "repo_key": "/repo",
+      "kind": "user_directive",
+      "occurred_at": "2026-08-01T10:00:00+00:00",
+      "source": "replay",
+      "summary": "Do not edit src/generated/client.ts directly. Change openapi/schema.yaml and regenerate.",
+      "files": [],
+      "content_hash": null,
+      "attributes": {}
+    },
+    {
+      "schema_version": 1,
+      "event_id": "3a768f06-045d-5090-8530-3bcc7bbc6537",
+      "session_id": "sess-b",
+      "repo_key": "/repo",
+      "kind": "file_changed",
+      "occurred_at": "2026-08-01T10:01:00+00:00",
+      "source": "replay",
+      "summary": "regenerated the client",
+      "files": [
+        "src/generated/client.ts"
+      ],
+      "content_hash": null,
+      "attributes": {}
+    }
+  ],
+  "foreign_repo_event": {
+    "schema_version": 1,
+    "event_id": "76008864-634b-590b-bbeb-51f3863f9ffe",
+    "session_id": "sess-a",
+    "repo_key": "/other-repo",
+    "kind": "user_directive",
+    "occurred_at": "2026-08-01T10:00:00+00:00",
+    "source": "replay",
+    "summary": "Do not edit src/generated/client.ts directly. Change openapi/schema.yaml and regenerate.",
+    "files": [],
+    "content_hash": null,
+    "attributes": {}
+  },
+  "decisions": [],
+  "expected": [
+    {
+      "kind": "new",
+      "title": "Do not edit src/generated/client.ts directly.",
+      "subtype": "constraint",
+      "score": 50,
+      "target_decision_id": null,
+      "source_files": [],
+      "uncertainties": []
+    },
+    {
+      "kind": "insufficient",
+      "title": "Files changed with no stated decision",
+      "subtype": "architecture",
+      "score": 10,
+      "target_decision_id": null,
+      "source_files": [
+        "src/generated/client.ts"
+      ],
+      "uncertainties": [
+        "files changed in session sess-b with no stated decision to review"
+      ]
+    }
+  ]
+}

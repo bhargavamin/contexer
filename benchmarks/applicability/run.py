@@ -12,6 +12,10 @@ Modes:
     uv run python benchmarks/applicability/run.py --fix2     # + title-token diff gate (EXPERIMENTAL — rejected v1)
     uv run python benchmarks/applicability/run.py --fixed    # both, --explain names every dropped GT hit
 
+Private corpora may stay in another checkout: pass an absolute `--gt` and, with
+`--rank-meta`, an absolute `--rank-meta-file`. The corpus-integrity floor follows
+the ground-truth basename, not the checkout that holds it.
+
 Store reconstruction (approximations disclosed, per honest-measurement):
 - An entry participates if its earliest timestamp (entry.timestamp or first
   revision created_at) <= the PR's merge time.
@@ -34,7 +38,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from contexer import guard_engine  # noqa: E402
+from contexer import guard_engine, retrieval  # noqa: E402
 from contexer.guard_engine import _parse_iso  # noqa: E402  # offset-aware, shared with fix 1
 
 HERE = Path(__file__).resolve().parent
@@ -47,6 +51,17 @@ REPO_PATH = {
     "contexer": Path.home() / "repos/personal/contexer",
     "contexer-teams": Path.home() / "repos/personal/contexer-teams",
 }
+
+
+def _input_path(value: str) -> Path:
+    """Resolve private benchmark inputs without requiring them in this worktree."""
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else HERE / path
+
+
+def _corpus_floor(path: Path) -> int:
+    """Keep corpus-integrity floors stable when the input is outside this worktree."""
+    return 20 if path.name == "ground_truth.json" else 10
 
 
 def _entry_birth(entry: dict) -> str:
@@ -100,6 +115,8 @@ def main() -> int:
                     help="score guard_engine.rank_applicable's tiers (strong P/R + union recall)")
     ap.add_argument("--rank-meta", action="store_true",
                     help="with --rank: prepend the PR title+description (pr_meta.json) to the query")
+    ap.add_argument("--rank-meta-file", default="pr_meta.json",
+                    help="PR metadata path (absolute paths support clean worktrees)")
     ap.add_argument("--explain", action="store_true", help="name every dropped/missed GT decision")
     ap.add_argument("--gt", default="ground_truth.json",
                     help="ground-truth file (ground_truth_holdout.json = the held-out set)")
@@ -107,10 +124,11 @@ def main() -> int:
     fix1 = args.fix1 or args.fixed
     fix2 = args.fix2 or args.fixed
 
-    bench = json.loads((HERE / args.gt).read_text())
+    gt_path = _input_path(args.gt)
+    bench = json.loads(gt_path.read_text())
     prs = bench["prs"]
     # The frozen corpus holds 24 PRs, the held-out set 12 — floors sized to each.
-    min_prs = 20 if args.gt == "ground_truth.json" else 10
+    min_prs = _corpus_floor(gt_path)
     assert len(prs) >= min_prs, f"corpus shrank to {len(prs)} PRs (floor {min_prs}) — refusing to report rates"
 
     stores = {name: json.loads(p.read_text())["entries"] for name, p in STORE.items()}
@@ -124,6 +142,12 @@ def main() -> int:
     r_tp = r_pred = 0          # --rank: strong tier
     u_tp = 0                   # --rank: strong+candidates union recall numerator
     rank_rows = []
+
+    rank_meta = (
+        json.loads(_input_path(args.rank_meta_file).read_text())
+        if args.rank and args.rank_meta
+        else {}
+    )
 
     for pr in prs:
         repo, num = pr["repo"], pr["num"]
@@ -141,10 +165,10 @@ def main() -> int:
             # EXPERIMENTAL, and REJECTED by this benchmark's own first run
             # (see docstring / report): >=2 title-token overlap with the diff.
             # Kept here so the rejection stays reproducible, never in production.
-            change_tokens = set(guard_engine.store._index_tokens(
+            change_tokens = set(retrieval.index_tokens(
                 diff_text(repo, pr["base_sha"], pr["head_sha"])))
             for h in hits:
-                title_tokens = set(guard_engine.store._index_tokens(h["title"]))
+                title_tokens = set(retrieval.index_tokens(h["title"]))
                 h["tier"] = ("governs" if len(title_tokens & change_tokens) >= 2
                              else "candidate")
         kept = [h for h in hits
@@ -191,7 +215,7 @@ def main() -> int:
         if args.rank:
             change = diff_text(repo, pr["base_sha"], pr["head_sha"])
             if args.rank_meta:
-                m = json.loads((HERE / "pr_meta.json").read_text()).get(f"{repo}#{num}", {})
+                m = rank_meta.get(f"{repo}#{num}", {})
                 change = f"{m.get('title', '')}\n{m.get('body', '')}\n{change}"
             tiers = guard_engine.rank_applicable(
                 str(REPO_PATH[repo]), pr["files"], change,

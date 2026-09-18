@@ -34,10 +34,13 @@ CALLER_ROOTS = ("contexer", "benchmarks")
 # The rule applies to ANY module that reaches the store, so the check now finds its own subjects
 # and there is no list left to drift. This is the same failure test_sidecars.py exists to
 # prevent: "Four separate declaration bugs reached review before that test existed."
+# `reconcile` is a coordinator above store rather than a leaf; it remains listed only so Rule 3
+# also rejects any future downward alias from store to that coordinator.
 LEAVES = frozenset({
     "revisions", "reconciliation", "review", "retrieval", "redact", "miner",
     "conflicts", "guard_engine", "anchors", "console_api", "scope_audit", "memory_sync",
-    "sidecars", "share_status",
+    "sidecars", "share_status", "evidence", "spool", "candidates", "reconcile", "lifecycle",
+    "policy", "policy_api", "review_impact",
 })
 
 
@@ -169,7 +172,8 @@ class TestRuleOneFacadeIsBackCompatOnly:
     extraction moved them. It is a compatibility shim, not the surface production code uses."""
 
     def test_no_module_reaches_a_re_exported_name_through_store(self):
-        exported = store._GUARD_EXPORTS | store._CONFLICT_EXPORTS | store._CONSOLE_EXPORTS
+        exported = (store._GUARD_EXPORTS | store._CONFLICT_EXPORTS | store._CONSOLE_EXPORTS
+                    | store._LIFECYCLE_EXPORTS)
         offenders = []
         for path, tree in _py_files(CALLER_ROOTS):
             if path == STORE_PY:
@@ -183,7 +187,8 @@ class TestRuleOneFacadeIsBackCompatOnly:
 
     def test_every_re_exported_name_still_resolves(self):
         # The shim's whole purpose. If it stops resolving it is broken, not merely unused.
-        for name in store._GUARD_EXPORTS | store._CONFLICT_EXPORTS | store._CONSOLE_EXPORTS:
+        for name in (store._GUARD_EXPORTS | store._CONFLICT_EXPORTS | store._CONSOLE_EXPORTS
+                     | store._LIFECYCLE_EXPORTS):
             assert getattr(store, name) is not None, name
 
 

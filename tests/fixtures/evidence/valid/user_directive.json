@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "event_id": "0b7d1c2e-1111-4a2b-8c3d-000000000001",
+  "session_id": "sess-7c1f",
+  "repo_key": "_Users_dev_contexer",
+  "kind": "user_directive",
+  "occurred_at": "2026-08-24T10:00:00+00:00",
+  "source": "claude_user_prompt_submit",
+  "summary": "Never commit directly to main",
+  "files": [],
+  "content_hash": null,
+  "attributes": {}
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "event_id": "0b7d1c2e-1111-4a2b-8c3d-000000000003",
+  "session_id": "sess-7c1f",
+  "repo_key": "_Users_dev_contexer",
+  "kind": "file_changed",
+  "occurred_at": "2026-08-24T10:00:00+00:00",
+  "source": "codex_post_tool_use",
+  "summary": "Authentication middleware changed",
+  "files": [
+    "src/auth.py"
+  ],
+  "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "attributes": {}
+}

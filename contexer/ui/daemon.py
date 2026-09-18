@@ -310,11 +310,15 @@ def _claim_state(port: int, version: str, token: str | None) -> tuple[UiState, b
 
 
 def _spawn(port: int) -> int:
-    """Detach a daemon and return its pid. Deliberately never waited on."""
+    """Detach a daemon and return its pid. Deliberately never waited on.
+
+    `-P` keeps the child off the cwd: `-m` prepends it to sys.path, so a daemon started
+    from a checked-out contexer repo would import that source tree instead of the
+    installed package (see team_context._spawn_refresh)."""
     LOG_PATH.parent.mkdir(mode=0o700, exist_ok=True)
     with open(LOG_PATH, "a", encoding="utf-8") as log:
         child = subprocess.Popen(
-            [sys.executable, "-m", SPAWN_TARGET, "--port", str(port)],
+            [sys.executable, "-P", "-m", SPAWN_TARGET, "--port", str(port)],
             start_new_session=True, stdout=log, stderr=log, stdin=subprocess.DEVNULL)
     return child.pid
 

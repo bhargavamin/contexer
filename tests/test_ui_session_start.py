@@ -19,7 +19,8 @@ from contexer.ui import daemon
 # The exact status lines this build produced before the console existed. Literals, not
 # recomputed from the code under test: a regression guard that derives its own expectation
 # cannot fail.
-NO_CONTEXT = "Contexer: no context stored - setup offer on next prompt"
+NO_CONTEXT = ('Contexer: quick setup - ask "Run Contexer bootstrap" to discover '
+              "this repo's decisions, rules, and conventions.")
 RESUME_EMPTY = "Contexer: resumed with no stored context - mining this conversation for decisions"
 POPULATED = ("Contexer: 1 architecture decision will be loaded on demand. 1 decision pending "
              "review - say 'review pending' or run `contexer review`.")

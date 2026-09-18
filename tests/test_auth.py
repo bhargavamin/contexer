@@ -16,13 +16,14 @@ from pathlib import Path
 import pytest
 
 from contexer import auth, config, store
+from tests.conftest import redirect_store_dir
 
 TEAM = config.Profile(mode="team", endpoint="http://localhost:8080/mcp", token=None)
 
 
 @pytest.fixture
 def creds_env(tmp_path, monkeypatch):
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / ".contexer" / "config.toml")  # login self-configures
     return tmp_path
 
@@ -783,8 +784,10 @@ def test_the_login_job_spawns_the_cli_through_the_module_form(creds_env, monkeyp
     argv = captured["argv"]
     # `-u`: stdout is a pipe, so without it the authorize URL sits in the child's block buffer
     # until the flow ends — which is minutes after the only moment it is useful.
-    assert argv[:5] == [auth.sys.executable, "-u", "-m", "contexer", "login"]
-    assert argv[5] == "--endpoint" and argv[6]
+    # `-P`: `-m` prepends the process cwd to sys.path, and the CLI can be run from a
+    # checked-out contexer repo, whose contexer/ source would shadow the installed package.
+    assert argv[:6] == [auth.sys.executable, "-P", "-u", "-m", "contexer", "login"]
+    assert argv[6] == "--endpoint" and argv[7]
     assert captured["kwargs"]["stdin"] is subprocess.DEVNULL  # never prompts on our stdin
     assert captured["kwargs"]["stderr"] is subprocess.STDOUT  # the tail carries the reason
 

@@ -1,25 +1,28 @@
 """Tests for the contexer CLI management commands: version, status, reinstall,
 uninstall --purge, help, and the main() dispatch."""
+import io
 import json
 import os
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 import pytest
 
-from contexer import cli
+from contexer import cli, updates
+from tests.conftest import redirect_store_dir
 from contexer.cli import install, reinstall, status, uninstall, version
 
 
 @pytest.fixture(autouse=True)
 def _no_network_update_check(monkeypatch):
-    """status() checks PyPI for updates — tests must never hit the network.
-    Yields the real function so opt-out tests can exercise it directly."""
-    original = cli._latest_pypi_version
-    monkeypatch.setattr(cli, "_latest_pypi_version", lambda: None)
-    yield original
+    """status() asks PyPI for the latest release - tests must never hit the network.
+
+    The fetch itself, its opt-out and its failure modes are covered in test_updates.py, which
+    owns that function. What is pinned here is only how `status` RENDERS the answer."""
+    monkeypatch.setattr(updates, "refresh", lambda force=False: {})
 
 
 @pytest.fixture
@@ -322,57 +325,68 @@ class TestPurgeConfirmation:
 
 # ── main() dispatch ───────────────────────────────────────────────────────────
 
-def _run_main(monkeypatch, *args):
-    monkeypatch.setattr(sys, "argv", ["contexer", *args])
-    cli.main()
+def _run_main(*args):
+    """One `contexer` command line, run.
+
+    `cli.dispatch` takes the argv tail directly, so reaching a command no longer means
+    assigning `sys.argv` - a process global a test must remember to restore, and one that
+    says nothing about which command is being exercised. The four tests below that DO patch
+    `sys.argv` keep doing so on purpose: they are about `argv[0]`, the binary path the guard
+    hook installer resolves, not about dispatch."""
+    cli.dispatch(list(args))
 
 
 class TestMainDispatch:
     @pytest.mark.parametrize("flag", ["version", "--version", "-V"])
-    def test_version_flags(self, flag, monkeypatch, capsys):
-        _run_main(monkeypatch, flag)
+    def test_version_flags(self, flag, capsys):
+        _run_main(flag)
         assert "contexer " in capsys.readouterr().out
 
     @pytest.mark.parametrize("flag", ["help", "--help", "-h"])
-    def test_help_flags(self, flag, monkeypatch, capsys):
-        _run_main(monkeypatch, flag)
+    def test_help_flags(self, flag, capsys):
+        _run_main(flag)
         assert "Usage: contexer" in capsys.readouterr().out
 
-    def test_install(self, clean_home, monkeypatch):
-        _run_main(monkeypatch, "install")
+    def test_install(self, clean_home):
+        _run_main("install")
         assert (clean_home / ".claude.json").exists()
 
-    def test_uninstall(self, installed_home, monkeypatch):
-        _run_main(monkeypatch, "uninstall")
+    def test_uninstall(self, installed_home):
+        _run_main("uninstall")
         claude = json.loads((installed_home / ".claude.json").read_text())
         assert "contexer" not in claude.get("mcpServers", {})
 
-    def test_uninstall_purge(self, installed_home, monkeypatch):
-        _run_main(monkeypatch, "uninstall", "--purge", "--yes")
+    def test_uninstall_purge(self, installed_home):
+        _run_main("uninstall", "--purge", "--yes")
         assert not (installed_home / ".contexer").exists()
 
-    def test_reinstall(self, installed_home, monkeypatch):
-        _run_main(monkeypatch, "reinstall")
+    def test_reinstall(self, installed_home):
+        _run_main("reinstall")
         claude = json.loads((installed_home / ".claude.json").read_text())
         assert "contexer" in claude["mcpServers"]
 
-    def test_status(self, clean_home, monkeypatch, capsys):
-        _run_main(monkeypatch, "status")
+    def test_status(self, clean_home, capsys):
+        _run_main("status")
         assert "contexer " in capsys.readouterr().out
 
-    def test_unknown_command_exits_1(self, monkeypatch, capsys):
+    def test_unknown_command_exits_1(self, capsys):
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "bogus")
+            _run_main("bogus")
         assert exc.value.code == 1
-        assert "Unknown command: bogus" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "Unknown command: bogus" in err and "Usage: contexer" in err
 
-    def test_no_args_launches_server(self, monkeypatch):
+    def test_no_args_launches_server(self, monkeypatch, capsys):
+        """No subcommand means the assistant launched us as its MCP server over stdio, so
+        stdout is the protocol and the update aside must never follow it."""
         import contexer.server as server
         called = []
         monkeypatch.setattr(server, "main", lambda: called.append(True))
-        monkeypatch.setattr(sys, "argv", ["contexer"])
-        cli.main()
+        monkeypatch.setattr(cli, "_print_update_backstop",
+                            lambda: pytest.fail("no aside may follow the server"))
+        cli.dispatch([])
         assert called == [True]
+        assert capsys.readouterr().out == ""
 
 
 # ── status resilience ─────────────────────────────────────────────────────────
@@ -484,14 +498,13 @@ class TestPermissionDeniedGuidance:
     """Mutating commands turn PermissionError into actionable advice (exit 1),
     instead of a raw traceback — and the advice is chown, never sudo."""
 
-    def test_install_into_unwritable_claude_dir(self, clean_home, monkeypatch, capsys):
+    def test_install_into_unwritable_claude_dir(self, clean_home, capsys):
         claude_dir = clean_home / ".claude"
         claude_dir.mkdir()
         claude_dir.chmod(0o500)  # read+exec only — settings.json write must fail
         try:
-            monkeypatch.setattr(sys, "argv", ["contexer", "install"])
             with pytest.raises(SystemExit) as exc:
-                cli.main()
+                cli.dispatch(["install"])
             assert exc.value.code == 1
             err = capsys.readouterr().err
             assert "Permission denied" in err
@@ -506,17 +519,15 @@ class TestPermissionDeniedGuidance:
         def boom(path, data):
             raise PermissionError(13, "Permission denied", str(path))
         monkeypatch.setattr(claude, "_save", boom)
-        monkeypatch.setattr(sys, "argv", ["contexer", "uninstall"])
         with pytest.raises(SystemExit) as exc:
-            cli.main()
+            cli.dispatch(["uninstall"])
         assert exc.value.code == 1
         err = capsys.readouterr().err
         assert "Permission denied" in err and "chown" in err
 
-    def test_status_is_not_guarded_but_tolerant(self, clean_home, monkeypatch, capsys):
+    def test_status_is_not_guarded_but_tolerant(self, clean_home, capsys):
         # status is read-only + already resilient; it must keep working normally
-        monkeypatch.setattr(sys, "argv", ["contexer", "status"])
-        cli.main()
+        cli.dispatch(["status"])
         assert "contexer " in capsys.readouterr().out
 
 
@@ -525,27 +536,28 @@ class TestPermissionDeniedGuidance:
 class TestUpdateCheck:
     def test_update_line_when_newer_available(self, installed_home, monkeypatch, capsys):
         monkeypatch.setattr(cli, "_dist_version", lambda _: "0.5.2")
-        monkeypatch.setattr(cli, "_latest_pypi_version", lambda: "0.5.4")
+        monkeypatch.setattr(updates, "refresh", lambda force=False: {"latest": "0.5.4"})
         status()
         out = capsys.readouterr().out
         assert "update:       0.5.4 available" in out
-        assert "uv tool upgrade contexer" in out
+        # The line names the one-command remedy, not the three-step chore it replaced.
+        assert "contexer upgrade" in out
 
     def test_no_line_when_current(self, installed_home, monkeypatch, capsys):
         monkeypatch.setattr(cli, "_dist_version", lambda _: "0.5.4")
-        monkeypatch.setattr(cli, "_latest_pypi_version", lambda: "0.5.4")
+        monkeypatch.setattr(updates, "refresh", lambda force=False: {"latest": "0.5.4"})
         status()
         assert "update:" not in capsys.readouterr().out
 
     def test_no_line_when_installed_is_newer(self, installed_home, monkeypatch, capsys):
         # local dev build ahead of PyPI must not suggest a "downgrade"
         monkeypatch.setattr(cli, "_dist_version", lambda _: "0.6.0")
-        monkeypatch.setattr(cli, "_latest_pypi_version", lambda: "0.5.4")
+        monkeypatch.setattr(updates, "refresh", lambda force=False: {"latest": "0.5.4"})
         status()
         assert "update:" not in capsys.readouterr().out
 
     def test_no_line_when_pypi_unreachable(self, installed_home, monkeypatch, capsys):
-        monkeypatch.setattr(cli, "_latest_pypi_version", lambda: None)
+        monkeypatch.setattr(updates, "refresh", lambda force=False: {})
         status()
         assert "update:" not in capsys.readouterr().out
 
@@ -554,24 +566,210 @@ class TestUpdateCheck:
             raise cli.PackageNotFoundError
         monkeypatch.setattr(cli, "_dist_version", _raise)
         called = []
-        monkeypatch.setattr(cli, "_latest_pypi_version", lambda: called.append(1) or "9.9.9")
+        monkeypatch.setattr(updates, "refresh",
+                            lambda force=False: called.append(1) or {"latest": "9.9.9"})
         status()
         assert called == []  # no point asking PyPI if we can't compare
         assert "update:" not in capsys.readouterr().out
 
-    def test_env_var_opts_out_of_network_call(self, _no_network_update_check, monkeypatch):
-        real_fetch = _no_network_update_check  # the un-stubbed function
+
+# ── upgrade ───────────────────────────────────────────────────────────────────
+
+class TestUpgrade:
+    """`contexer upgrade`: the one command the update notice is allowed to name.
+
+    The safety-critical case is `uv-tool-source`. Everything else is presentation."""
+
+    @pytest.fixture(autouse=True)
+    def _known_versions(self, monkeypatch):
+        monkeypatch.setattr(updates, "installed_version", lambda: "1.0.0")
+        monkeypatch.setattr(updates, "refresh", lambda force=False: {"latest": "2.0.0"})
+
+    @pytest.fixture
+    def _never_runs(self, monkeypatch):
+        """Fails the test if anything is executed. Most branches must only PRINT."""
+        def _boom(*a, **k):
+            raise AssertionError("a subprocess was run")
+        monkeypatch.setattr(cli.subprocess, "run", _boom)
+
+    def test_source_install_is_never_replaced(self, monkeypatch, capsys, _never_runs):
+        """`uv tool install --from <clone>` looks like a PyPI install from the outside.
+        Upgrading it would silently swap a developer's own build for a release."""
+        monkeypatch.setattr(updates, "install_method",
+                            lambda: (updates.UV_TOOL_SOURCE, "/home/me/src/contexer"))
+        cli.upgrade()
+        out = capsys.readouterr().out
+        assert "installed from source at /home/me/src/contexer" in out
+        assert "scripts/install.sh" in out
+
+    def test_pip_install_is_told_not_run(self, monkeypatch, capsys, _never_runs):
+        """The target environment is the developer's to choose, so pip is never invoked."""
+        monkeypatch.setattr(updates, "install_method",
+                            lambda: (updates.PIP, "/usr/lib/python3.12/site-packages"))
+        cli.upgrade()
+        out = capsys.readouterr().out
+        assert "pip install --upgrade contexer" in out
+        assert "contexer reinstall" in out
+
+    def test_unknown_install_is_told_not_run(self, monkeypatch, capsys, _never_runs):
+        monkeypatch.setattr(updates, "install_method", lambda: (updates.UNKNOWN, ""))
+        cli.upgrade()
+        assert "not upgraded for you" in capsys.readouterr().out
+
+    def test_dry_run_shows_both_steps_and_runs_neither(self, monkeypatch, capsys, _never_runs):
+        monkeypatch.setattr(updates, "install_method", lambda: (updates.UV_TOOL, "/x"))
+        cli.upgrade(["--dry-run"])
+        out = capsys.readouterr().out
+        assert "Would run:  uv tool upgrade contexer" in out
+        assert "Would then: contexer reinstall" in out
+
+    def test_missing_uv_is_reported_not_attempted(self, monkeypatch, capsys, _never_runs):
+        monkeypatch.setattr(updates, "install_method", lambda: (updates.UV_TOOL, "/x"))
+        monkeypatch.setattr(cli.shutil, "which", lambda _: None)
+        cli.upgrade()
+        assert "uv is not on PATH" in capsys.readouterr().out
+
+    def test_uv_tool_upgrades_then_resyncs_then_says_restart(self, clean_home, monkeypatch,
+                                                             capsys):
+        monkeypatch.setattr(updates, "install_method", lambda: (updates.UV_TOOL, "/x"))
+        monkeypatch.setattr(cli.shutil, "which", lambda _: "/usr/bin/uv")
+        ran = []
+
+        def _run(cmd, **kw):
+            ran.append(cmd)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        monkeypatch.setattr(cli.subprocess, "run", _run)
+        cli.upgrade()
+        out = capsys.readouterr().out
+        # First, and only then the re-sync (which shells out to git on its own account).
+        assert ran[0] == ["uv", "tool", "upgrade", "contexer"]
+        assert "-> contexer reinstall" in out
+        assert "Restart your AI assistant" in out
+
+    def test_failed_upgrade_exits_nonzero_and_does_not_resync(self, monkeypatch, capsys):
+        """A failed upgrade must leave the config alone rather than re-syncing hooks for a
+        version that was never installed."""
+        monkeypatch.setattr(updates, "install_method", lambda: (updates.UV_TOOL, "/x"))
+        monkeypatch.setattr(cli.shutil, "which", lambda _: "/usr/bin/uv")
+        monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: types.SimpleNamespace(
+            returncode=1, stdout="", stderr="no matching distribution"))
+        monkeypatch.setattr(cli, "reinstall", lambda: pytest.fail("re-synced after a failure"))
+        with pytest.raises(SystemExit) as exc:
+            cli.upgrade()
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "no matching distribution" in err   # uv's own words, not a paraphrase
+        assert "still 1.0.0" in err
+
+    def test_already_current_stops_before_touching_anything(self, monkeypatch, capsys,
+                                                            _never_runs):
+        monkeypatch.setattr(updates, "refresh", lambda force=False: {"latest": "1.0.0"})
+        monkeypatch.setattr(updates, "install_method", lambda: (updates.UV_TOOL, "/x"))
+        cli.upgrade()
+        assert "already up to date" in capsys.readouterr().out
+
+    def test_offline_still_offers_the_upgrade(self, monkeypatch, capsys, _never_runs):
+        """PyPI being unreachable is not a reason to refuse; uv can still resolve.
+
+        The opt-out is cleared deliberately: an empty state means "offline" only when the
+        check is ON. With the opt-out set it means "we never looked", which is a different
+        message and has its own test."""
+        monkeypatch.delenv("CONTEXER_NO_UPDATE_CHECK", raising=False)
+        monkeypatch.setattr(updates, "refresh", lambda force=False: {})
+        monkeypatch.setattr(updates, "install_method", lambda: (updates.UV_TOOL, "/x"))
+        cli.upgrade(["--dry-run"])
+        out = capsys.readouterr().out
+        assert "could not reach PyPI" in out
+        assert "Would run:" in out
+
+
+class TestStatusDoesNotDoubleNotify:
+    """Regression: `status` printed its own update line AND the backstop's, in one run, from
+    two different sources - so it reported two DIFFERENT versions."""
+
+    def test_status_prints_one_update_line_only(self, installed_home, monkeypatch, capsys):
+        monkeypatch.setattr(cli, "_dist_version", lambda _: "0.5.2")
+        monkeypatch.setattr(updates, "refresh", lambda force=False: {"latest": "0.5.4"})
+        cli.dispatch(["status"])
+        captured = capsys.readouterr()
+        assert captured.out.count("0.5.4") == 1
+        assert "is available" not in captured.err   # the backstop stayed out of it
+
+
+class TestStatusReportsTheFloor:
+    def test_unsupported_line_when_below_the_floor(self, installed_home, monkeypatch, capsys):
+        """The `update:` line fires only when a NEWER release exists and says nothing about
+        support, so a breach needs its own line or `status` stays silent about it."""
+        monkeypatch.setattr(cli, "_dist_version", lambda _: "0.5.2")
+        monkeypatch.setattr(updates, "refresh",
+                            lambda force=False: {"latest": "0.5.2", "floor": "0.5.4"})
+        status()
+        out = capsys.readouterr().out
+        assert "unsupported:  below the minimum supported version 0.5.4" in out
+
+    def test_no_line_when_at_or_above_the_floor(self, installed_home, monkeypatch, capsys):
+        monkeypatch.setattr(cli, "_dist_version", lambda _: "0.5.4")
+        monkeypatch.setattr(updates, "refresh",
+                            lambda force=False: {"latest": "0.5.4", "floor": "0.5.4"})
+        status()
+        assert "unsupported:" not in capsys.readouterr().out
+
+
+class TestUpgradeOptOut:
+    def test_opt_out_is_not_reported_as_a_network_failure(self, monkeypatch, capsys):
+        """Blaming the network would send a developer to debug their proxy over a setting
+        they chose themselves."""
         monkeypatch.setenv("CONTEXER_NO_UPDATE_CHECK", "1")
+        monkeypatch.setattr(updates, "installed_version", lambda: "1.0.0")
+        monkeypatch.setattr(updates, "install_method", lambda: (updates.PIP, "/x"))
+        cli.upgrade()
+        out = capsys.readouterr().out
+        assert "CONTEXER_NO_UPDATE_CHECK is set" in out
+        assert "could not reach PyPI" not in out
 
-        def _no_io(*a, **k):
-            raise AssertionError("network I/O attempted despite opt-out")
-        monkeypatch.setattr(cli.urllib.request, "urlopen", _no_io)
-        assert real_fetch() is None  # env guard returns before any I/O
 
-    def test_version_tuple_parsing(self):
-        assert cli._version_tuple("0.5.4") == (0, 5, 4)
-        assert cli._version_tuple("0.5.x") is None
-        assert cli._version_tuple("unknown (not installed as a package)") is None
+class TestUpdateBackstop:
+    """The host-independent half of the notification contract: Cursor and Gemini expose no
+    user-facing channel, so their users are told here, in their own shell."""
+
+    def test_prints_a_due_notice_on_stderr(self, monkeypatch, capsys):
+        monkeypatch.setattr(updates, "spawn_refresh", lambda: None)
+        monkeypatch.setattr(updates, "deliver",
+                            lambda render: render("Contexer 2.0.0 is available"))
+        cli._print_update_backstop()
+        captured = capsys.readouterr()
+        assert "Contexer 2.0.0 is available" in captured.err
+        assert captured.out == ""   # stdout may be piped or parsed; asides never go there
+
+    def test_goes_through_deliver_so_a_failed_print_does_not_consume(self, monkeypatch):
+        """The backstop is the one surface `deliver`'s consume-after-render rule exists for:
+        it renders to a stream that can fail."""
+        seen = []
+        monkeypatch.setattr(updates, "spawn_refresh", lambda: None)
+        monkeypatch.setattr(updates, "deliver", lambda render: seen.append(render) or None)
+        cli._print_update_backstop()
+        assert len(seen) == 1 and callable(seen[0])
+
+    def test_silent_when_nothing_is_due(self, monkeypatch, capsys):
+        monkeypatch.setattr(updates, "spawn_refresh", lambda: None)
+        monkeypatch.setattr(updates, "deliver", lambda _render: None)
+        cli._print_update_backstop()
+        assert capsys.readouterr().err == ""
+
+    def test_starts_the_refresh_because_no_hook_may_have(self, monkeypatch):
+        spawned = []
+        monkeypatch.setattr(updates, "spawn_refresh", lambda: spawned.append(1))
+        monkeypatch.setattr(updates, "deliver", lambda _render: None)
+        cli._print_update_backstop()
+        assert spawned == [1]
+
+    def test_never_raises(self, monkeypatch, capsys):
+        """No command's exit status may depend on an aside."""
+        def _boom():
+            raise RuntimeError("state exploded")
+        monkeypatch.setattr(updates, "spawn_refresh", _boom)
+        cli._print_update_backstop()
+        assert capsys.readouterr().err == ""
 
 
 # ── multi-target status ───────────────────────────────────────────────────────
@@ -580,16 +778,38 @@ class TestStatusMultiTarget:
     """status() with --target cursor (and the target-aware installed_ok check)."""
 
     @pytest.fixture
-    def cursor_installed_home(self, clean_home, monkeypatch):
-        """Install only for cursor via cli.main() with monkeypatched argv."""
-        monkeypatch.setattr(sys, "argv", ["contexer", "install", "--target", "cursor"])
-        cli.main()
+    def cursor_installed_home(self, clean_home):
+        """Install only for cursor, through the dispatch table."""
+        cli.dispatch(["install", "--target", "cursor"])
         return clean_home
 
     def test_status_shows_cursor_when_installed(self, cursor_installed_home, capsys):
         status(["--target", "cursor"])
         out = capsys.readouterr().out
         assert "[cursor]" in out
+
+    def test_status_reports_what_cursor_can_and_cannot_observe(self, cursor_installed_home,
+                                                               capsys):
+        # The human-readable half of the coverage block. Cursor has no write hook, so status
+        # says `file changes unavailable` rather than letting a zero-event spool read as a
+        # quiet session - and never dresses an agent-reported conclusion up as an observed one.
+        status(["--target", "cursor"])
+        out = capsys.readouterr().out
+        assert "coverage:     cursor: directives captured, file changes unavailable" in out
+        assert "conclusions agent-reported" in out
+
+    def test_status_never_claims_a_reconciliation_it_did_not_run(self, cursor_installed_home,
+                                                                 capsys):
+        # `status` runs no reconciliation pass, so it must report only what is statically true.
+        # It used to render the block's per-pass half from its defaults, printing "reconciliation
+        # complete, 0 events dropped" beside a pending-evidence count - and printing it for
+        # cursor and codex, which have no reconciliation checkpoint at all (issue 1). A pass
+        # outcome belongs to a receipt; here there is no pass to report on.
+        status(["--target", "cursor"])
+        out = capsys.readouterr().out
+        assert "coverage:     cursor:" in out
+        assert "reconciliation" not in out
+        assert "dropped" not in out
 
     def test_cursor_only_install_not_reported_missing(self, cursor_installed_home, capsys):
         status(["--target", "cursor"])
@@ -698,12 +918,65 @@ class TestReviewTitleHeadline:
         assert head_idx < body_idx
 
 
-class TestReviewAnchorCandidates:
-    def test_pending_decision_with_candidates_shows_would_anchor_line(
+class TestReviewAutomaticProposalSeams:
+    def test_successful_approval_enqueues_after_review_mutation(
             self, tmp_repo, monkeypatch, capsys):
-        """A pending decision carrying anchor_candidates (issue #175 Task 3) surfaces a
-        one-line 'Would anchor: ...' hint before the approve/edit/ignore/skip prompt, so the
-        human's approval signature is informed about what it will bless."""
+        from contexer import share_policy, store
+
+        monkeypatch.setattr(store, "git_root", lambda _cwd: tmp_repo)
+        stored, entry_id = store.update_decision(
+            tmp_repo, "Never log secrets", "session", "constraint")
+        assert stored
+        calls = []
+        monkeypatch.setattr(
+            share_policy, "enqueue_after_local_mutation",
+            lambda repo, decision_id: calls.append((repo, decision_id)),
+        )
+        monkeypatch.setattr("builtins.input", lambda *_args: "Y")
+
+        cli.review()
+
+        assert calls == [(tmp_repo, entry_id)]
+        assert "Approved." in capsys.readouterr().out
+
+    def test_skip_never_enqueues(self, tmp_repo, monkeypatch):
+        from contexer import share_policy, store
+
+        monkeypatch.setattr(store, "git_root", lambda _cwd: tmp_repo)
+        stored, _entry_id = store.update_decision(
+            tmp_repo, "Never log secrets", "session", "constraint")
+        assert stored
+        monkeypatch.setattr(
+            share_policy, "enqueue_after_local_mutation",
+            lambda *_args: pytest.fail("skip must not enqueue"),
+        )
+        monkeypatch.setattr("builtins.input", lambda *_args: "S")
+        cli.review()
+
+    def test_restore_command_enqueues_after_success(self, monkeypatch, capsys):
+        from contexer import lifecycle, share_policy
+
+        calls = []
+        monkeypatch.setattr(cli, "_cli_repo", lambda: "/repo")
+        monkeypatch.setattr(
+            lifecycle, "restore_decision",
+            lambda *_args: calls.append("restore") or (True, "Restored"),
+        )
+        monkeypatch.setattr(
+            share_policy, "enqueue_after_local_mutation",
+            lambda repo, decision_id: calls.append((repo, decision_id)),
+        )
+
+        cli._lifecycle_cmd(["12345678"], retiring=False)
+
+        assert calls == ["restore", ("/repo", "12345678")]
+        assert "Restored" in capsys.readouterr().out
+
+
+class TestReviewAnchorCandidates:
+    def test_pending_decision_with_recent_edit_candidates_shows_possible_line(
+            self, tmp_repo, monkeypatch, capsys):
+        """A proximity-only candidate is visible but explicitly non-authoritative."""
         from contexer import store
 
         monkeypatch.setattr(store, "git_root", lambda _cwd: tmp_repo)
@@ -716,7 +989,8 @@ class TestReviewAnchorCandidates:
         cli.review()
 
         out = capsys.readouterr().out
-        assert "Would anchor" in out and "auth/jwt.py" in out
+        assert "Possible files" in out and "auth/jwt.py" in out
+        assert "NOT anchored on approval" in out
 
     def test_pending_decision_without_candidates_omits_would_anchor_line(
             self, tmp_repo, monkeypatch, capsys):
@@ -794,8 +1068,7 @@ def guard_repo(tmp_path, monkeypatch):
     subprocess.run(["git", "config", "user.email", "guard@test.local"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "Guard Test"], cwd=repo, check=True)
     subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, check=True)
-    from contexer import store
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path / ".contexer")
+    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
     monkeypatch.chdir(repo)
     return repo
 
@@ -825,18 +1098,18 @@ def _gseed(repo, content, *, subtype="architecture", status="approved",
 
 
 class TestGuardDispatchAndExitCodes:
-    def test_dispatch_reaches_guard_no_staged_changes(self, guard_repo, monkeypatch):
+    def test_dispatch_reaches_guard_no_staged_changes(self, guard_repo):
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard")
+            _run_main("guard")
         assert exc.value.code == 0
 
-    def test_advisory_only_exits_0(self, guard_repo, monkeypatch, capsys):
+    def test_advisory_only_exits_0(self, guard_repo, capsys):
         entry = _gseed(guard_repo, "Decided to use JWT for auth",
                         source_files=["auth/jwt.py"])
         _gwrite(guard_repo, "auth/jwt.py", "token = 1\n")
         _ggit(guard_repo, "add", "auth/jwt.py")
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard")
+            _run_main("guard")
         assert exc.value.code == 0
         out = capsys.readouterr().out
         assert "review this commit against 1 approved decision(s)" in out
@@ -844,14 +1117,14 @@ class TestGuardDispatchAndExitCodes:
         assert "auth/jwt.py" in out
         assert "dismiss: contexer guard --dismiss" in out
 
-    def test_violation_exits_1(self, guard_repo, monkeypatch, capsys):
+    def test_violation_exits_1(self, guard_repo, capsys):
         from contexer import store
         entry = _gseed(guard_repo, "Never commit TODO markers")
         store.arm_guard(str(guard_repo), entry["id"], "regex", pattern="TODO")
         _gwrite(guard_repo, "a.py", "# TODO fix this\n")
         _ggit(guard_repo, "add", "a.py")
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard")
+            _run_main("guard")
         assert exc.value.code == 1
         out = capsys.readouterr().out
         assert f"✗ a.py:1 violates decision [{entry['id'][:8]}]" in out
@@ -859,7 +1132,7 @@ class TestGuardDispatchAndExitCodes:
         assert "contexer guard disarm" in out
 
     def test_advisories_and_violations_both_print_violation_wins_exit(
-            self, guard_repo, monkeypatch, capsys):
+            self, guard_repo, capsys):
         from contexer import store
         _gseed(guard_repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"])
         rule_entry = _gseed(guard_repo, "Never commit TODO markers")
@@ -867,20 +1140,20 @@ class TestGuardDispatchAndExitCodes:
         _gwrite(guard_repo, "auth/jwt.py", "token = 1 # TODO\n")
         _ggit(guard_repo, "add", "auth/jwt.py")
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard")
+            _run_main("guard")
         assert exc.value.code == 1
         out = capsys.readouterr().out
         assert "review this commit against 1 approved decision(s)" in out
         assert "✗ auth/jwt.py" in out
 
-    def test_advisory_cap_reports_suppressed_count(self, guard_repo, monkeypatch, capsys):
+    def test_advisory_cap_reports_suppressed_count(self, guard_repo, capsys):
         for i in range(7):
             _gseed(guard_repo, f"Decision number {i} about auth handling",
                    source_files=["auth/jwt.py"])
         _gwrite(guard_repo, "auth/jwt.py", "token = 1\n")
         _ggit(guard_repo, "add", "auth/jwt.py")
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard")
+            _run_main("guard")
         assert exc.value.code == 0
         out = capsys.readouterr().out
         assert "review this commit against 5 approved decision(s)" in out
@@ -892,7 +1165,7 @@ class TestGuardDispatchAndExitCodes:
         _gwrite(guard_repo, "auth/jwt.py", "token = 1\n")
         _ggit(guard_repo, "add", "auth/jwt.py")
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard")
+            _run_main("guard")
         assert exc.value.code == 0
         out, err = capsys.readouterr()
         assert out == "" and err == ""
@@ -905,7 +1178,7 @@ class TestGuardDispatchAndExitCodes:
             raise RuntimeError("boom")
         monkeypatch.setattr(guard_engine, "guard_staged", boom)
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard")
+            _run_main("guard")
         assert exc.value.code == 0
         assert capsys.readouterr().err.strip() == \
             "contexer guard: internal error, skipping checks"
@@ -916,7 +1189,7 @@ class TestGuardDispatchAndExitCodes:
         monkeypatch.setattr(guard_engine, "guard_staged",
                              lambda *a, **k: {"advisories": [], "violations": [], "error": True})
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard")
+            _run_main("guard")
         assert exc.value.code == 0
         assert capsys.readouterr().err.strip() == \
             "contexer guard: internal error, skipping checks"
@@ -931,7 +1204,7 @@ class TestGuardDispatchAndExitCodes:
             "advisories": [], "violations": [],
             "unchecked": [{"file": "contexer/store.py", "reason": "too-large"}]})
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard")
+            _run_main("guard")
         assert exc.value.code == 0
         err = capsys.readouterr().err.strip()
         assert err == ("contexer guard: 1 staged file(s) not checked by armed rules: "
@@ -944,7 +1217,7 @@ class TestGuardDispatchAndExitCodes:
         monkeypatch.setattr(guard_engine, "guard_staged", lambda *a, **k: {
             "advisories": [], "violations": [], "unchecked": rows})
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard")
+            _run_main("guard")
         assert exc.value.code == 0
         err = capsys.readouterr().err.strip()
         assert err.startswith("contexer guard: 7 staged file(s) not checked")
@@ -959,7 +1232,7 @@ class TestGuardDispatchAndExitCodes:
                             "title": "No TODOs", "message": ""}],
             "unchecked": [{"file": "big.py", "reason": "too-large"}]})
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard")
+            _run_main("guard")
         # The notice is additive: a real violation still blocks the commit.
         assert exc.value.code == 1
         out, err = capsys.readouterr()
@@ -983,17 +1256,17 @@ class TestGuardDispatchAndExitCodes:
                             "title": "No TODOs", "message": ""}],
             "unchecked": [{"file": "big.py", "reason": "too-large"}]})
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard")
+            _run_main("guard")
         assert exc.value.code == 1, "the blocking path must survive an advisory failure"
         assert "violates decision" in capsys.readouterr().out
 
-    def test_explain_shows_rejected_with_reason(self, guard_repo, monkeypatch, capsys):
+    def test_explain_shows_rejected_with_reason(self, guard_repo, capsys):
         _gseed(guard_repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"],
                created_by="ai", status="suggested")
         _gwrite(guard_repo, "auth/jwt.py", "token = 1\n")
         _ggit(guard_repo, "add", "auth/jwt.py")
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard", "--explain")
+            _run_main("guard", "--explain")
         assert exc.value.code == 0
         out = capsys.readouterr().out
         assert "REJECTED" in out
@@ -1010,7 +1283,7 @@ class TestGuardDismiss:
 
         monkeypatch.setattr("builtins.input",
                              lambda *_a: pytest.fail("hash form must not prompt"))
-        _run_main(monkeypatch, "guard", "--dismiss", h)
+        _run_main("guard", "--dismiss", h)
         assert "Dismissed" in capsys.readouterr().out
         assert guard_engine._dismissed_guard(str(guard_repo)) == {h}
 
@@ -1024,7 +1297,7 @@ class TestGuardDismiss:
 
         monkeypatch.setattr("builtins.input",
                              lambda *_a: pytest.fail("hash form must not prompt"))
-        _run_main(monkeypatch, "guard", "--dismiss", h)
+        _run_main("guard", "--dismiss", h)
         assert "Dismissed" in capsys.readouterr().out
         assert guard_engine._dismissed_guard(str(guard_repo)) == {h}
 
@@ -1050,7 +1323,7 @@ class TestGuardDismiss:
         monkeypatch.setattr(store, "git_root", lambda _cwd: "")
         assert store.anchor_repo(str(guard_repo))
 
-        _run_main(monkeypatch, "guard", "--dismiss", h)
+        _run_main("guard", "--dismiss", h)
         assert "Dismissed" in capsys.readouterr().out
         assert guard_engine._dismissed_guard(str(guard_repo)) == {h}
 
@@ -1061,7 +1334,7 @@ class TestGuardDismiss:
         _ggit(guard_repo, "add", "auth/jwt.py")
 
         monkeypatch.setattr("builtins.input", lambda *_a: "y")
-        _run_main(monkeypatch, "guard", "--dismiss", "1")
+        _run_main("guard", "--dismiss", "1")
         assert "Dismissed" in capsys.readouterr().out
         assert len(guard_engine._dismissed_guard(str(guard_repo))) == 1
 
@@ -1072,55 +1345,55 @@ class TestGuardDismiss:
         _ggit(guard_repo, "add", "auth/jwt.py")
 
         monkeypatch.setattr("builtins.input", lambda *_a: "n")
-        _run_main(monkeypatch, "guard", "--dismiss", "1")
+        _run_main("guard", "--dismiss", "1")
         assert "Cancelled" in capsys.readouterr().out
         assert guard_engine._dismissed_guard(str(guard_repo)) == set()
 
-    def test_numeric_form_out_of_range_exits_1(self, guard_repo, monkeypatch, capsys):
+    def test_numeric_form_out_of_range_exits_1(self, guard_repo, capsys):
         _gseed(guard_repo, "Decided to use JWT for auth", source_files=["auth/jwt.py"])
         _gwrite(guard_repo, "auth/jwt.py", "token = 1\n")
         _ggit(guard_repo, "add", "auth/jwt.py")
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard", "--dismiss", "9")
+            _run_main("guard", "--dismiss", "9")
         assert exc.value.code == 1
 
-    def test_unknown_hash_exits_1(self, guard_repo, monkeypatch, capsys):
+    def test_unknown_hash_exits_1(self, guard_repo, capsys):
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard", "--dismiss", "deadbeef0000")
+            _run_main("guard", "--dismiss", "deadbeef0000")
         assert exc.value.code == 1
 
 
 class TestGuardArmDisarmList:
-    def test_arm_disarm_round_trip(self, guard_repo, monkeypatch, capsys):
+    def test_arm_disarm_round_trip(self, guard_repo, capsys):
         from contexer import store
         entry = _gseed(guard_repo, "Never commit TODO markers")
 
-        _run_main(monkeypatch, "guard", "arm", entry["id"], "--regex", "TODO")
+        _run_main("guard", "arm", entry["id"], "--regex", "TODO")
         assert "Armed" in capsys.readouterr().out
         data = store.load(str(guard_repo))
         armed = store.entry_by_id(data["entries"], entry["id"])
         assert armed["guard_check"]["type"] == "regex"
         assert armed["guard_check"]["pattern"] == "TODO"
 
-        _run_main(monkeypatch, "guard", "disarm", entry["id"])
+        _run_main("guard", "disarm", entry["id"])
         assert "Disarmed" in capsys.readouterr().out
         data = store.load(str(guard_repo))
         armed = store.entry_by_id(data["entries"], entry["id"])
         assert "guard_check" not in armed
 
-    def test_arm_check_secret(self, guard_repo, monkeypatch, capsys):
+    def test_arm_check_secret(self, guard_repo, capsys):
         from contexer import store
         entry = _gseed(guard_repo, "Never commit secrets")
-        _run_main(monkeypatch, "guard", "arm", entry["id"], "--check", "secret")
+        _run_main("guard", "arm", entry["id"], "--check", "secret")
         assert "Armed" in capsys.readouterr().out
         data = store.load(str(guard_repo))
         armed = store.entry_by_id(data["entries"], entry["id"])
         assert armed["guard_check"]["type"] == "secret"
 
-    def test_arm_with_flags_paths_message(self, guard_repo, monkeypatch, capsys):
+    def test_arm_with_flags_paths_message(self, guard_repo, capsys):
         from contexer import store
         entry = _gseed(guard_repo, "Never commit TODO markers")
-        _run_main(monkeypatch, "guard", "arm", entry["id"], "--regex", "todo",
+        _run_main("guard", "arm", entry["id"], "--regex", "todo",
                    "--flags", "i", "--paths", "*.py", "--message", "no TODOs")
         data = store.load(str(guard_repo))
         gc = store.entry_by_id(data["entries"], entry["id"])["guard_check"]
@@ -1128,24 +1401,24 @@ class TestGuardArmDisarmList:
         assert gc["paths"] == "*.py"
         assert gc["message"] == "no TODOs"
 
-    def test_arm_missing_id_exits_1(self, guard_repo, monkeypatch, capsys):
+    def test_arm_missing_id_exits_1(self, guard_repo, capsys):
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard", "arm")
+            _run_main("guard", "arm")
         assert exc.value.code == 1
         assert "requires a decision id" in capsys.readouterr().err
 
-    def test_arm_missing_check_kind_exits_1(self, guard_repo, monkeypatch, capsys):
+    def test_arm_missing_check_kind_exits_1(self, guard_repo, capsys):
         entry = _gseed(guard_repo, "Never commit TODO markers")
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard", "arm", entry["id"])
+            _run_main("guard", "arm", entry["id"])
         assert exc.value.code == 1
         assert "--regex" in capsys.readouterr().err
 
-    def test_arm_unapproved_entry_refusal_surfaces(self, guard_repo, monkeypatch, capsys):
+    def test_arm_unapproved_entry_refusal_surfaces(self, guard_repo, capsys):
         entry = _gseed(guard_repo, "Some pending thing", created_by="ai",
                         status="pending_approval")
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard", "arm", entry["id"], "--regex", "TODO")
+            _run_main("guard", "arm", entry["id"], "--regex", "TODO")
         assert exc.value.code == 1
         err = capsys.readouterr().err
         assert "only approved decisions can be armed" in err
@@ -1155,42 +1428,42 @@ class TestGuardArmDisarmList:
         assert err.startswith("contexer guard arm: ")
         assert "Corrupt config" not in err
 
-    def test_arm_unmachine_checkable_refusal_surfaces(self, guard_repo, monkeypatch, capsys):
+    def test_arm_unmachine_checkable_refusal_surfaces(self, guard_repo, capsys):
         entry = _gseed(guard_repo, "Never commit TODO markers")
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard", "arm", entry["id"], "--regex", "(unclosed")
+            _run_main("guard", "arm", entry["id"], "--regex", "(unclosed")
         assert exc.value.code == 1
         err = capsys.readouterr().err
         assert err.startswith("contexer guard arm: ")
         assert "machine-checkable" in err
         assert "Corrupt config" not in err
 
-    def test_disarm_missing_id_exits_1(self, guard_repo, monkeypatch, capsys):
+    def test_disarm_missing_id_exits_1(self, guard_repo, capsys):
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard", "disarm")
+            _run_main("guard", "disarm")
         assert exc.value.code == 1
         assert "requires a decision id" in capsys.readouterr().err
 
-    def test_disarm_unknown_id_exits_1(self, guard_repo, monkeypatch, capsys):
+    def test_disarm_unknown_id_exits_1(self, guard_repo, capsys):
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard", "disarm", "no-such-id")
+            _run_main("guard", "disarm", "no-such-id")
         assert exc.value.code == 1
         err = capsys.readouterr().err
         assert err.startswith("contexer guard disarm: ")
         assert "Corrupt config" not in err
 
-    def test_list_shows_armed_rule(self, guard_repo, monkeypatch, capsys):
+    def test_list_shows_armed_rule(self, guard_repo, capsys):
         from contexer import store
         entry = _gseed(guard_repo, "Never commit TODO markers")
         store.arm_guard(str(guard_repo), entry["id"], "regex", pattern="TODO")
-        _run_main(monkeypatch, "guard", "list")
+        _run_main("guard", "list")
         out = capsys.readouterr().out
         assert entry["id"][:8] in out
         assert "regex" in out
         assert "TODO" in out
 
-    def test_list_empty(self, guard_repo, monkeypatch, capsys):
-        _run_main(monkeypatch, "guard", "list")
+    def test_list_empty(self, guard_repo, capsys):
+        _run_main("guard", "list")
         assert "No armed guard rules" in capsys.readouterr().out
 
 
@@ -1216,10 +1489,10 @@ def _input_sequence_raising(monkeypatch, *answers):
 
 
 class TestGuardAnchors:
-    def test_list_prints_candidates_and_mutates_nothing(self, guard_repo, monkeypatch, capsys):
+    def test_list_prints_candidates_and_mutates_nothing(self, guard_repo, capsys):
         _gwrite(guard_repo, "auth/jwt.py", "token = 0\n")
         entry = _gseed(guard_repo, "See auth/jwt.py for the JWT auth decision")
-        _run_main(monkeypatch, "guard", "anchors", "--list")
+        _run_main("guard", "anchors", "--list")
         out = capsys.readouterr().out
         assert entry["id"][:8] in out
         assert "auth/jwt.py" in out
@@ -1228,8 +1501,8 @@ class TestGuardAnchors:
                       if e["id"] == entry["id"])
         assert not loaded.get("source_files")
 
-    def test_list_empty_when_no_candidates(self, guard_repo, monkeypatch, capsys):
-        _run_main(monkeypatch, "guard", "anchors", "--list")
+    def test_list_empty_when_no_candidates(self, guard_repo, capsys):
+        _run_main("guard", "anchors", "--list")
         out = capsys.readouterr().out
         assert "No trusted, unanchored decisions" in out
 
@@ -1238,14 +1511,14 @@ class TestGuardAnchors:
         _gseed(guard_repo, "See auth/jwt.py for the JWT auth decision")
         monkeypatch.setattr("sys.stdin.isatty", lambda: False)
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard", "anchors")
+            _run_main("guard", "anchors")
         assert exc.value.code == 1
         assert "--list" in capsys.readouterr().err
 
     def test_non_tty_with_no_candidates_prints_message_and_exits_0(
             self, guard_repo, monkeypatch, capsys):
         monkeypatch.setattr("sys.stdin.isatty", lambda: False)
-        _run_main(monkeypatch, "guard", "anchors")
+        _run_main("guard", "anchors")
         assert "No trusted, unanchored decisions" in capsys.readouterr().out
 
     def test_yes_anchors_via_apply_backfill_anchors_one_save(
@@ -1267,7 +1540,7 @@ class TestGuardAnchors:
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         _input_sequence(monkeypatch, "Y")
 
-        _run_main(monkeypatch, "guard", "anchors")
+        _run_main("guard", "anchors")
         out = capsys.readouterr().out
         assert "1 anchored" in out
         assert len(calls) == 1
@@ -1286,7 +1559,7 @@ class TestGuardAnchors:
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         _input_sequence(monkeypatch, "E", "auth/other.py,bogus/missing.py")
 
-        _run_main(monkeypatch, "guard", "anchors")
+        _run_main("guard", "anchors")
         out = capsys.readouterr().out
         assert "Not found in working tree, dropped: bogus/missing.py" in out
         assert "1 anchored" in out
@@ -1311,7 +1584,7 @@ class TestGuardAnchors:
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         _input_sequence(monkeypatch, "E", f"../outside.py,{outside}")
 
-        _run_main(monkeypatch, "guard", "anchors")
+        _run_main("guard", "anchors")
         out = capsys.readouterr().out
         assert "No valid files given, skipping." in out
         assert "Anchor backfill complete: 1 skipped." in out
@@ -1328,7 +1601,7 @@ class TestGuardAnchors:
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         _input_sequence(monkeypatch, "S")
 
-        _run_main(monkeypatch, "guard", "anchors")
+        _run_main("guard", "anchors")
         out = capsys.readouterr().out
         assert "Anchor backfill complete: 1 skipped." in out
 
@@ -1349,7 +1622,7 @@ class TestGuardAnchors:
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         _input_sequence(monkeypatch, "Y", "Q")
 
-        _run_main(monkeypatch, "guard", "anchors")
+        _run_main("guard", "anchors")
         out = capsys.readouterr().out
         assert "1 anchored" in out
 
@@ -1383,7 +1656,7 @@ class TestGuardAnchors:
         calls = []
         monkeypatch.setattr("builtins.input", _inputs)
 
-        _run_main(monkeypatch, "guard", "anchors")
+        _run_main("guard", "anchors")
         out = capsys.readouterr().out
         assert "Aborted" in out
         assert "1 anchored" not in out
@@ -1394,7 +1667,7 @@ class TestGuardAnchors:
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         _input_sequence_raising(monkeypatch, "Y", "E", EOFError)
 
-        _run_main(monkeypatch, "guard", "anchors")
+        _run_main("guard", "anchors")
         out = capsys.readouterr().out
         assert "Aborted" in out
         assert self._anchored(guard_repo) == []
@@ -1405,7 +1678,7 @@ class TestGuardAnchors:
         self._two_candidates(guard_repo)
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         _input_sequence(monkeypatch, "Y", "Q")
-        _run_main(monkeypatch, "guard", "anchors")
+        _run_main("guard", "anchors")
         assert "1 anchored" in capsys.readouterr().out
         assert len(self._anchored(guard_repo)) == 1
 
@@ -1418,7 +1691,7 @@ class TestGuardAnchors:
         monkeypatch.setattr("builtins.input",
                              lambda *_a: pytest.fail("must not prompt on an unknown flag"))
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard", "anchors", "--dry-run")
+            _run_main("guard", "anchors", "--dry-run")
         assert exc.value.code == 1
         err = capsys.readouterr().err
         assert "--dry-run" in err
@@ -1471,7 +1744,7 @@ class TestGuardInstallHook:
     def test_fresh_install_writes_executable_script_with_fence_and_abs_path(
             self, guard_repo, monkeypatch, capsys):
         _stub_guard_bin(monkeypatch)
-        _run_main(monkeypatch, "guard", "--install-hook")
+        _run_main("guard", "--install-hook")
         out = capsys.readouterr().out
 
         hook = _guard_hook_path(guard_repo)
@@ -1486,11 +1759,11 @@ class TestGuardInstallHook:
 
     def test_idempotent_reinstall_is_noop(self, guard_repo, monkeypatch, capsys):
         _stub_guard_bin(monkeypatch)
-        _run_main(monkeypatch, "guard", "--install-hook")
+        _run_main("guard", "--install-hook")
         first = _guard_hook_path(guard_repo).read_text()
         capsys.readouterr()
 
-        _run_main(monkeypatch, "guard", "--install-hook")
+        _run_main("guard", "--install-hook")
         second = _guard_hook_path(guard_repo).read_text()
         assert first == second
         assert "already installed" in capsys.readouterr().out.lower()
@@ -1504,26 +1777,26 @@ class TestGuardInstallHook:
         hook.write_text(foreign)
         hook.chmod(0o755)
 
-        _run_main(monkeypatch, "guard", "--install-hook")
+        _run_main("guard", "--install-hook")
         appended = hook.read_text()
         assert appended.startswith(foreign)
         assert "# >>> contexer guard >>>" in appended
         assert "already installed" not in capsys.readouterr().out.lower()
 
-        _run_main(monkeypatch, "guard", "--uninstall-hook")
+        _run_main("guard", "--uninstall-hook")
         assert hook.read_text() == foreign
 
-    def test_hooks_path_override_refuses(self, guard_repo, monkeypatch, capsys):
+    def test_hooks_path_override_refuses(self, guard_repo, capsys):
         _ggit(guard_repo, "config", "core.hooksPath", ".githooks")
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard", "--install-hook")
+            _run_main("guard", "--install-hook")
         assert exc.value.code == 1
         err = capsys.readouterr().err
         assert "core.hooksPath" in err
         assert "contexer guard" in err
         assert not _guard_hook_path(guard_repo).exists()
 
-    def test_framework_generated_hook_refuses(self, guard_repo, monkeypatch, capsys):
+    def test_framework_generated_hook_refuses(self, guard_repo, capsys):
         hook = _guard_hook_path(guard_repo)
         hook.parent.mkdir(parents=True, exist_ok=True)
         hook.write_text("#!/usr/bin/env python3\n"
@@ -1531,7 +1804,7 @@ class TestGuardInstallHook:
         original = hook.read_text()
 
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard", "--install-hook")
+            _run_main("guard", "--install-hook")
         assert exc.value.code == 1
         err = capsys.readouterr().err
         assert ".pre-commit-config.yaml" in err
@@ -1540,15 +1813,15 @@ class TestGuardInstallHook:
 
     def test_uninstall_ours_only_removes_file(self, guard_repo, monkeypatch, capsys):
         _stub_guard_bin(monkeypatch)
-        _run_main(monkeypatch, "guard", "--install-hook")
+        _run_main("guard", "--install-hook")
         capsys.readouterr()
 
-        _run_main(monkeypatch, "guard", "--uninstall-hook")
+        _run_main("guard", "--uninstall-hook")
         assert not _guard_hook_path(guard_repo).exists()
         assert "removed" in capsys.readouterr().out.lower()
 
-    def test_uninstall_noop_when_nothing_installed(self, guard_repo, monkeypatch, capsys):
-        _run_main(monkeypatch, "guard", "--uninstall-hook")
+    def test_uninstall_noop_when_nothing_installed(self, guard_repo, capsys):
+        _run_main("guard", "--uninstall-hook")
         assert "no hook installed" in capsys.readouterr().out.lower()
 
     def test_undecodable_hook_refuses_install_and_preserves_it(
@@ -1564,7 +1837,7 @@ class TestGuardInstallHook:
         hook.write_bytes(raw)
 
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard", "--install-hook")
+            _run_main("guard", "--install-hook")
         assert exc.value.code == 1
         err = capsys.readouterr().err
         assert "not readable as UTF-8" in err
@@ -1572,7 +1845,7 @@ class TestGuardInstallHook:
         assert hook.read_bytes() == raw         # byte-preserved, not clobbered
 
     def test_undecodable_hook_refuses_uninstall_instead_of_claiming_none(
-            self, guard_repo, monkeypatch, capsys):
+            self, guard_repo, capsys):
         hook = _guard_hook_path(guard_repo)
         hook.parent.mkdir(parents=True, exist_ok=True)
         raw = ("#!/bin/sh\n# >>> contexer guard >>>\ncontexer guard\n"
@@ -1580,7 +1853,7 @@ class TestGuardInstallHook:
         hook.write_bytes(raw)
 
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard", "--uninstall-hook")
+            _run_main("guard", "--uninstall-hook")
         assert exc.value.code == 1
         err = capsys.readouterr().err
         assert "not readable as UTF-8" in err
@@ -1588,7 +1861,7 @@ class TestGuardInstallHook:
         assert hook.read_bytes() == raw
 
     def test_status_says_unknown_not_not_installed_for_undecodable_hook(
-            self, guard_repo, monkeypatch):
+            self, guard_repo):
         hook = _guard_hook_path(guard_repo)
         hook.parent.mkdir(parents=True, exist_ok=True)
         hook.write_bytes(b'#!/bin/sh\n# >>> contexer guard >>>\necho "\xff"\n')
@@ -1625,13 +1898,13 @@ class TestGuardInstallHook:
         foreign = b"#!/bin/sh\r\necho hi\r\n"
         hook.write_bytes(foreign)
 
-        _run_main(monkeypatch, "guard", "--install-hook")
+        _run_main("guard", "--install-hook")
         appended = hook.read_bytes()
         assert appended.startswith(foreign)                     # \r intact, byte for byte
         block = appended[len(foreign):]
         assert b"\r" not in block                               # our block is LF-only
 
-        _run_main(monkeypatch, "guard", "--uninstall-hook")
+        _run_main("guard", "--uninstall-hook")
         assert hook.read_bytes() == foreign
 
     def test_utf8_hook_round_trips_regardless_of_locale(self, guard_repo, monkeypatch):
@@ -1643,11 +1916,11 @@ class TestGuardInstallHook:
         foreign = '#!/bin/sh\necho "✖ lint failed — naïve check"\n'
         hook.write_text(foreign, encoding="utf-8")
 
-        _run_main(monkeypatch, "guard", "--install-hook")
+        _run_main("guard", "--install-hook")
         appended = hook.read_text(encoding="utf-8")
         assert appended.startswith(foreign)
 
-        _run_main(monkeypatch, "guard", "--uninstall-hook")
+        _run_main("guard", "--uninstall-hook")
         assert hook.read_text(encoding="utf-8") == foreign
 
     def test_install_falls_back_to_argv0_when_which_fails(self, guard_repo, monkeypatch):
@@ -1703,7 +1976,7 @@ class TestGuardInstallHook:
         weird = "/opt/my $tools/`x`/contexer"
         monkeypatch.setattr(cli.shutil, "which", lambda name: weird)
         monkeypatch.setattr(cli, "_guard_bin_supports_guard", lambda p: True)
-        _run_main(monkeypatch, "guard", "--install-hook")
+        _run_main("guard", "--install-hook")
         content = _guard_hook_path(guard_repo).read_text()
         assert "'/opt/my $tools/`x`/contexer'" in content
         assert '"/opt/my $tools/`x`/contexer"' not in content
@@ -1711,13 +1984,13 @@ class TestGuardInstallHook:
     def test_not_a_git_repo_refuses(self, tmp_path, monkeypatch, capsys):
         monkeypatch.chdir(tmp_path)
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "guard", "--install-hook")
+            _run_main("guard", "--install-hook")
         assert exc.value.code == 1
         assert "not inside a git repository" in capsys.readouterr().err.lower()
 
 
 class TestInstallStatusMentionGuardHook:
-    def test_install_output_mentions_guard_hook(self, clean_home, monkeypatch, capsys):
+    def test_install_output_mentions_guard_hook(self, clean_home, capsys):
         install()
         out = capsys.readouterr().out
         assert "guard --install-hook" in out
@@ -1734,7 +2007,7 @@ class TestInstallStatusMentionGuardHook:
 
     def test_status_reports_guard_hook_installed(self, guard_repo, monkeypatch, capsys):
         _stub_guard_bin(monkeypatch)
-        _run_main(monkeypatch, "guard", "--install-hook")
+        _run_main("guard", "--install-hook")
         capsys.readouterr()
         status()
         out = capsys.readouterr().out
@@ -1766,7 +2039,7 @@ class TestScopeAudit:
         from contexer import store
         d = tmp_path / ".contexer"
         d.mkdir()
-        monkeypatch.setattr(store, "STORE_DIR", d)
+        redirect_store_dir(monkeypatch, d)
         return d, store
 
     def _write(self, d, store, repo, eid, sid, **extra):
@@ -1782,7 +2055,7 @@ class TestScopeAudit:
         self._write(d, store, "/repo/right", "r1", "sess-1")
         self._write(d, store, "/repo/wrong", "w1", "sess-1", repo_source="pointer")
 
-        _run_main(monkeypatch, "scope-audit")
+        _run_main("scope-audit")
         out = capsys.readouterr().out
         assert "/repo/right" in out and "/repo/wrong" in out
         assert "[via pointer]" in out
@@ -1790,7 +2063,7 @@ class TestScopeAudit:
     def test_clean_store_reports_clean(self, tmp_path, monkeypatch, capsys):
         d, store = self._store_dir(tmp_path, monkeypatch)
         self._write(d, store, "/repo/a", "a1", "sess-a")
-        _run_main(monkeypatch, "scope-audit")
+        _run_main("scope-audit")
         assert "No cross-store sessions" in capsys.readouterr().out
 
     def test_writes_nothing(self, tmp_path, monkeypatch):
@@ -1799,19 +2072,19 @@ class TestScopeAudit:
         self._write(d, store, "/repo/wrong", "w1", "sess-1")
         before = {p.name: p.read_bytes() for p in d.iterdir()}
 
-        _run_main(monkeypatch, "scope-audit")
+        _run_main("scope-audit")
         assert {p.name: p.read_bytes() for p in d.iterdir()} == before
 
     def test_unknown_argument_exits_1_instead_of_running(self, tmp_path, monkeypatch, capsys):
         # A read-only-sounding flag must never fall through into a run that ignores it.
         self._store_dir(tmp_path, monkeypatch)
         with pytest.raises(SystemExit) as exc:
-            _run_main(monkeypatch, "scope-audit", "--fix")
+            _run_main("scope-audit", "--fix")
         assert exc.value.code == 1
         assert "Unknown argument" in capsys.readouterr().err
 
-    def test_listed_in_help(self, monkeypatch, capsys):
-        _run_main(monkeypatch, "help")
+    def test_listed_in_help(self, capsys):
+        _run_main("help")
         assert "scope-audit" in capsys.readouterr().out
 
 
@@ -1883,3 +2156,430 @@ class TestReviewOneViewAccuracy:
         monkeypatch.setattr("builtins.input", lambda *_a: "S")
         cli.review()
         assert "shared repo pointer" not in capsys.readouterr().out
+
+
+class TestPolicyEvaluateCommand:
+    """`contexer policy evaluate` - a REPORTER over the policy plane.
+
+    Two properties are the whole command. It never changes an exit code on its own judgement
+    (only an adapter inside the system performing an operation enforces anything, so a
+    developer must opt in with --exit-code), and an artifact it could not hand over is
+    REPORTED, never turned into a clean-looking pass.
+    """
+
+    def _armed(self, tmp_repo, monkeypatch, *, check="regex", **kw):
+        from tests.test_policy_api import _arm, _seed
+        monkeypatch.setattr(cli, "_cli_repo", lambda: tmp_repo)
+        entry = _seed(tmp_repo, "Never commit TODO markers", title="No TODOs")
+        _arm(tmp_repo, entry["id"], check, **kw)
+        return entry
+
+    def _diff(self, tmp_path, text="+ # TODO fix this\n"):
+        path = tmp_path / "change.diff"
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
+    def test_block_verdict_still_exits_zero_by_default(self, tmp_repo, tmp_path,
+                                                       monkeypatch, capsys):
+        self._armed(tmp_repo, monkeypatch, pattern="TODO")
+        _run_main("policy", "evaluate", "--operation", "commit",
+                  "--diff-file", self._diff(tmp_path))
+        out = capsys.readouterr().out
+        assert "verdict: block" in out and "No TODOs" in out
+
+    def test_exit_code_opt_in_turns_a_block_into_exit_1(self, tmp_repo, tmp_path,
+                                                        monkeypatch, capsys):
+        self._armed(tmp_repo, monkeypatch, pattern="TODO")
+        with pytest.raises(SystemExit) as exc:
+            _run_main("policy", "evaluate", "--operation", "commit",
+                      "--diff-file", self._diff(tmp_path), "--exit-code")
+        assert exc.value.code == 1
+        assert "verdict: block" in capsys.readouterr().out
+
+    def test_exit_code_leaves_a_clean_run_at_zero(self, tmp_repo, tmp_path,
+                                                  monkeypatch, capsys):
+        self._armed(tmp_repo, monkeypatch, pattern="TODO")
+        _run_main("policy", "evaluate", "--operation", "commit",
+                  "--exit-code", "--diff-file", self._diff(tmp_path, "+ all fine\n"))
+        assert "verdict: allow" in capsys.readouterr().out
+
+    def test_diff_from_stdin(self, tmp_repo, monkeypatch, capsys):
+        self._armed(tmp_repo, monkeypatch, pattern="TODO")
+        monkeypatch.setattr(cli.sys, "stdin",
+                            type("S", (), {"buffer": io.BytesIO(b"+ # TODO fix\n")})())
+        _run_main("policy", "evaluate", "--operation", "commit",
+                  "--diff-file", "-")
+        assert "verdict: block" in capsys.readouterr().out
+
+    def test_stdin_on_a_terminal_is_refused_rather_than_blocking(self, tmp_repo, monkeypatch,
+                                                                 capsys):
+        """`read()` on a TTY blocks with no prompt and no output until the developer works out
+        that the command is waiting on them. Refusing and naming both spellings is the
+        `guard anchors` precedent: a read-only-sounding invocation never silently hangs."""
+        self._armed(tmp_repo, monkeypatch, pattern="TODO")
+        monkeypatch.setattr(cli.sys, "stdin", type("S", (), {"isatty": lambda self: True})())
+        with pytest.raises(SystemExit) as exc:
+            _run_main("policy", "evaluate", "--operation", "commit",
+                      "--diff-file", "-")
+        assert exc.value.code == 1
+        assert "stdin is a terminal" in capsys.readouterr().err
+
+    def test_over_cap_diff_is_reported_unchecked_not_passed_clean(self, tmp_repo, tmp_path,
+                                                                  monkeypatch, capsys):
+        """The `_staged_content` lesson: an artifact the command could not hand over must
+        never read as one that was checked and found nothing."""
+        from contexer import policy
+        self._armed(tmp_repo, monkeypatch, pattern="TODO")
+        huge = tmp_path / "huge.diff"
+        huge.write_bytes(b"TODO\n" + b"x" * policy.MAX_ARTIFACT_BYTES)
+
+        _run_main("policy", "evaluate", "--operation", "commit",
+                  "--diff-file", str(huge))
+        out = capsys.readouterr().out
+        assert "too-large" in out and "NOT judged" in out
+        # The armed rule is reported as unjudged too, and the run says so.
+        assert "evaluation_status: partial" in out
+        assert "omitted" in out
+
+    def test_unreadable_diff_is_reported_not_passed_clean(self, tmp_repo, tmp_path,
+                                                          monkeypatch, capsys):
+        self._armed(tmp_repo, monkeypatch, pattern="TODO")
+        _run_main("policy", "evaluate", "--operation", "commit",
+                  "--diff-file", str(tmp_path / "nope.diff"))
+        assert "unreadable" in capsys.readouterr().out
+
+    def test_binary_diff_is_reported_not_passed_clean(self, tmp_repo, tmp_path,
+                                                      monkeypatch, capsys):
+        self._armed(tmp_repo, monkeypatch, pattern="TODO")
+        binary = tmp_path / "b.diff"
+        binary.write_bytes(b"\xff\xfe\x00binary")
+        _run_main("policy", "evaluate", "--operation", "commit",
+                  "--diff-file", str(binary))
+        assert "binary" in capsys.readouterr().out
+
+    def test_json_emits_the_structured_result(self, tmp_repo, tmp_path, monkeypatch, capsys):
+        from contexer import policy_api
+        entry = self._armed(tmp_repo, monkeypatch, pattern="TODO")
+        diff = self._diff(tmp_path)
+
+        _run_main("policy", "evaluate", "--operation", "commit",
+                  "--diff-file", diff, "--json")
+        emitted = json.loads(capsys.readouterr().out)
+        direct = policy_api.evaluate_operation(tmp_repo, operation="commit",
+                                               artifact_kind="diff",
+                                               artifact=Path(diff).read_text())
+        assert emitted == direct
+        assert emitted["matches"][0]["decision_id"] == entry["id"]
+
+    def test_a_secret_in_the_diff_never_reaches_the_output(self, tmp_repo, tmp_path,
+                                                           monkeypatch, capsys):
+        """Egress-only redaction, both halves: the secret check fires on the real bytes, and
+        the key itself is gone from what is printed."""
+        from tests.test_policy_api import AWS_KEY
+        self._armed(tmp_repo, monkeypatch, check="secret")
+        diff = self._diff(tmp_path, f"+AWS_ACCESS_KEY_ID={AWS_KEY}\n")
+
+        _run_main("policy", "evaluate", "--operation", "commit",
+                  "--diff-file", diff)
+        out = capsys.readouterr().out
+        assert "verdict: block" in out
+        assert AWS_KEY not in out
+
+    def test_json_output_hides_a_provider_token_quote_independent_class(
+            self, tmp_repo, tmp_path, monkeypatch, capsys):
+        """The EASY class: an AWS key matches a high-confidence provider pattern that does not
+        depend on surrounding quotes, so it is caught whichever side of the JSON encoding the
+        scrub runs on. Kept as the shape check (still valid JSON after scrubbing) - it is the
+        test BELOW that discriminates the ordering."""
+        from tests.test_policy_api import AWS_KEY
+        self._armed(tmp_repo, monkeypatch, check="secret",
+                    message=f"rotate {AWS_KEY} before committing")
+        diff = self._diff(tmp_path, f"+key={AWS_KEY}\n")
+
+        _run_main("policy", "evaluate", "--operation", "commit",
+                  "--diff-file", diff, "--json")
+        out = capsys.readouterr().out
+        assert AWS_KEY not in out
+        assert json.loads(out)["verdict"] == "block"   # still valid JSON after scrubbing
+
+    def test_json_output_hides_a_quoted_generic_secret_the_encoding_sensitive_class(
+            self, tmp_repo, tmp_path, monkeypatch, capsys):
+        """The class that actually pins the ordering. `redact`'s keyword-gated pattern matches
+        a QUOTED value, and `json.dumps` rewrites `"` as `\\"` - so a dump-then-scrub emits
+        `password="s3cr3tvalue"` verbatim while the provider-token test above still passes. The
+        secret rides in on the armed rule's `--message` hint, one of the two free-text fields
+        `policy._match` copies into the result."""
+        secret = 'password="s3cr3tvalue"'
+        self._armed(tmp_repo, monkeypatch, pattern="TODO", message=f"rotate {secret} first")
+
+        _run_main("policy", "evaluate", "--operation", "commit",
+                  "--diff-file", self._diff(tmp_path), "--json")
+        out = capsys.readouterr().out
+        assert "s3cr3tvalue" not in out
+        assert json.loads(out)["matches"][0]["message"] == 'rotate password="[REDACTED:secret]" first'
+
+    def test_json_output_does_not_mutate_the_result_the_caller_holds(self, tmp_repo):
+        """Scrubbing for JSON works on a COPY - the same no-mutation guarantee the text render
+        gives, since the structured result is what is authoritative."""
+        from contexer import policy_api
+        result = policy_api.evaluate_operation(tmp_repo, operation="commit")
+        before = repr(result)
+        policy_api.scrubbed_result(result)
+        assert repr(result) == before
+
+    def test_unknown_argument_exits_1_instead_of_running(self, tmp_repo, monkeypatch, capsys):
+        monkeypatch.setattr(cli, "_cli_repo", lambda: tmp_repo)
+        with pytest.raises(SystemExit) as exc:
+            _run_main("policy", "evaluate", "--operation", "commit", "--fix")
+        assert exc.value.code == 1
+        assert "unknown argument" in capsys.readouterr().err
+
+    def test_unknown_subcommand_exits_1(self, tmp_repo, capsys):
+        with pytest.raises(SystemExit) as exc:
+            _run_main("policy", "enforce")
+        assert exc.value.code == 1
+        assert "Unknown policy subcommand" in capsys.readouterr().err
+
+    def test_a_flag_missing_its_value_exits_1(self, tmp_repo, capsys):
+        with pytest.raises(SystemExit) as exc:
+            _run_main("policy", "evaluate", "--operation")
+        assert exc.value.code == 1
+        assert "needs a value" in capsys.readouterr().err
+
+    def test_a_malformed_request_exits_1_with_the_errors(self, tmp_repo, monkeypatch, capsys):
+        monkeypatch.setattr(cli, "_cli_repo", lambda: tmp_repo)
+        with pytest.raises(SystemExit) as exc:
+            _run_main("policy", "evaluate", "--operation", "rm-rf")
+        assert exc.value.code == 1
+        assert "operation must be one of" in capsys.readouterr().err
+
+    def test_an_empty_diff_file_value_exits_1_rather_than_meaning_no_artifact(
+            self, tmp_repo, capsys):
+        """Reading it as "no diff" would evaluate a request the developer believes carries
+        one - the same silent-gap class as a clean-looking pass."""
+        with pytest.raises(SystemExit) as exc:
+            _run_main("policy", "evaluate", "--operation", "commit",
+                      "--diff-file", "")
+        assert exc.value.code == 1
+        assert "needs a path" in capsys.readouterr().err
+
+    def test_json_holds_for_a_refused_request_too(self, tmp_repo, monkeypatch, capsys):
+        # One shape for a machine consumer, whichever way the request went.
+        monkeypatch.setattr(cli, "_cli_repo", lambda: tmp_repo)
+        with pytest.raises(SystemExit) as exc:
+            _run_main("policy", "evaluate", "--operation", "rm-rf", "--json")
+        assert exc.value.code == 1
+        emitted = json.loads(capsys.readouterr().err)
+        assert emitted["evaluation_status"] == "error"
+        assert any("operation must be one of" in e for e in emitted["errors"])
+
+    def test_help_states_that_it_reports_rather_than_enforces(self, capsys):
+        _run_main("help")
+        out = capsys.readouterr().out
+        assert "policy evaluate" in out and "--exit-code" in out
+        assert "REPORTER" in out
+
+    def test_help_lists_every_operation_the_facade_accepts(self, capsys):
+        """A help text narrower than the surface it documents sends a developer looking for a
+        capability that is already there."""
+        from contexer import policy
+        _run_main("help")
+        out = capsys.readouterr().out
+        assert all(op in out for op in policy.OPERATIONS)
+
+    def test_the_error_usage_line_lists_every_operation_too(self, tmp_repo, capsys):
+        from contexer import policy
+        with pytest.raises(SystemExit):
+            _run_main("policy", "evaluate", "--nope")
+        err = capsys.readouterr().err
+        assert all(op in err for op in policy.OPERATIONS)
+
+
+# ── the command table ─────────────────────────────────────────────────────────
+
+class TestCommandTable:
+    """`cli.COMMANDS` is the dispatch table, and `cli.dispatch(argv)` is the whole CLI
+    behind one call.
+
+    Both exist so a command can be reached without assigning `sys.argv`. What is pinned
+    here is not the shape of the table but the three things that used to be true only by
+    the elif chain's accident: every command routes to ITS OWN handler, the help text and
+    the dispatchable set agree, and the guarded/backstop decisions are per command rather
+    than a name list read at the bottom of main().
+
+    HANDLERS is hand-kept on purpose, exactly like PRODUCERS in test_sidecars.py. A table
+    derived from the code under test cannot fail when the code drifts; one written out here
+    fails when a row is added, removed, or copy-pasted onto the wrong handler.
+    """
+
+    # command name -> (the cli attribute it must call, whether the argv tail is forwarded)
+    HANDLERS = {
+        "version": ("version", False),
+        "help": ("_usage", False),
+        "install": ("install", True),
+        "uninstall": ("uninstall", True),
+        "reinstall": ("reinstall", False),
+        "upgrade": ("upgrade", True),
+        "review": ("review", False),
+        "retire": ("_lifecycle_cmd", True),
+        "restore": ("_lifecycle_cmd", True),
+        "ui": ("ui_cmd", True),
+        "status": ("status", True),
+        "pull": ("pull", True),
+        "share": ("share_cmd", True),
+        "share-policy": ("share_policy_cmd", True),
+        "reconcile": ("reconcile_cmd", True),
+        "reconcile-session": ("reconcile_session_cmd", True),
+        "login": ("login_cmd", True),
+        "logout": ("logout_cmd", True),
+        "guard": ("guard", True),
+        "policy": ("policy_cmd", True),
+        "scope-audit": ("scope_audit_cmd", True),
+    }
+
+    @pytest.fixture
+    def recorders(self, monkeypatch):
+        """Replace every command handler with a recorder, and return the call log.
+
+        All of them, not just the one under test: that is what turns "the right handler
+        ran" into "no other handler ran", which is the copy-paste error a per-command stub
+        cannot see.
+        """
+        calls = []
+
+        def _make(attr):
+            def _record(*args, **kwargs):
+                calls.append((attr, list(args), dict(kwargs)))
+            return _record
+
+        for attr in {a for a, _ in self.HANDLERS.values()}:
+            monkeypatch.setattr(cli, attr, _make(attr))
+        monkeypatch.setattr(cli, "_print_update_backstop",
+                            lambda: calls.append(("_print_update_backstop", [], {})))
+        return calls
+
+    def test_every_row_is_reachable_and_names_are_unique(self):
+        seen = {}
+        for command in cli.COMMANDS:
+            for name in command.names:
+                assert name not in seen, (name, seen[name], command.names[0])
+                seen[name] = command.names[0]
+        assert set(cli._BY_NAME) == set(seen)
+
+    def test_the_table_and_this_test_cover_the_same_commands(self):
+        assert {c.names[0] for c in cli.COMMANDS} == set(self.HANDLERS)
+
+    @pytest.mark.parametrize("name", sorted(HANDLERS))
+    def test_each_command_routes_to_its_own_handler(self, name, recorders):
+        expected, forwards = self.HANDLERS[name]
+        cli.dispatch([name, "--flag", "value"])
+        ran = [c for c in recorders if c[0] != "_print_update_backstop"]
+        assert [c[0] for c in ran] == [expected], ran
+        if forwards:
+            assert ran[0][1] == [["--flag", "value"]], ran[0]
+        else:
+            assert ran[0][1] == [], ran[0]
+
+    def test_retire_and_restore_share_a_handler_but_not_a_direction(self, recorders):
+        cli.dispatch(["retire", "abc"])
+        cli.dispatch(["restore", "abc"])
+        directions = [c[2].get("retiring") for c in recorders if c[0] == "_lifecycle_cmd"]
+        assert directions == [True, False]
+
+    @pytest.mark.parametrize("alias,primary", [
+        ("--version", "version"), ("-V", "version"),
+        ("--help", "help"), ("-h", "help"),
+    ])
+    def test_an_alias_reaches_the_same_row(self, alias, primary, recorders):
+        cli.dispatch([alias])
+        assert cli._BY_NAME[alias] is cli._BY_NAME[primary]
+        assert [c[0] for c in recorders if c[0] != "_print_update_backstop"] == [
+            self.HANDLERS[primary][0]]
+
+    def test_dispatch_never_reads_sys_argv(self, recorders, monkeypatch):
+        """The whole point of the item. `sys.argv` is a process global a test has to
+        remember to restore, and setting it says nothing about which command is being
+        exercised; `dispatch(["status"])` says it in the call."""
+        monkeypatch.setattr(sys, "argv", ["contexer", "share", "--all"])
+        cli.dispatch(["status"])
+        assert [c[0] for c in recorders if c[0] != "_print_update_backstop"] == ["status"]
+
+    def test_main_is_dispatch_over_argv(self, recorders, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["contexer", "share", "--all"])
+        cli.main()
+        ran = [c for c in recorders if c[0] != "_print_update_backstop"]
+        assert ran == [("share_cmd", [["--all"]], {})]
+
+    # ── the two per-command decisions that used to be name lists in main() ──
+
+    @pytest.mark.parametrize("name", sorted(HANDLERS))
+    def test_the_update_aside_follows_exactly_the_rows_that_declare_it(self, name, recorders):
+        cli.dispatch([name])
+        fired = [c[0] for c in recorders if c[0] == "_print_update_backstop"]
+        assert bool(fired) is cli._BY_NAME[name].backstop, name
+
+    def test_only_guard_upgrade_and_status_opt_out_of_the_aside(self):
+        """Pinned as a set, not per row: this is the rule the old `cmd not in (...)` line
+        held, and it is the one a new row is most likely to get wrong by default."""
+        quiet = {c.names[0] for c in cli.COMMANDS if not c.backstop}
+        assert quiet == {"guard", "upgrade", "status"}
+
+    @pytest.mark.parametrize("name", sorted(HANDLERS))
+    def test_a_guarded_command_turns_a_permission_error_into_advice(self, name, monkeypatch,
+                                                                    capsys):
+        attr, _ = self.HANDLERS[name]
+
+        def denied(*args, **kwargs):
+            raise PermissionError(13, "denied", "/root/.contexer")
+
+        monkeypatch.setattr(cli, attr, denied)
+        monkeypatch.setattr(cli, "_print_update_backstop", lambda: None)
+        if cli._BY_NAME[name].guarded:
+            with pytest.raises(SystemExit) as exc:
+                cli.dispatch([name])
+            assert exc.value.code == 1
+            assert "never needs sudo" in capsys.readouterr().err
+        else:
+            with pytest.raises(PermissionError):
+                cli.dispatch([name])
+
+    def test_the_read_only_commands_are_the_unguarded_ones(self):
+        """`_run_guarded` exists to explain a root-owned config file. A command that only
+        reads has nothing to explain, and wrapping it would swallow a real error."""
+        unguarded = {c.names[0] for c in cli.COMMANDS if not c.guarded}
+        assert unguarded == {"version", "help", "review", "status", "guard"}
+
+    # ── help text and dispatchable set agree, in both directions ──
+
+    def _documented(self):
+        """Every command name USAGE lists, taken from the `Commands:` block only."""
+        import re
+        block = cli.USAGE.split("Commands:", 1)[1].split("\nGuard (", 1)[0]
+        names = set()
+        for line in block.splitlines():
+            match = re.match(r"^ {2}(\S+)", line)
+            if match and match.group(1) != "(no":
+                names.add(match.group(1))
+        return names
+
+    def test_every_dispatchable_command_is_documented(self):
+        """Direction one. This is the drift that was actually there: `pull` had been
+        dispatched for releases while USAGE never mentioned it, because the chain and the
+        help text were two hand-kept lists with nothing tying them together."""
+        missing = {c.names[0] for c in cli.COMMANDS} - self._documented()
+        assert missing == set(), sorted(missing)
+
+    def test_every_documented_command_is_dispatchable(self):
+        """Direction two: a help text may not promise a command that exits 1."""
+        stale = self._documented() - set(cli._BY_NAME)
+        assert stale == set(), sorted(stale)
+
+    def test_a_row_resolves_its_handler_when_it_runs_not_when_it_is_built(self, monkeypatch):
+        """Late binding, pinned. A table holding the function object captured at import
+        ignores `monkeypatch.setattr(cli, "ui_cmd", ...)`, which is how the CLI tests
+        substitute a command; two ui tests failed on exactly that."""
+        seen = []
+        monkeypatch.setattr(cli, "ui_cmd", lambda rest: seen.append(rest))
+        monkeypatch.setattr(cli, "_print_update_backstop", lambda: None)
+        cli.dispatch(["ui", "--open"])
+        assert seen == [["--open"]]

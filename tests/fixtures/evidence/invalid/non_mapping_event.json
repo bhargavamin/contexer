@@ -1,0 +1,4 @@
+{
+  "event": "just a string",
+  "reason_contains": "must be a mapping"
+}

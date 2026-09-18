@@ -1,0 +1,18 @@
+{
+  "event": {
+    "schema_version": 1,
+    "event_id": "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+    "session_id": "sess-7c1f",
+    "repo_key": "_Users_dev_contexer",
+    "kind": "file_changed",
+    "occurred_at": "2026-08-24T10:00:00+00:00",
+    "source": "codex_post_tool_use",
+    "summary": "Authentication middleware changed",
+    "files": [
+      "../../etc/passwd"
+    ],
+    "content_hash": null,
+    "attributes": {}
+  },
+  "reason_contains": "'..' segment"
+}

@@ -1,0 +1,49 @@
+{
+  "name": "12-crash-after-summary-before-evidence-deletion",
+  "issue": null,
+  "summary": "A recorded summary is not filed twice when the delete is retried.",
+  "events": [
+    {
+      "schema_version": 1,
+      "event_id": "98b73b09-f505-5b2c-9144-f52bbe2c066e",
+      "session_id": "sess-a",
+      "repo_key": "/repo",
+      "kind": "user_directive",
+      "occurred_at": "2026-08-01T10:00:00+00:00",
+      "source": "replay",
+      "summary": "Do not edit src/generated/client.ts directly. Change openapi/schema.yaml and regenerate.",
+      "files": [],
+      "content_hash": null,
+      "attributes": {}
+    },
+    {
+      "schema_version": 1,
+      "event_id": "c24eac03-d47f-5a76-984a-5e997f58d9c6",
+      "session_id": "sess-a",
+      "repo_key": "/repo",
+      "kind": "file_changed",
+      "occurred_at": "2026-08-01T10:01:00+00:00",
+      "source": "replay",
+      "summary": "regenerated the client",
+      "files": [
+        "src/generated/client.ts"
+      ],
+      "content_hash": null,
+      "attributes": {}
+    }
+  ],
+  "decisions": [],
+  "expected": [
+    {
+      "kind": "new",
+      "title": "Do not edit src/generated/client.ts directly.",
+      "subtype": "constraint",
+      "score": 60,
+      "target_decision_id": null,
+      "source_files": [
+        "src/generated/client.ts"
+      ],
+      "uncertainties": []
+    }
+  ]
+}

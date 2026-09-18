@@ -1,0 +1,13 @@
+{
+  "name": "14-thousand-distinct-statements",
+  "issue": 4,
+  "summary": "1,000 mutually distinct statements - the aggregation ceiling.",
+  "generate": {
+    "count": 1000,
+    "kind": "user_directive",
+    "template": "Decision number {i} concerns subsystem alpha{i} and its owner team{i}."
+  },
+  "decisions": [],
+  "expected_candidates": 1000,
+  "expected_merged": 0
+}

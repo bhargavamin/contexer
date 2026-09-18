@@ -1,0 +1,49 @@
+{
+  "name": "11-crash-after-store-mutation-before-hold",
+  "issue": null,
+  "summary": "A decision stored before its hold existed re-reads as evidence for its own review.",
+  "events": [
+    {
+      "schema_version": 1,
+      "event_id": "7018f15a-bda8-568c-9a3e-ca577943235b",
+      "session_id": "sess-a",
+      "repo_key": "/repo",
+      "kind": "user_directive",
+      "occurred_at": "2026-08-01T10:00:00+00:00",
+      "source": "replay",
+      "summary": "Do not edit src/generated/client.ts directly. Change openapi/schema.yaml and regenerate.",
+      "files": [],
+      "content_hash": null,
+      "attributes": {}
+    },
+    {
+      "schema_version": 1,
+      "event_id": "7ac3a9fc-68ef-5cda-ba83-aa94ebd2f2ea",
+      "session_id": "sess-a",
+      "repo_key": "/repo",
+      "kind": "file_changed",
+      "occurred_at": "2026-08-01T10:01:00+00:00",
+      "source": "replay",
+      "summary": "regenerated the client",
+      "files": [
+        "src/generated/client.ts"
+      ],
+      "content_hash": null,
+      "attributes": {}
+    }
+  ],
+  "decisions": [],
+  "expected": [
+    {
+      "kind": "new",
+      "title": "Do not edit src/generated/client.ts directly.",
+      "subtype": "constraint",
+      "score": 60,
+      "target_decision_id": null,
+      "source_files": [
+        "src/generated/client.ts"
+      ],
+      "uncertainties": []
+    }
+  ]
+}

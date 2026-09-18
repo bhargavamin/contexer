@@ -4,12 +4,13 @@ import json
 import pytest
 
 from contexer import store
+from tests.conftest import redirect_store_dir
 
 
 @pytest.fixture(autouse=True)
 def isolated_store(tmp_path, monkeypatch):
     """Redirect STORE_DIR to tmp_path so tests never touch ~/.contexer/."""
-    monkeypatch.setattr(store, "STORE_DIR", tmp_path)
+    redirect_store_dir(monkeypatch, tmp_path)
     tmp_path.mkdir(parents=True, exist_ok=True)
     return tmp_path
 
@@ -303,16 +304,16 @@ class TestSessionStartPermutations:
     def test_no_global_no_repo_bootstraps(self):
         result = store.get_session_start_context(REPO)
         ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "Do NOT" in ctx
-        assert "yes" in ctx
+        assert "without asking setup permission" in ctx
+        assert "call bootstrap_context now" in ctx
         assert "Global rules" not in ctx
 
     def test_global_only_no_repo_bootstraps_with_global_rules(self):
         _add_global("Always use conventional commits", "convention")
         result = store.get_session_start_context(REPO)
         ctx = result["hookSpecificOutput"]["additionalContext"]
-        assert "Do NOT" in ctx
-        assert "yes" in ctx
+        assert "without asking setup permission" in ctx
+        assert "call bootstrap_context now" in ctx
         assert "Global rules" in ctx
         assert "conventional commits" in ctx
 
