@@ -24,6 +24,8 @@ Shape mirrors `store.verify_scan_conventions` deliberately:
 Per anchored, active-status entry with no proposal already pending, each `source_files`
 path is classified against the working tree:
   - exists on disk -> nothing.
+  - a trailing-slash directory prefix that is missing -> collected directly; directories have
+    no safe file-style rename inference, and skipping it keeps their verification cost constant.
   - missing, but git confidently identifies exactly one rename target (and that target
     exists now) -> the surviving path list is corrected in place; NOT a review event,
     since the decision's content is unchanged, only its address moved.
@@ -295,6 +297,9 @@ def verify_anchors(repo_path: str, force: bool = False) -> dict:
                     for f in files:
                         if (repo_root / f).exists():
                             surviving.append(f)
+                            continue
+                        if f.endswith("/"):
+                            missing.append(f)
                             continue
                         target = _confident_rename(repo_path, f, repo_root, _call)
                         if target is not None:

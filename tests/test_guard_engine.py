@@ -223,6 +223,18 @@ class TestGuardRelpath:
         _write(git_repo, "top.py", "x\n")
         assert guard_engine._guard_relpath(str(git_repo), "top.py") == "top.py"
 
+    def test_explicit_directory_prefix_preserves_trailing_slash(self, git_repo):
+        (git_repo / "src").mkdir()
+        assert guard_engine._guard_relpath(str(git_repo), "src/") == "src/"
+
+    def test_anchor_relpath_marks_existing_directory_as_prefix(self, git_repo):
+        (git_repo / "src").mkdir()
+        assert guard_engine._guard_anchor_relpath(str(git_repo), "src") == "src/"
+
+    def test_repo_root_is_not_a_valid_anchor(self, git_repo):
+        rel = guard_engine._guard_anchor_relpath(str(git_repo), "./")
+        assert guard_engine._escapes_repo(rel)
+
     def test_failure_returns_empty_string(self):
         # a None path can't be resolved — must fail soft, never raise
         assert guard_engine._guard_relpath("/tmp/somewhere", None) == ""
@@ -292,6 +304,17 @@ class TestArtifactPathMatch:
 
     def test_unrelated_paths_no_match(self):
         assert guard_engine._artifact_path_match("contexer/store.py", "contexer/miner.py") is False
+
+    def test_directory_prefix_matches_descendant(self):
+        assert guard_engine._artifact_path_match("contexer/", "contexer/store.py") is True
+
+    def test_directory_prefix_requires_path_boundary(self):
+        assert guard_engine._artifact_path_match("contexer/", "contexer_extra/store.py") is False
+
+    def test_source_anchor_hits_ignore_malformed_legacy_values(self):
+        assert guard_engine._source_anchor_hits(
+            [None, 7, "contexer/"], [None, "contexer/store.py"]
+        ) == {"contexer/store.py"}
 
     def test_empty_inputs_fail_soft(self):
         assert guard_engine._artifact_path_match("", "contexer/store.py") is False
@@ -483,6 +506,14 @@ class TestGuardPairs:
                              source_files=[str(repo / "auth" / "jwt.py"), "./other.py"])
         pairs = guard_engine._guard_pairs(str(repo), ["auth/jwt.py", "other.py"])
         assert {p["file"] for p in pairs} == {"auth/jwt.py", "other.py"}
+        assert {p["reason"] for p in pairs} == {"source_files match"}
+        assert all(p["decision_id"] == entry["id"] for p in pairs)
+
+    def test_directory_source_anchor_pairs_every_descendant_only(self, repo):
+        entry = _seed_entry(repo, "The auth subsystem uses JWT", source_files=["auth/"])
+        pairs = guard_engine._guard_pairs(
+            str(repo), ["auth/jwt.py", "auth/providers/oauth.py", "auth_extra/nope.py"])
+        assert {p["file"] for p in pairs} == {"auth/jwt.py", "auth/providers/oauth.py"}
         assert {p["reason"] for p in pairs} == {"source_files match"}
         assert all(p["decision_id"] == entry["id"] for p in pairs)
 
@@ -1339,6 +1370,15 @@ class TestDecisionsForFiles:
         assert h["files_matched"] == ["auth/jwt.py"]
         assert h["reason"] == "source_files match"
 
+    def test_directory_source_anchor_hits_descendants_in_input_order(self, repo):
+        entry = _seed_entry(repo, "The auth subsystem uses JWT", source_files=["auth/"])
+        hits = guard_engine.decisions_for_files(
+            str(repo), ["other.py", "auth/providers/oauth.py", "auth/jwt.py"])
+        assert len(hits) == 1
+        assert hits[0]["decision_id"] == entry["id"]
+        assert hits[0]["files_matched"] == ["auth/providers/oauth.py", "auth/jwt.py"]
+        assert hits[0]["reason"] == "source_files match"
+
     def test_artifact_hit(self, repo):
         entry = _seed_entry(repo, "The contexer.store module owns all read/write logic")
         hits = guard_engine.decisions_for_files(str(repo), ["contexer/store.py"])
@@ -1728,7 +1768,7 @@ class TestAnchorCandidatesForBackfill:
         assert result[0]["decision_id"] == entry["id"]
         assert result[0]["candidates"] == ["auth/jwt.py"]
 
-    def test_capped_at_max_source_files(self, repo):
+    def test_wide_sibling_candidates_collapse_to_directory_prefix(self, repo):
         files = [f"pkg/mod{i}.py" for i in range(15)]
         for f in files:
             _write(repo, f, "x = 1\n")
@@ -1737,7 +1777,22 @@ class TestAnchorCandidatesForBackfill:
         result = guard_engine.anchor_candidates_for_backfill(str(repo))
         assert len(result) == 1
         assert result[0]["decision_id"] == entry["id"]
-        assert len(result[0]["candidates"]) == store.MAX_SOURCE_FILES
+        assert result[0]["candidates"] == ["pkg/"]
+
+    def test_unrelated_parent_candidates_still_respect_item_cap(self, repo):
+        files = [f"pkg{i}/mod.py" for i in range(store.MAX_SOURCE_FILES + 5)]
+        for path in files:
+            _write(repo, path, "x = 1\n")
+        _seed_entry(repo, "Module map: " + "; ".join(files))
+        result = guard_engine.anchor_candidates_for_backfill(str(repo))
+        assert result[0]["candidates"] == files[:store.MAX_SOURCE_FILES]
+
+    def test_two_siblings_remain_exact_file_candidates(self, repo):
+        for path in ("pkg/a.py", "pkg/b.py"):
+            _write(repo, path, "x = 1\n")
+        _seed_entry(repo, "The pair is pkg/a.py and pkg/b.py")
+        result = guard_engine.anchor_candidates_for_backfill(str(repo))
+        assert result[0]["candidates"] == ["pkg/a.py", "pkg/b.py"]
 
     def test_zero_candidates_decision_skipped_entirely(self, repo):
         _seed_entry(repo, "We use bcrypt for password hashing")

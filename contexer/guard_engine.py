@@ -187,27 +187,48 @@ def _merge_in_progress(repo: str) -> bool:
 
 def _guard_relpath(repo: str, path: str) -> str:
     """THE single canonicalization chokepoint for the commit-time guard: any
-    absolute or relative spelling of a file resolves to one normalized
-    repo-relative POSIX (forward-slash) path. Every hash and path-pairing
-    comparison downstream must consume only this function's output — never a raw
+    absolute or relative spelling resolves to one normalized repo-relative POSIX
+    (forward-slash) path. A trailing slash is preserved as the explicit directory-prefix
+    marker used by source anchors; ordinary file paths remain unchanged. Every hash and
+    path-pairing comparison downstream must consume only this function's output — never a raw
     staged path or artifact string. Works for paths that don't exist on disk yet
     (Path.resolve() is non-strict), since guard callers canonicalize staged paths
     that may not exist in the working tree in every context. Fail-soft: any
     resolution failure returns "" rather than raising."""
     try:
+        is_prefix = isinstance(path, str) and path.endswith(("/", os.sep))
         repo_root = Path(repo).resolve()
         raw = Path(path)
         abs_path = (raw if raw.is_absolute() else repo_root / raw).resolve()
         rel = os.path.relpath(str(abs_path), str(repo_root))
-        return rel.replace(os.sep, "/")
+        rel = rel.replace(os.sep, "/")
+        return f"{rel.rstrip('/')}/" if is_prefix else rel
     except Exception:
         return ""
+
+
+def _guard_anchor_relpath(repo: str, path: str) -> str:
+    """Canonical file-or-prefix spelling for a stored source anchor.
+
+    A caller may explicitly provide the stable prefix marker (``src/``), including for a
+    prefix that no longer exists. For convenience, an existing directory supplied as ``src``
+    is normalized to the same spelling. No other non-existent path is guessed to be a prefix.
+    """
+    rel = _guard_relpath(repo, path)
+    if _escapes_repo(rel) or rel.endswith("/"):
+        return rel
+    try:
+        if (Path(repo).resolve() / rel).is_dir():
+            return f"{rel}/"
+    except Exception:
+        pass
+    return rel
 
 
 def _escapes_repo(relpath: str) -> bool:
     """True iff `relpath` (assumed already run through _guard_relpath) cannot
     denote a file inside the repo: empty, "..", "../"-prefixed, or absolute."""
-    return (not relpath or relpath == ".." or relpath.startswith("../")
+    return (not relpath or relpath in (".", "./", "..") or relpath.startswith("../")
             or os.path.isabs(relpath))
 
 
@@ -242,6 +263,8 @@ def _artifact_path_match(artifact: str, staged: str) -> bool:
     it never reaches the suffix-match branch, which requires "/" in `artifact`."""
     if not artifact or not staged:
         return False
+    if artifact.endswith("/"):
+        return _source_anchor_matches(artifact, staged)
     if artifact == staged:
         return True
     if "/" not in artifact and _GUARD_MODULE_ARTIFACT_RE.match(artifact):
@@ -250,6 +273,22 @@ def _artifact_path_match(artifact: str, staged: str) -> bool:
     if "/" in artifact:
         return staged.endswith("/" + artifact)
     return False
+
+
+def _source_anchor_matches(anchor: str, relpath: str) -> bool:
+    """Whether one canonical source anchor governs one canonical file path."""
+    return bool(anchor and relpath and (
+        relpath.startswith(anchor) if anchor.endswith("/") else relpath == anchor))
+
+
+def _source_anchor_hits(anchors, relpaths) -> set[str]:
+    """Canonical queried paths governed by any exact-file or directory-prefix anchor."""
+    exact = {a for a in anchors
+             if isinstance(a, str) and a and not a.endswith("/")}
+    prefixes = tuple(a for a in anchors
+                     if isinstance(a, str) and a and a.endswith("/"))
+    return {p for p in relpaths if isinstance(p, str)
+            and (p in exact or (prefixes and p.startswith(prefixes)))}
 
 
 # ── Commit-time guard: Tier-1 advisory engine (Task 2) — pairing, throttle, ──
@@ -465,6 +504,8 @@ def _guard_artifact_matches(artifact: str, staged_set: set[str],
     staged paths sharing the artifact's basename, never the full list. The
     endswith test is still applied, so the semantics are exactly
     _artifact_path_match's ("za/utils.py" still doesn't match "a/utils.py")."""
+    if artifact.endswith("/"):
+        return [p for p in staged_set if p.startswith(artifact)]
     if "/" not in artifact:
         if artifact in staged_set:
             return [artifact]
@@ -540,7 +581,7 @@ def _guard_pairs(repo_path: str, staged: list[str], decisions: list[dict] | None
             # relpath -> reason, source_files winning over artifacts (as before),
             # and the FIRST matching artifact winning among artifacts.
             matched: dict[str, str] = {p: "source_files match"
-                                       for p in source_files & staged_set}
+                                       for p in _source_anchor_hits(source_files, staged_set)}
             for artifact in _guard_content_artifacts(content):
                 reason = _guard_artifact_reason(artifact)
                 for relpath in _guard_artifact_matches(artifact, staged_set, staged_by_base):
@@ -662,7 +703,9 @@ def _candidate_paths_for_entry(repo: str, repo_root: Path, content: str) -> list
     possible file spellings (_artifact_path_spellings), canonicalized, and kept
     only if the file exists in the working tree. Deduped (first-seen order)
     and capped at store.MAX_SOURCE_FILES - the same cap _anchor_sources
-    itself enforces on write."""
+    itself enforces on write. Three or more siblings collapse to their parent prefix:
+    the developer sees and ratifies the wider scope explicitly, while a genuinely broad
+    decision no longer loses arbitrary siblings at the ten-item cap."""
     seen: set[str] = set()
     results: list[str] = []
     for artifact in _guard_content_artifacts(content):
@@ -674,9 +717,26 @@ def _candidate_paths_for_entry(repo: str, repo_root: Path, content: str) -> list
                 continue
             seen.add(resolved)
             results.append(resolved)
-            if len(results) >= store.MAX_SOURCE_FILES:
-                return results
-    return results
+    by_parent: dict[str, list[str]] = {}
+    for path in results:
+        parent = path.rsplit("/", 1)[0] if "/" in path else ""
+        if parent:
+            by_parent.setdefault(parent, []).append(path)
+    collapsed_parents = {parent for parent, paths in by_parent.items() if len(paths) >= 3}
+    if not collapsed_parents:
+        return results[:store.MAX_SOURCE_FILES]
+
+    collapsed: list[str] = []
+    emitted_parents: set[str] = set()
+    for path in results:
+        parent = path.rsplit("/", 1)[0] if "/" in path else ""
+        if parent in collapsed_parents:
+            if parent not in emitted_parents:
+                collapsed.append(f"{parent}/")
+                emitted_parents.add(parent)
+        else:
+            collapsed.append(path)
+    return collapsed[:store.MAX_SOURCE_FILES]
 
 
 def anchor_candidates_for_backfill(repo_path: str) -> list[dict]:
@@ -1221,7 +1281,7 @@ def decisions_for_files(repo_path: str, files: list[str],
                 # relpath -> reason, source_files winning over artifacts — same
                 # setdefault order _guard_pairs uses for its per-file matched dict.
                 matched: dict[str, str] = {p: "source_files match"
-                                           for p in source_files & canon_set}
+                                           for p in _source_anchor_hits(source_files, canon_set)}
                 for artifact in _guard_content_artifacts(content):
                     reason = _guard_artifact_reason(artifact)
                     for relpath in _guard_artifact_matches(artifact, canon_set, canon_by_base):
@@ -1381,4 +1441,3 @@ def rank_applicable(repo_path: str, files: list[str], change_text: str,
         return {"strong": strong, "candidates": candidates}
     except Exception:
         return {"strong": [], "candidates": []}
-

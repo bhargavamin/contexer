@@ -67,6 +67,20 @@ def test_changed_file_renders_note_only_on_explicit_retrieval(repo):
     assert "[may be stale" not in rendered
 
 
+def test_directory_anchor_tracks_changed_descendant(repo):
+    Path(repo, "auth", "providers").mkdir(parents=True)
+    Path(repo, "auth", "providers", "oauth.py").write_text("TOKEN = 1\n", encoding="utf-8")
+    _commit(repo, "add auth subsystem")
+    _, eid = store.update_decision(
+        repo, SUMMARY, "s1", "architecture", source_files=["auth/"])
+    assert _entry(repo)["source_files"] == ["auth/"]
+
+    _touch(repo, "auth/providers/oauth.py", "TOKEN = 2\n")
+    out = store.get_context(repo, query="auth")
+    assert "[may be stale: auth/providers/oauth.py changed since capture]" in out
+    assert "[may be stale" not in store._render_prompt_decisions(repo, [eid])
+
+
 def test_files_hit_renders_staleness_note(repo):
     """get_context(files=...) (issue #174 Task 1) is the THIRD render site that must run
     a source_files hit through the same staleness-note machinery as query/id lookup."""
@@ -395,6 +409,16 @@ def test_capture_time_absolute_path_canonicalized_to_repo_relative(repo):
     # Staleness reads the canonicalized path correctly.
     _touch(repo, "auth.py", "def login(): return 'rewritten'\n")
     assert " [may be stale" in store.get_context(repo, query="auth")
+
+
+def test_existing_directory_anchor_is_canonicalized_to_prefix(repo):
+    Path(repo, "auth").mkdir()
+    Path(repo, "auth", "jwt.py").write_text("TOKEN = 1\n", encoding="utf-8")
+    _commit(repo, "add auth directory")
+    stored, _eid = store.update_decision(
+        repo, SUMMARY, "s1", "architecture", source_files=["auth"])
+    assert stored
+    assert _entry(repo)["source_files"] == ["auth/"]
 
 
 def test_approval_time_absolute_path_canonicalized_to_repo_relative(repo):

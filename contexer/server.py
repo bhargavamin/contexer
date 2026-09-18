@@ -90,7 +90,9 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
                 - a significant change (architecture/constraint) becomes a Suggested Update
                   attached to the live decision and returns an approval prompt - the current
                   revision stays trusted until the developer approves.
-    source_files: repo-relative paths this content describes (max 10). When capturing a
+    source_files: repo-relative files or directory prefixes this content describes (max 10).
+                Use a trailing slash for a prefix (for example `contexer/`); an existing
+                directory is normalized to that spelling automatically. When capturing a
                 comprehension summary, pass the files it describes so future injections can
                 flag it as possibly stale once that code changes. Anchors a newly stored
                 decision, and also re-anchors a replace_id correction (fresh files + current
@@ -173,8 +175,9 @@ def approve_decision(entry_id: str, action: str, content: str = "", repo_path: s
               only status flips to 'ignored'). 'approve'/'edit'/'dismiss'/'skip' remain
               pending-only: an already-approved decision cannot be re-approved.
     content: required when action='edit' - the corrected decision text (single decision only)
-    source_files: repo-relative files this decision describes - anchors it for staleness
-                  tracking and the commit-time guard; single-id approvals only.
+    source_files: repo-relative files or trailing-slash directory prefixes this decision
+                  describes - anchors it for staleness tracking and the commit-time guard;
+                  single-id approvals only.
     """
     resolved = store.resolve_repo(repo_path)
     if not resolved:

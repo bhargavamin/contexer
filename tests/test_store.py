@@ -4884,6 +4884,16 @@ class TestFileRoute:
         assert result.startswith("[Contexer: auto-fetched for this question]")
         assert "pairing engine" in result
 
+    def test_directory_anchor_hit_in_task_prompt_injects_full_content(self, tmp_repo):
+        store.update_decision(
+            tmp_repo, "The UI package uses one shared response envelope", RV1_SESSION,
+            "architecture", source_files=["contexer/ui/"],
+        )
+        result = store.get_context_for_prompt(
+            tmp_repo, "fix the response bug in contexer/ui/server.py")
+        assert result.startswith("[Contexer: auto-fetched for this question]")
+        assert "shared response envelope" in result
+
     def test_mention_only_hit_is_a_pointer_not_full_content(self, tmp_repo):
         # No source_files anchor — pairing only via a path-shaped artifact extracted from the
         # decision's own content (mirrors guard_engine's own _guard_pairs signal). A prose

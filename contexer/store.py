@@ -2766,10 +2766,12 @@ def _anchor_sources(repo_path: str, entry: dict, source_files) -> None:
     bare string is rejected rather than iterated character-by-character.
 
     Each entry is canonicalized to a repo-relative POSIX path via guard_engine's
-    _guard_relpath before storing - an absolute-path spelling must not be stored verbatim,
+    _guard_anchor_relpath before storing - an absolute-path spelling must not be stored verbatim,
     or _staleness_note's `git diff -- <path>` breaks the moment the repo moves, and the
     guard's own pairing (which compares against _guard_relpath's own output) would never
-    match it. A path that fails to resolve is dropped rather than stored raw. Imported
+    match it. Directories are stored with a trailing slash, the explicit prefix-anchor marker;
+    existing directories gain it automatically, while callers can preserve it for a currently
+    missing prefix. A path that fails to resolve is dropped rather than stored raw. Imported
     locally (not at module top) for the same reason store.__getattr__ resolves the guard
     re-exports lazily: guard_engine imports `store` at its own top, so an eager
     module-level import here would recreate the load-order cycle documented at the bottom
@@ -2781,7 +2783,7 @@ def _anchor_sources(repo_path: str, entry: dict, source_files) -> None:
     if not raw:
         return
     from contexer import guard_engine
-    canon = (guard_engine._guard_relpath(repo_path, f) for f in raw)
+    canon = (guard_engine._guard_anchor_relpath(repo_path, f) for f in raw)
     # _guard_relpath uses os.path.relpath, which maps an outside-repo path to a
     # "../"-prefixed string instead of failing. Such an anchor can never match a
     # repository-relative staged path (guard pairing silently dead) and git diff
@@ -2849,10 +2851,12 @@ def _staleness_note(repo_path: str, entry: dict) -> str:
     least one of those files changed since the anchor. Fail-soft: an unknown commit, a
     non-git repo, or a timeout all render no note (see run_git). Never raises.
 
-    One-dot `git diff <anchor> -- <files>` (anchor vs the WORKING TREE), not `<anchor>..HEAD`:
-    the dominant staleness case is a file the session is editing right now, which a
-    commit-to-commit diff would not see at all. The try/except below enforces "never
-    raises" locally rather than relying solely on `run_git`'s own fail-soft contract."""
+    One-dot `git diff <anchor> -- <files-or-prefixes>` (anchor vs the WORKING TREE), not
+    `<anchor>..HEAD`: directory anchors are ordinary Git pathspecs, so a changed descendant is
+    reported without enumerating every file in the subsystem. The dominant staleness case is
+    a file the session is editing right now, which a commit-to-commit diff would not see at all.
+    The try/except below enforces "never raises" locally rather than relying solely on
+    `run_git`'s own fail-soft contract."""
     try:
         files = [f for f in (entry.get("source_files") or []) if isinstance(f, str)]
         anchor = entry.get("anchor_commit") or ""
@@ -5922,7 +5926,7 @@ def _index_file_lookup(repo_path: str, index: dict, file_artifacts: list[str]) -
     hits: list[dict] = []
     for did, doc in index.get("docs", {}).items():
         source_files = set(doc.get("source_files") or [])
-        if source_files & canon_set:
+        if guard_engine._source_anchor_hits(source_files, canon_set):
             hits.append({"decision_id": did, "reason": "source_files match",
                         "title": doc.get("title", "")})
             continue
