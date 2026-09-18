@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "fixture_version": "1.0.3",
+  "fixture_version": "1.0.4",
   "reference_revision": "5676247f358dc6a0c099d8eb8eb94623bad04bb0",
   "cases": [
     {
@@ -279,9 +279,7 @@
           "action_id": "capped",
           "decision_id": "r03-best",
           "revision_id": "rev-r03-best-a",
-          "tier": "tool_result",
-          "known_gap": "query-cap-relevance-loss",
-          "owner": "contract 02 query-cap relevance preservation"
+          "tier": "tool_result"
         }
       ],
       "forbidden_outputs": [],

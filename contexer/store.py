@@ -6318,6 +6318,7 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
     if entry_type:
         decisions = [d for d in decisions if d.get("subtype", "") == entry_type]
 
+    relevance_ordered = False
     if query:
         pat = query_pattern(query)
         matched = [d for d in decisions if matches_query(pat, d)]
@@ -6342,6 +6343,7 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
                 allowed = {d.get("id"): d for d in decisions if d.get("id")}
                 matched = [allowed[did] for did, *_ in retrieval.prompt_rank(query_terms, index)
                            if did in allowed]
+                relevance_ordered = bool(matched)
         decisions = matched
 
     display_limit = limit if limit > 0 else (_FILTERED_DISPLAY if is_filtered else _UNFILTERED_DISPLAY)
@@ -6358,7 +6360,7 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
                 parts.append(f"files={len(files)}")
             filter_note = f" (filtered: {', '.join(parts)})"
         total = len(decisions)
-        shown = _keep_top(decisions, display_limit)
+        shown = decisions[:display_limit] if relevance_ordered else _keep_top(decisions, display_limit)
         if total > display_limit:
             filter_note += f" - showing {len(shown)} of {total}"
         lines.append(f"## Decisions and context{filter_note}")

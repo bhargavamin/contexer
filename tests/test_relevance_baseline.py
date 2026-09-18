@@ -57,7 +57,7 @@ def test_report_schema_and_version_provenance(report):
     assert len(report["code_revision"]) == 40
     assert len(report["fixture_sha256"]) == 64
     assert len(report["runner_sha256"]) == 64
-    assert report["fixture_version"] == "1.0.3"
+    assert report["fixture_version"] == "1.0.4"
     assert report["runner_version"] == "2"
 
 
@@ -66,7 +66,6 @@ def test_only_registered_gaps_remain(report):
     assert {item["gap"] for item in report["summary"]["known_gaps"]} == {
         "ordinary-task-trigger-gap",
         "revision-id-working-set-dedup",
-        "query-cap-relevance-loss",
     }
 
 
@@ -82,11 +81,6 @@ def test_only_registered_gaps_remain(report):
             "R02", "same-session-receives-current-revision",
             marks=pytest.mark.xfail(strict=True, raises=AssertionError,
                                     reason="revision-id-working-set-dedup; revision contract"),
-        ),
-        pytest.param(
-            "R03", "capped-retains-relevant-winner",
-            marks=pytest.mark.xfail(strict=True, raises=AssertionError,
-                                    reason="query-cap-relevance-loss; contract 02"),
         ),
     ],
 )
@@ -254,6 +248,7 @@ def test_r03_uses_production_title_and_content_ranker(report):
     assert lookups["uncapped"]["prompt_rank_calls"] == 1
     assert lookups["capped"]["prompt_rank_calls"] == 1
     assert lookups["uncapped"]["ranked_ids"][:2] == ["r03-best", "r03-incidental"]
+    assert _assertion(report, "R03", "capped-retains-relevant-winner")["status"] == "passed"
 
 
 def test_approved_revision_identity_comes_from_rendered_store_state(report):
@@ -296,6 +291,22 @@ def test_perturbing_r03_expected_winner_fails(fixture_data):
     assert changed["status"] == "failed"
 
 
+def test_perturbing_r03_displayed_winner_is_unexpected_failure(fixture_data):
+    case = copy.deepcopy(next(case for case in fixture_data["cases"] if case["family"] == "R03"))
+    assertion = next(item for item in case["desired_assertions"]
+                     if item["key"] == "capped-retains-relevant-winner")
+    assertion["decision_id"] = "r03-incidental"
+    assertion["revision_id"] = "rev-r03-incidental-a"
+
+    result = baseline.run_case(case)
+
+    changed = next(item for item in result["assertions"] if item["key"] == assertion["key"])
+    assert changed["status"] == "failed"
+    assert changed["known_gap"] is None
+    failures = [item for item in result["assertions"] if item["status"] == "failed"]
+    assert [item["key"] for item in failures] == [assertion["key"]]
+
+
 def test_supplied_fixture_data_controls_report_hash(fixture_data):
     changed = copy.deepcopy(fixture_data)
     changed["fixture_version"] = "1.0.0-test-variant"
@@ -314,7 +325,7 @@ def test_main_writes_only_when_output_is_explicit(tmp_path, capsys):
     before = set(tmp_path.iterdir())
     assert baseline.main(["--format", "text"]) == 0
     assert set(tmp_path.iterdir()) == before
-    assert "known gaps: 3" in capsys.readouterr().out
+    assert "known gaps: 2" in capsys.readouterr().out
     output = tmp_path / "report.json"
     assert baseline.main(["--format", "json", "--output", str(output)]) == 0
     assert json.loads(output.read_text(encoding="utf-8"))["schema_version"] == 1
