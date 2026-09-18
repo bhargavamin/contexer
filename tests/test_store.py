@@ -5146,6 +5146,306 @@ class TestFileRoute:
 
 
 class TestTopicAliasRetry:
+    @staticmethod
+    def _rendered_ids(result):
+        return [
+            line.split("(id=", 1)[1].split(")", 1)[0]
+            for line in result.splitlines()
+            if line.startswith("- ") and "(id=" in line
+        ]
+
+    @staticmethod
+    def _seed_entries(repo, count):
+        data = store.load(repo)
+        entries = []
+        for i in range(count):
+            entry = store._new_decision_entry(
+                f"MARKER_{i:02d} ranked subject detail token{i:02d}",
+                "ranked-display", "architecture", created_by="human")
+            entry["timestamp"] = f"2026-01-{(i % 28) + 1:02d}T12:00:00+00:00"
+            entry["updated_at"] = entry["timestamp"]
+            entries.append(entry)
+        data["entries"] = entries
+        store.save(repo, data)
+        return entries
+
+    @staticmethod
+    def _force_rank(monkeypatch, entries):
+        ranked_ids = [entry["id"] for entry in entries]
+        monkeypatch.setattr(
+            retrieval, "prompt_rank",
+            lambda _terms, _index: [
+                (decision_id, float(len(ranked_ids) - i), 1, 1.0, 0.0)
+                for i, decision_id in enumerate(ranked_ids)
+            ],
+        )
+
+    def test_ranked_fallback_limit_keeps_relevance_winner(self, tmp_repo):
+        best = "BEST Encrypt webhook payload archives with rotating envelope keys."
+        incidental = "INCIDENTAL Encrypt webhook payload archives only for legacy export samples."
+        ids = _seed_rv1(tmp_repo, [
+            (best, "architecture"),
+            (incidental, "architecture"),
+        ])
+        data = store.load(tmp_repo)
+        next(entry for entry in data["entries"]
+             if entry["id"] == ids[incidental])["occurrence_count"] = 12
+        store.save(tmp_repo, data)
+
+        result = store.get_context(
+            tmp_repo, query="webhook archives rotating keys", limit=1)
+
+        assert best in result
+        assert incidental not in result
+
+    def test_ranked_fallback_preserves_multi_result_selection_and_order(
+            self, tmp_repo, monkeypatch):
+        entries = self._seed_entries(tmp_repo, 3)
+        entries[0]["occurrence_count"] = 99
+        entries[0]["updated_at"] = "2026-12-31T12:00:00+00:00"
+        store.save(tmp_repo, store.load(tmp_repo) | {"entries": entries})
+        ranked = [entries[2], entries[0], entries[1]]
+        self._force_rank(monkeypatch, ranked)
+
+        result = store.get_context(tmp_repo, query="subject token missing phrase", limit=2)
+
+        assert self._rendered_ids(result) == [entry["id"][:8] for entry in ranked[:2]]
+        assert "showing 2 of 3" in result
+
+    def test_ranked_fallback_preserves_positive_and_implicit_limit_semantics(
+            self, tmp_repo, monkeypatch):
+        entries = self._seed_entries(tmp_repo, store._FILTERED_DISPLAY + 2)
+        ranked = list(reversed(entries))
+        self._force_rank(monkeypatch, ranked)
+
+        for limit, expected_count in (
+            (1, 1), (len(entries) - 1, len(entries) - 1),
+            (len(entries), len(entries)), (len(entries) + 3, len(entries)),
+            (0, store._FILTERED_DISPLAY), (-4, store._FILTERED_DISPLAY),
+        ):
+            result = store.get_context(
+                tmp_repo, query="subject token missing phrase", limit=limit)
+            assert self._rendered_ids(result) == [
+                entry["id"][:8] for entry in ranked[:expected_count]
+            ]
+            if expected_count < len(entries):
+                assert f"showing {expected_count} of {len(entries)}" in result
+            else:
+                assert " - showing " not in result
+
+    def test_equal_score_fallback_keeps_index_order_across_runs(self, tmp_repo):
+        data = store.load(tmp_repo)
+        first = store._new_decision_entry(
+            "FIRST stable alpha relevance beta terms gamma", "tie", "architecture",
+            created_by="human", title="Stable candidate")
+        second = store._new_decision_entry(
+            "SECOND stable delta relevance epsilon terms zeta", "tie", "architecture",
+            created_by="human", title="Stable candidate")
+        second["occurrence_count"] = 20
+        second["updated_at"] = "2099-01-01T00:00:00+00:00"
+        data["entries"] = [first, second]
+        store.save(tmp_repo, data)
+        index = store._read_retrieval_index(tmp_repo)
+        ranked = retrieval.prompt_rank(
+            retrieval.index_tokens("stable relevance terms"), index)
+        assert [row[0] for row in ranked] == [first["id"], second["id"]]
+
+        for _ in range(3):
+            result = store.get_context(
+                tmp_repo, query="stable relevance terms", limit=1)
+            assert self._rendered_ids(result) == [first["id"][:8]]
+
+    def test_ranked_fallback_filters_all_eligibility_before_capping(
+            self, tmp_repo, monkeypatch):
+        specs = [
+            ("IGNORED", "architecture", "ignored", "target.py"),
+            ("WRONG_SUBTYPE", "pattern", "approved", "target.py"),
+            ("OUTSIDE_FILE", "architecture", "approved", "other.py"),
+            ("PENDING", "architecture", "pending_approval", "target.py"),
+            ("APPROVED", "architecture", "approved", "target.py"),
+            ("SUGGESTED", "architecture", "suggested", "target.py"),
+        ]
+        data = store.load(tmp_repo)
+        entries = []
+        for marker, subtype, status, source_file in specs:
+            entry = store._new_decision_entry(
+                f"{marker} eligible ranked subject", "eligibility", subtype,
+                created_by="human", status=status)
+            entry["source_files"] = [source_file]
+            entries.append(entry)
+        data["entries"] = entries
+        store.save(tmp_repo, data)
+        self._force_rank(monkeypatch, entries)
+
+        result = store.get_context(
+            tmp_repo, query="eligible subject missing phrase", entry_type="architecture",
+            files=["target.py"], _active_only=True, limit=2)
+
+        assert self._rendered_ids(result) == [entries[4]["id"][:8], entries[5]["id"][:8]]
+        assert "APPROVED" in result and "SUGGESTED" in result
+        assert "IGNORED" not in result and "WRONG_SUBTYPE" not in result
+        assert "OUTSIDE_FILE" not in result and "PENDING" not in result
+
+        capped = store.get_context(
+            tmp_repo, query="eligible subject missing phrase", entry_type="architecture",
+            files=["target.py"], _active_only=True, limit=1)
+        assert "showing 1 of 2" in capped
+
+    def test_ranked_fallback_keeps_pending_and_suggested_labels(
+            self, tmp_repo, monkeypatch):
+        data = store.load(tmp_repo)
+        pending = store._new_decision_entry(
+            "PENDING_MARKER labeled ranked subject", "labels", "architecture",
+            status="pending_approval")
+        suggested = store._new_decision_entry(
+            "SUGGESTED_MARKER labeled ranked subject", "labels", "architecture",
+            status="suggested")
+        data["entries"] = [pending, suggested]
+        store.save(tmp_repo, data)
+        self._force_rank(monkeypatch, [pending, suggested])
+
+        result = store.get_context(
+            tmp_repo, query="labeled subject missing phrase", limit=2)
+
+        assert "[pending]" in result and "PENDING_MARKER" in result
+        assert "[suggested]" in result and "SUGGESTED_MARKER" in result
+
+    @pytest.mark.parametrize("memo", ["unresolved", "standing", "update", "stale"])
+    def test_capped_ranked_fallback_preserves_conflict_rendering(
+            self, tmp_repo, memo):
+        standing = "Use Postgres for the decision store; SQLite cannot handle concurrency"
+        update = "Switch to DynamoDB for the decision store; Postgres is superseded"
+        _, eid = store.update_decision(
+            tmp_repo, standing, "conflict-standing", "architecture", created_by="human")
+        assert store.update_decision(
+            tmp_repo, update, "conflict-update", "architecture", replace_id=eid)[0]
+        if memo in {"standing", "update", "stale"}:
+            assert store.record_conflict_memo(tmp_repo, eid, "update" if memo != "standing"
+                                              else "standing")[0]
+        if memo == "stale":
+            data = store.load(tmp_repo)
+            entry = next(item for item in data["entries"] if item["id"] == eid)
+            entry["proposed_revision"]["content"] = (
+                "Switch to Cassandra for the decision store; Postgres is superseded")
+            store.save(tmp_repo, data)
+
+        result = store.get_context(
+            tmp_repo, query="decision store postgres transition", limit=1)
+
+        assert self._rendered_ids(result) == [eid[:8]]
+        assert "SQLite cannot handle concurrency" in result
+        assert "don't re-ask" in result
+        if memo == "standing":
+            assert "was declined with the developer" in result
+            assert "DynamoDB" not in result
+            assert "Unreviewed update" not in result
+        elif memo == "update":
+            assert "DynamoDB" in result
+            assert "pending formal review; not developer-approved" in result
+            assert "Still the approved version on record" in result
+            assert "Unreviewed update" not in result
+        else:
+            proposal = "Cassandra" if memo == "stale" else "DynamoDB"
+            assert "Unreviewed update" in result and proposal in result
+            assert "picked with the developer" not in result
+
+    def test_literal_and_alias_routes_still_use_keep_top_before_fallback(
+            self, tmp_repo, monkeypatch):
+        data = store.load(tmp_repo)
+        literal_low = store._new_decision_entry(
+            "LITERAL_LOW exact route phrase one", "routes", "architecture",
+            created_by="human")
+        literal_high = store._new_decision_entry(
+            "LITERAL_HIGH exact route phrase two", "routes", "architecture",
+            created_by="human")
+        literal_high["occurrence_count"] = 9
+        alias_low = store._new_decision_entry(
+            "ALIAS_LOW postgres storage", "routes", "architecture", created_by="human")
+        alias_high = store._new_decision_entry(
+            "ALIAS_HIGH alembic migrations", "routes", "architecture", created_by="human")
+        alias_high["occurrence_count"] = 8
+        data["entries"] = [literal_low, literal_high, alias_low, alias_high]
+        store.save(tmp_repo, data)
+        monkeypatch.setattr(
+            retrieval, "prompt_rank",
+            lambda *_args, **_kwargs: pytest.fail("literal/alias route reached fallback"))
+
+        literal = store.get_context(tmp_repo, query="exact route phrase", limit=1)
+        alias = store.get_context(tmp_repo, query="db", limit=1)
+
+        assert "LITERAL_HIGH" in literal and "LITERAL_LOW" not in literal
+        assert "ALIAS_HIGH" in alias and "ALIAS_LOW" not in alias
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [{}, {"entry_type": "architecture"}, {"files": ["target.py"]}],
+    )
+    def test_nonquery_routes_still_use_keep_top(self, tmp_repo, monkeypatch, kwargs):
+        entries = self._seed_entries(tmp_repo, 2)
+        for entry in entries:
+            entry["source_files"] = ["target.py"]
+        store.save(tmp_repo, store.load(tmp_repo) | {"entries": entries})
+        calls = []
+        real_keep_top = store._keep_top
+
+        def traced_keep_top(items, limit, pin_last=False):
+            calls.append((len(items), limit, pin_last))
+            return real_keep_top(items, limit, pin_last)
+
+        monkeypatch.setattr(store, "_keep_top", traced_keep_top)
+        store.get_context(tmp_repo, limit=1, **kwargs)
+        assert calls == [(2, 1, False)]
+
+    def test_single_token_normalized_fallback_still_recovers(self, tmp_repo, monkeypatch):
+        store.update_decision(
+            tmp_repo, "Lexical scoring stays deterministic", "single-token",
+            "architecture", title="Use BM25 for retrieval", created_by="human")
+        calls = []
+        real_rank = retrieval.prompt_rank
+
+        def traced_rank(query_terms, index):
+            calls.append(list(query_terms))
+            return real_rank(query_terms, index)
+
+        monkeypatch.setattr(retrieval, "prompt_rank", traced_rank)
+        result = store.get_context(tmp_repo, query="BM25!")
+        assert calls == [["bm25"]]
+        assert "Use BM25 for retrieval" in result
+
+    @pytest.mark.parametrize("mode", ["missing", "stale", "malformed", "unreadable"])
+    def test_ranked_fallback_index_failures_are_read_only(
+            self, tmp_repo, monkeypatch, mode):
+        store.update_decision(
+            tmp_repo, "Fallback index remains read only", "index-failure",
+            "architecture", created_by="human")
+        path = store._index_path(tmp_repo)
+        if mode == "missing":
+            path.unlink()
+            before = None
+        elif mode == "stale":
+            payload = json.loads(path.read_text())
+            payload["v"] = store._RETRIEVAL_INDEX_VERSION - 1
+            path.write_text(json.dumps(payload))
+            before = path.read_bytes()
+        elif mode == "malformed":
+            path.write_bytes(b"{not-json")
+            before = path.read_bytes()
+        else:
+            before = path.read_bytes()
+            real_read_text = Path.read_text
+
+            def denied_read_text(target, *args, **kwargs):
+                if target == path:
+                    raise PermissionError("test unreadable index")
+                return real_read_text(target, *args, **kwargs)
+
+            monkeypatch.setattr(Path, "read_text", denied_read_text)
+
+        result = store.get_context(tmp_repo, query="read only missing phrase")
+
+        assert "No matching decisions found" in result
+        assert (path.read_bytes() if path.exists() else None) == before
+
     def test_bare_topic_query_falls_back_to_aliases(self, tmp_repo):
         _seed_rv1(tmp_repo, RV1_CORPUS)
         # No decision literally contains 'db', but the pointer nudge suggests query='db'.
