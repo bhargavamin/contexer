@@ -88,6 +88,36 @@ def index_tokens(text: str) -> list[str]:
     return [t for t in toks if len(t) >= 3 and t not in _QUERY_STOP_WORDS]
 
 
+def unresolved_terms(keywords: list[str], index: dict) -> set[str]:
+    """Distinct query terms absent from both indexed content and title vocabularies.
+
+    The prompt router uses this only when considering its permissive one-hit fallback. A
+    missing subject such as ``hatchet`` is evidence that a lone match on ``scaleway`` is
+    probably answering a different question, even when BM25 can rank that match.
+    """
+    vocabularies = (index.get("df", {}), index.get("title_df", {}))
+
+    def _variants(term: str) -> tuple[str, ...]:
+        # BM25 deliberately has no stemmer, but this guard must not treat a routine plural
+        # as a second, unknown subject ("payment retries" versus indexed "payment retry").
+        # Keep the normalization narrow so a genuinely new noun still blocks relaxation.
+        if term.endswith("ies") and len(term) > 4:
+            return term, f"{term[:-3]}y"
+        if term.endswith("es") and len(term) > 4:
+            return term, term[:-2]
+        if term.endswith("s") and len(term) > 3:
+            return term, term[:-1]
+        return (term,)
+
+    return {
+        term for term in set(keywords)
+        if not any(any(variant in vocabulary
+                       or any(token.startswith(variant) for token in vocabulary)
+                       for variant in _variants(term))
+                   for vocabulary in vocabularies)
+    }
+
+
 def derive_topics(content: str) -> list[str]:
     """Sorted topics with >=1 alias hit in `content`. Derived, never persisted."""
     low = (content or "").lower()

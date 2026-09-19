@@ -129,7 +129,7 @@ class TestClassification:
         "proposal_attention_lock": ("share_policy.proposal_attention_lock_path", {}),
         "console_state":    (None, {}),                      # ui/daemon.py keeps its own literal
         "console_log":      (None, {}),                      # (import allowlist; see sidecars.py)
-        "working_set":      (None, {"slug": None, "session": "abc"}),   # _ws_path hashes the id
+        "working_set":      (None, {"slug": None, "session": "abc"}),   # working_set.path hashes the id
         "retrieval_log":    (None, {"slug": None}),          # built inline in two places
         "reconcile_log":    (None, {"slug": None}),          # reconcile builds through filename
         "bootstrap_offered": ("store._offer_flag", {"slug": None}),

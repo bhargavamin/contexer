@@ -12,7 +12,7 @@ import pytest
 from contexer import bootstrap, sidecars
 from tests.conftest import redirect_store_dir
 from contexer import miner as miner_mod
-from contexer import retrieval, review, revisions
+from contexer import retrieval, review, revisions, working_set
 from contexer import store
 
 
@@ -4024,6 +4024,36 @@ class TestBM25Router:
         assert result != ""
         assert "Alembic" in result
 
+    def test_rationale_one_hit_does_not_ignore_an_unknown_subject(self, tmp_repo):
+        store.update_decision(
+            tmp_repo, "Always deploy resources to PAR-2, never PAR-1 in Scaleway",
+            RV1_SESSION, "constraint", created_by="human")
+
+        result = store.get_context_for_prompt(
+            tmp_repo, "why was Hatchet hosted on Scaleway?")
+
+        assert result == ""
+
+    def test_secondary_candidate_needs_top_candidates_discriminative_evidence(self, tmp_repo):
+        store.update_decision(
+            tmp_repo, "Deploy infrastructure to the PAR-2 region, never PAR-1",
+            RV1_SESSION, "constraint", created_by="human")
+        store.update_decision(
+            tmp_repo,
+            "Production infra changes deployed Dagster workers to a dedicated node pool "
+            "because memory-heavy jobs need isolation",
+            RV1_SESSION, "architecture", created_by="human")
+        for name in ("billing", "search", "email"):
+            store.update_decision(
+                tmp_repo, f"The {name} service was deployed after its readiness check passed",
+                RV1_SESSION, "architecture", created_by="human")
+
+        result = store.get_context_for_prompt(
+            tmp_repo, "why was infra deployed to the PAR-2 region?")
+
+        assert "PAR-2 region" in result
+        assert "Dagster workers" not in result
+
     def test_generic_algorithm_word_does_not_select_an_unrelated_rule(self, tmp_repo):
         store.update_decision(
             tmp_repo, "Use lexical scoring because it is local and fast",
@@ -4183,15 +4213,15 @@ class TestWorkingSet:
         a = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?")
         b = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?")
         assert a == b and a.startswith("[Contexer: auto-fetched for this question]")
-        assert store._ws_path(tmp_repo, "").exists() is False
+        assert working_set.path(tmp_repo, "").exists() is False
 
-    def test_working_set_ids_public_helper(self, tmp_repo):
+    def test_working_set_ids_owner_helper(self, tmp_repo):
         ids = _seed_rv1(tmp_repo, RV1_CORPUS)
         sid = "sess-helper"
         store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?", sid)
         jwt_id = next(v for k, v in ids.items() if "JWT" in k)
-        assert jwt_id in store.working_set_ids(tmp_repo, sid)
-        assert store.working_set_ids(tmp_repo, "") == []
+        assert jwt_id in working_set.ids(tmp_repo, sid)
+        assert working_set.ids(tmp_repo, "") == []
 
 
 # ── Edited-files signal (guard anchor accrual, issue #175 Task 2) ───────────────
@@ -4975,7 +5005,7 @@ class TestFileRoute:
         assert second == ""   # already in the working set — no re-injection, no fallback
 
     def test_mention_pointer_not_working_set_deduped(self, tmp_repo):
-        # Mirrors the EXISTING topic-overlap WEAK pointer precedent (never _ws_add'd, see
+        # Mirrors the EXISTING topic-overlap WEAK pointer precedent (never added to the ledger, see
         # test_pointer_prompts_stay_weak in test_benchmark.py) — a pointer is cheap and
         # repeatable, unlike a full STRONG content injection, so it is deliberately NOT added
         # to the working set. Only anchor-tier (STRONG) hits get that treatment.
@@ -5511,7 +5541,7 @@ class TestTopicAliasRetry:
 class TestWsPathSanitized:
     def test_slashed_session_id_stays_in_store_dir(self, tmp_repo):
         sid = "proj/abc123"
-        p = store._ws_path(tmp_repo, sid)
+        p = working_set.path(tmp_repo, sid)
         assert p.parent == store.STORE_DIR          # no nested path escape
         _seed_rv1(tmp_repo, RV1_CORPUS)
         first = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?", sid)
@@ -5524,7 +5554,7 @@ class TestWsPathSanitized:
         # Greptile #117: ids sharing the first 32 chars must not share a working set.
         base = "project-alpha-2026-07-15-morning-run"   # >32 chars
         a, b = base + "-A", base + "-B"
-        assert store._ws_path(tmp_repo, a) != store._ws_path(tmp_repo, b)
+        assert working_set.path(tmp_repo, a) != working_set.path(tmp_repo, b)
         _seed_rv1(tmp_repo, RV1_CORPUS)
         first = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?", a)
         assert "auto-fetched" in first
@@ -5629,7 +5659,7 @@ class TestCompactRehydration:
         # even though it's in the working set.
         ignored_id = ids[13]  # RV1_EXTRA[3] — "...crash telemetry to sentry", within the last 10
         store.approve_decision(tmp_repo, ignored_id, "ignore")
-        store._ws_add(tmp_repo, sid, ids)  # simulate all 22 injected earlier this session
+        working_set.add_hints(tmp_repo, sid, ids)  # simulate all 22 injected earlier this session
 
         result = store.get_session_start_context(tmp_repo, "compact", sid)
         ctx = result["hookSpecificOutput"]["additionalContext"]
@@ -5659,7 +5689,7 @@ class TestCompactRehydration:
         _, eid = store.update_decision(
             tmp_repo, "Use postgres for storage, not sqlite", RV1_SESSION,
             "architecture", created_by="human", title="Postgres over sqlite")
-        store._ws_add(tmp_repo, "sess-title", [eid])
+        working_set.add_hints(tmp_repo, "sess-title", [eid])
         rendered = store._rehydrate_working_set(tmp_repo, "sess-title")
         lines = rendered.splitlines()
         head = next(line for line in lines if line.startswith("- ["))

@@ -9,7 +9,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-from contexer import revisions, store
+from contexer import revisions, store, working_set
 
 
 CONFLICT_STANDING = "Use Postgres for the decision store; SQLite won't handle concurrent sessions"
@@ -87,7 +87,7 @@ class TestConflictDualInjection:
 
     def test_rehydrated_working_set_carries_both_sides(self, tmp_repo):
         eid = _conflicted(tmp_repo)
-        store._ws_add(tmp_repo, "sess-conflict", [eid])
+        working_set.add_hints(tmp_repo, "sess-conflict", [eid])
         out = store._rehydrate_working_set(tmp_repo, "sess-conflict")
         assert "SQLite won't handle concurrent sessions" in out
         assert "Unreviewed update" in out and "DynamoDB" in out

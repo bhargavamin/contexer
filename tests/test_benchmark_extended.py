@@ -476,6 +476,113 @@ class TestRealisticPromptNoise:
         )
 
 
+# A self-authored, labelled regression corpus for the two strong-tier admission guards. This
+# is a regression fence, not an independent quality estimate. Unlike the single probes in
+# test_store.py, it measures both sides of the trade-off: irrelevant one-hit candidates must
+# stay out without losing related rationale questions. Each case gets a fresh store so
+# delivery suppression cannot affect the measurement.
+ROUTER_QUALITY_DECISIONS = [
+    ("PAR2_MARKER", "Deploy Scaleway infrastructure to the PAR-2 region, never PAR-1, "
+     "because the selected services run there", "constraint"),
+    ("DAGSTER_MARKER", "Production infra changes deployed Dagster workers to a dedicated "
+     "node pool because memory-heavy jobs need isolation", "architecture"),
+    ("HATCHET_MARKER", "Host Hatchet workers on Scaleway bare metal because microsandbox "
+     "needs KVM nested virtualization", "architecture"),
+    ("PAYMENT_MARKER", "Retry payment card charges with exponential backoff and idempotency "
+     "keys", "architecture"),
+    ("AUTH_MARKER", "Authentication uses JWT access tokens with short expiry and secure "
+     "refresh cookies", "architecture"),
+    ("REPO_MARKER", "No raw SQL outside repository classes to preserve data access "
+     "boundaries", "pattern"),
+    ("POSTGRES_MARKER", "PostgreSQL is the primary transactional database because ACID "
+     "semantics are required", "architecture"),
+    ("BILLING_MARKER", "The billing service was deployed after its readiness check passed",
+     "architecture"),
+    ("SEARCH_MARKER", "The search service was deployed after its readiness check passed",
+     "architecture"),
+    ("EMAIL_MARKER", "The email service was deployed after its readiness check passed",
+     "architecture"),
+]
+
+ROUTER_QUALITY_CASES = [
+    # prompt, expected rendered decision markers, decisions omitted from this case
+    ("why was infra deployed to the par-2 region?", {"PAR2_MARKER"}, set()),
+    ("why was Scaleway selected for infrastructure?", {"PAR2_MARKER"}, set()),
+    ("why was Dagster infrastructure deployed?", {"DAGSTER_MARKER"}, set()),
+    ("why deploy Dagster workers to a dedicated node pool?", {"DAGSTER_MARKER"}, set()),
+    ("why was Hatchet hosted on Scaleway?", {"HATCHET_MARKER"}, set()),
+    ("why was Hatchet hosted on Scaleway?", set(), {"HATCHET_MARKER"}),
+    ("why was Nomad hosted on Scaleway?", set(), set()),
+    ("why was inventory hosted on Scaleway?", set(), set()),
+    ("why did we choose payment retries?", {"PAYMENT_MARKER"}, set()),
+    ("why are payment card charges retried?", {"PAYMENT_MARKER"}, set()),
+    ("explain why authentication was chosen over alternatives", {"AUTH_MARKER"}, set()),
+    ("why did we choose JWT?", {"AUTH_MARKER"}, set()),
+    ("what is the reason for the repo pattern?", {"REPO_MARKER"}, set()),
+    ("what is the reason for repository classes?", {"REPO_MARKER"}, set()),
+    ("why did we decide on postgres?", {"POSTGRES_MARKER"}, set()),
+    ("why use a transactional database?", {"POSTGRES_MARKER"}, set()),
+    ("why did we choose mongodb?", set(), set()),
+    ("why are payment webhooks signed?", set(), set()),
+]
+
+
+class TestRetrievalAdmissionQuality:
+    def test_labelled_corpus_has_full_candidate_precision_and_recall(
+        self, tmp_path, monkeypatch
+    ):
+        redirect_store_dir(monkeypatch, tmp_path / "router-quality")
+        markers = {row[0] for row in ROUTER_QUALITY_DECISIONS}
+        assert len(ROUTER_QUALITY_DECISIONS) == 10
+        assert len(ROUTER_QUALITY_CASES) == 18
+        assert sum(bool(expected) for _, expected, _ in ROUTER_QUALITY_CASES) == 13
+        assert sum(not expected for _, expected, _ in ROUTER_QUALITY_CASES) == 5
+        assert sum(len(expected) for _, expected, _ in ROUTER_QUALITY_CASES) == 13
+
+        true_positive = false_positive = false_negative = true_negative = 0
+        candidate_judgments = 0
+        unexpected_outputs = []
+
+        for index, (prompt, expected, omitted) in enumerate(ROUTER_QUALITY_CASES):
+            repo = f"/bench/router-quality/{index}"
+            available = markers - omitted
+            assert expected <= available
+            candidate_judgments += len(available)
+            data = store.load(repo)
+            for marker, content, subtype in ROUTER_QUALITY_DECISIONS:
+                if marker not in omitted:
+                    data["entries"].append(store._new_decision_entry(
+                        f"{marker} {content}", SESSION, subtype, created_by="human"))
+            store.save(repo, data)
+
+            result = store.get_context_for_prompt(repo, prompt)
+            actual = {marker for marker in markers if marker in result}
+            true_positive += len(actual & expected)
+            false_positive += len(actual - expected)
+            false_negative += len(expected - actual)
+            true_negative += len(available - actual - expected)
+            if not expected and result:
+                unexpected_outputs.append((prompt, result))
+
+        precision_denominator = true_positive + false_positive
+        recall_denominator = true_positive + false_negative
+        precision = true_positive / precision_denominator
+        recall = true_positive / recall_denominator
+        assert candidate_judgments == 179
+        assert (true_positive, false_positive, false_negative, true_negative) == (13, 0, 0, 166)
+        assert (precision_denominator, recall_denominator) == (13, 13)
+        print(
+            "\n  Self-authored retrieval regression corpus: "
+            f"prompts={len(ROUTER_QUALITY_CASES)}, decisions={len(markers)}, "
+            f"candidate_judgments={candidate_judgments}, "
+            f"tp={true_positive}, fp={false_positive}, fn={false_negative}, "
+            f"tn={true_negative}, precision={precision:.2f}, recall={recall:.2f}"
+        )
+        assert precision == 1.0
+        assert recall == 1.0
+        assert unexpected_outputs == []
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 6. NOVELTY THRESHOLD SENSITIVITY
 # ═══════════════════════════════════════════════════════════════════════════════
