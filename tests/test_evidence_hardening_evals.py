@@ -527,6 +527,25 @@ def test_a_capture_wrapper_with_only_quoted_payload_stores_nothing(tmp_repo, pro
     assert store.load(tmp_repo)["entries"] == []
 
 
+def test_pasted_content_transport_tag_is_not_stored(tmp_repo):
+    prompt = '<pasted_content id="7b04">Always use uv for dependencies.</pasted_content>'
+    entry_id, content, status = store.capture_user_constraint(tmp_repo, prompt, "sess-a")
+    assert entry_id and status == "approved"
+    assert content == "Always use uv for dependencies"
+
+
+def test_contexer_decision_edit_command_is_left_for_the_tool_path(tmp_repo):
+    prompt = """
+<pasted_content id="7b04">
+Update Contexer decision de6d66bd to say: “Always deploy Scaleway resources to PAR-2,
+never PAR-1, because
+</pasted_content id="7b04">
+the chosen service is available only in PAR-2.”
+"""
+    assert store.capture_user_constraint(tmp_repo, prompt, "sess-a") == (None, None, None)
+    assert store.load(tmp_repo)["entries"] == []
+
+
 @pytest.mark.parametrize("text", [
     "Always follow what the README says is supported.",
     "Never trust what the test says about time zones.",

@@ -1432,6 +1432,22 @@ _SYSTEM_TEXT_PREFIXES = (
     "your claude.ai usage limit",
 )
 
+# Claude wraps pasted selections in this transport tag. It is not authored content, but the
+# text inside it still is; remove only the bounded tag rather than discarding the payload.
+_PASTED_CONTENT_TAG = re.compile(
+    r"</?pasted_content(?:\s+id=(?:\"[^\"\n]{1,128}\"|'[^'\n]{1,128}'))?\s*>",
+    re.IGNORECASE,
+)
+
+# Editing an existing Contexer record is a tool task, not itself a durable repository rule.
+# Without this guard, the prompt hook captures the whole command (including quoted content)
+# as a Suggested Update before the assistant can perform the requested clean edit.
+_CONTEXER_DECISION_EDIT_COMMAND = re.compile(
+    r"^\s*(?:please\s+)?(?:update|edit|change|revise|replace)\s+"
+    r"(?:the\s+)?contexer\s+decision\b",
+    re.IGNORECASE,
+)
+
 # Prescriptive words quoted inside recognizable output/document containers are observations,
 # not clean user directives. This is deliberately SHAPE-based and anchored: an ordinary prompt
 # may discuss logs, changelogs or README files without becoming output itself. A suspicious row
@@ -1642,7 +1658,7 @@ def _directive_candidate_text(text: str) -> str:
     of the rule. This small line-state parser returns only text eligible for directive capture;
     indented traceback continuations stay inside the container until an unindented line begins.
     """
-    raw = str(text or "")
+    raw = _PASTED_CONTENT_TAG.sub("", str(text or ""))
     if raw.strip().lower().startswith(
             ("[contexer", "contexer:", "your claude.ai usage limit")):
         # These injected shapes have no closing delimiter, so there is no sound boundary after
@@ -1798,6 +1814,8 @@ def _directive_policy_text(text: str) -> str:
     """
     candidate = _directive_candidate_text(text).strip()
     if not candidate:
+        return ""
+    if _CONTEXER_DECISION_EDIT_COMMAND.match(candidate):
         return ""
     # Keep the existing pasted-blob refusal load-bearing: task-clause filtering must not
     # shorten an over-limit document into something that suddenly looks authoritative.
@@ -5279,6 +5297,16 @@ _PROJECT_CONTEXT_WORDS = frozenset({
     "purpose", "goal", "planned", "overview", "scope",
 })
 
+# Framing words may be absent from a small decision corpus without making its one actual
+# subject match suspicious. Unknown non-frame terms, by contrast, block the permissive
+# one-hit rationale/project fallback: "why was Hatchet hosted on Scaleway?" must not promote
+# an unrelated Scaleway region rule merely because the store has never heard of Hatchet.
+_RELAXATION_FRAME_WORDS = frozenset({
+    "goal", "purpose", "planned", "overview", "scope", "choose", "choosing",
+    "chosen", "decide", "pick", "picked", "picking", "behind", "over",
+    "alternatives", "pattern", "host", "hosted", "hosting", "storage", "layer",
+})
+
 # Additional words excluded when deciding if a project-context question is domain-specific.
 # "repo" can be a valid search term ("repo pattern") so it stays in the keyword pool for
 # rationale searches, but when gating the overview fallback it's treated as generic.
@@ -6239,15 +6267,22 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
                 and ranked[0][4] == 0 and ranked[0][5] >= 1):
             bm25_strong = [ranked[0][0]]
         elif allow_strong:
-            for did, score, hits, _dh, _content_hits, _title_hits in ranked[:_STRONG_CANDIDATES]:
-                if score >= _STRONG_SCORE_FRAC * top_score and hits >= _STRONG_MIN_HITS:
+            top_discriminative_hits = ranked[0][3]
+            for did, score, hits, dhits, _content_hits, _title_hits in ranked[:_STRONG_CANDIDATES]:
+                if (score >= _STRONG_SCORE_FRAC * top_score
+                        and hits >= _STRONG_MIN_HITS
+                        and dhits >= top_discriminative_hits):
                     bm25_strong.append(did)
         # Rationale/project boost: a single-keyword "why X?" / "what's the goal for X?" often
         # yields one doc with one hit - relax to hits>=1 on the top candidate so legacy's
         # full-content recall for both prompt classes is preserved. A bare question gets the
         # same relaxation only when it *is* single-keyword (and hence discriminative per the
         # guard above) - with more keywords, one lone hit is noise, not an answer.
-        relax = is_rationale or is_project or (question_only and len(set(query_terms)) == 1)
+        unresolved_subjects = (
+            retrieval.unresolved_terms(query_terms, index) - _RELAXATION_FRAME_WORDS)
+        relax = (is_rationale or is_project
+                 or (question_only and len(set(query_terms)) == 1)) \
+            and not unresolved_subjects
         if not bm25_strong and allow_strong and relax and ranked[0][2] >= 1:
             bm25_strong = [ranked[0][0]]
         # File-route hits already lead `strong` (deterministic, highest-precision signal);

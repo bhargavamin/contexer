@@ -4024,6 +4024,36 @@ class TestBM25Router:
         assert result != ""
         assert "Alembic" in result
 
+    def test_rationale_one_hit_does_not_ignore_an_unknown_subject(self, tmp_repo):
+        store.update_decision(
+            tmp_repo, "Always deploy resources to PAR-2, never PAR-1 in Scaleway",
+            RV1_SESSION, "constraint", created_by="human")
+
+        result = store.get_context_for_prompt(
+            tmp_repo, "why was Hatchet hosted on Scaleway?")
+
+        assert result == ""
+
+    def test_secondary_candidate_needs_top_candidates_discriminative_evidence(self, tmp_repo):
+        store.update_decision(
+            tmp_repo, "Deploy infrastructure to the PAR-2 region, never PAR-1",
+            RV1_SESSION, "constraint", created_by="human")
+        store.update_decision(
+            tmp_repo,
+            "Production infra changes deployed Dagster workers to a dedicated node pool "
+            "because memory-heavy jobs need isolation",
+            RV1_SESSION, "architecture", created_by="human")
+        for name in ("billing", "search", "email"):
+            store.update_decision(
+                tmp_repo, f"The {name} service was deployed after its readiness check passed",
+                RV1_SESSION, "architecture", created_by="human")
+
+        result = store.get_context_for_prompt(
+            tmp_repo, "why was infra deployed to the PAR-2 region?")
+
+        assert "PAR-2 region" in result
+        assert "Dagster workers" not in result
+
     def test_generic_algorithm_word_does_not_select_an_unrelated_rule(self, tmp_repo):
         store.update_decision(
             tmp_repo, "Use lexical scoring because it is local and fast",
