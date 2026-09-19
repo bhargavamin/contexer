@@ -273,6 +273,34 @@ class TestDeliveryTallyIntegrity:
             assert 1 <= row["renders"] <= writes
             assert row["first"] <= row["last"]
 
+class TestDeliveryTallyReachesTheRealRouter:
+    """Restored after review of 3b09c3c: a span-edit while rewriting the concurrency test
+    silently deleted this class, and the suite went 5710 -> 5709 without anyone noticing.
+
+    This must assert the tally DIRECTLY after get_context_for_prompt. The compaction test
+    below does fail today if the router stops recording, but only indirectly - it goes
+    through the session ledger, so it would stop catching a router regression the moment the
+    ledger write and the tally write were separated. The production integration deserves its
+    own assertion rather than a side effect of someone else's.
+    """
+
+    def test_a_strong_injection_lands_in_the_durable_tally(self, tmp_repo):
+        ok, entry_id = store.update_decision(
+            tmp_repo,
+            "Use Postgres with pgbouncer for the decision store connection pooling because "
+            "per-request connections exhausted the server under load",
+            "seed-session", "architecture", created_by="human")
+        assert ok
+        store.ensure_retrieval_index(tmp_repo)
+
+        store.get_context_for_prompt(
+            tmp_repo, "why did we choose postgres with pgbouncer for pooling?", "sess-live")
+
+        rows = working_set.read_delivery_tally(tmp_repo)
+        assert f"personal:{entry_id}" in rows, rows
+        assert rows[f"personal:{entry_id}"]["renders"] == 1
+
+
 class TestTallyNeverBlocksTheHook:
     """Review of 5794acb: a blocking flock has no timeout, so one stalled holder would hang
     the prompt path for a counter nothing reads synchronously."""
