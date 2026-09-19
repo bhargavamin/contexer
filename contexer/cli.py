@@ -49,7 +49,8 @@ Commands:
   logout        Remove stored Contexer Teams credentials.
   guard         Commit-time decision guard (invoked by the pre-commit hook - see below).
   policy        Report what your approved decisions say about one operation:
-                 policy evaluate --operation <op> --diff-file <path|-> [--intent TEXT]
+                 policy evaluate --operation <op> [--diff-file <path|-> |
+                 --artifact-path REPO_PATH] [--guidance-ref ID ...] [--intent TEXT]
                  [--file PATH ...] [--json] [--exit-code]. <op> is any of read_files,
                  write_files, shell, commit, merge, deploy, api_request. A REPORTER, not a
                  gate: even a `block` verdict exits 0 unless you opt in with --exit-code.
@@ -57,7 +58,8 @@ Commands:
                  anything.
   scope-audit   Read-only: find decisions saved into the wrong repo's store (a session
                 whose decisions are split across two or more stores). Changes nothing.
-  status        Show install state: version, binary path, MCP/hooks, store summary.
+  status        Show install state, or read opt-in local condition-check history with
+                status --impact [--json] [--file PATH] [--receipt-id ID].
   version       Print the installed version.
   help          Show this message.
 
@@ -932,7 +934,77 @@ def _coverage_status_lines(targets) -> list[str]:
             for a in targets]
 
 
+def _status_impact(rest: list) -> None:
+    """Local projection over the read-only impact report; never refreshes version state."""
+    from contexer import decision_impact
+
+    args = [arg for arg in rest if arg != "--impact"]
+    as_json = clear = confirm = False
+    files: list[str] = []
+    receipt_id = cursor = ""
+    limit = 10
+    valued = {"--file", "--receipt-id", "--cursor", "--limit"}
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--json":
+            as_json = True
+        elif arg == "--clear":
+            clear = True
+        elif arg == "--confirm":
+            confirm = True
+        elif arg in valued:
+            if i + 1 >= len(args):
+                print(f"contexer status --impact: {arg} needs a value.", file=sys.stderr)
+                sys.exit(1)
+            value = args[i + 1]
+            i += 1
+            if arg == "--file":
+                files.append(value)
+            elif arg == "--receipt-id":
+                receipt_id = value
+            elif arg == "--cursor":
+                cursor = value
+            else:
+                try:
+                    limit = int(value)
+                except ValueError:
+                    print("contexer status --impact: --limit must be an integer.",
+                          file=sys.stderr)
+                    sys.exit(1)
+        else:
+            print(f"contexer status --impact: unknown argument: {arg}", file=sys.stderr)
+            sys.exit(1)
+        i += 1
+
+    repo = _cli_repo()
+    if not repo:
+        print("Decision impact: repository not detected.", file=sys.stderr)
+        sys.exit(1)
+    if clear:
+        if not confirm:
+            print("contexer status --impact --clear requires --confirm; no history changed.",
+                  file=sys.stderr)
+            sys.exit(1)
+        ok = decision_impact.clear(repo)
+        payload = {"status": "cleared" if ok else "clear_failed", "repository": repo}
+        print(json.dumps(decision_impact.scrubbed_report(payload), sort_keys=True)
+              if as_json else ("Decision impact history cleared for this repository."
+                               if ok else "Decision impact history could not be cleared."))
+        if not ok:
+            sys.exit(1)
+        return
+
+    result = decision_impact.report(
+        repo, files=files or None, limit=limit, receipt_id=receipt_id, cursor=cursor)
+    print(json.dumps(decision_impact.scrubbed_report(result), indent=2, sort_keys=True)
+          if as_json else decision_impact.format_report(result))
+
+
 def status(rest: list | None = None) -> None:
+    if "--impact" in (rest or []):
+        _status_impact(list(rest or []))
+        return
     home = Path.home()
     bin_path = shutil.which("contexer") or "(not on PATH)"
 
@@ -1992,7 +2064,8 @@ def _policy_usage() -> str:
     from contexer import policy
 
     return ("Usage: contexer policy evaluate --operation <" + "|".join(policy.OPERATIONS)
-            + "> [--diff-file PATH|-] [--intent TEXT] [--file PATH ...] [--json] [--exit-code]")
+            + "> [--diff-file PATH|- | --artifact-path REPO_PATH] [--guidance-ref ID ...] "
+              "[--intent TEXT] [--file PATH ...] [--json] [--exit-code]")
 
 
 def _policy_fail(message: str) -> None:
@@ -2049,10 +2122,12 @@ def _policy_evaluate(rest: list) -> None:
     status, because nothing this command does enforces anything."""
     from contexer import policy_api
 
-    operation = intent = diff_file = ""
+    operation = intent = diff_file = artifact_path = ""
     files: list = []
+    guidance_refs: list = []
     as_json = want_exit_code = False
-    valued = {"--operation", "--diff-file", "--intent", "--file"}
+    valued = {"--operation", "--diff-file", "--artifact-path", "--guidance-ref",
+              "--intent", "--file"}
 
     i = 0
     while i < len(rest):
@@ -2075,6 +2150,13 @@ def _policy_evaluate(rest: list) -> None:
                     _policy_fail("contexer policy evaluate: --diff-file needs a path (or - "
                                  "for stdin).")
                 diff_file = value
+            elif arg == "--artifact-path":
+                if not value:
+                    _policy_fail("contexer policy evaluate: --artifact-path needs a "
+                                 "repository-relative path.")
+                artifact_path = value
+            elif arg == "--guidance-ref":
+                guidance_refs.append(value)
             elif arg == "--intent":
                 intent = value
             else:
@@ -2093,7 +2175,8 @@ def _policy_evaluate(rest: list) -> None:
         # A gap means the artifact was NOT handed over, so no kind is named either - the
         # armed policies then report `omitted` beside the gap instead of judging "".
         artifact_kind="diff" if (diff_file and not gaps) else "",
-        artifact=content, unchecked=gaps)
+        artifact=content, unchecked=gaps, artifact_path=artifact_path,
+        guidance_refs=guidance_refs)
 
     # `--json` holds for a refused request too - a machine consumer gets one shape either way.
     # Scrubbed BEFORE encoding, never after: JSON escaping rewrites the quotes redact's

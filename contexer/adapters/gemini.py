@@ -232,7 +232,7 @@ def before_agent(repo_path: str, raw: str) -> str:
         if entry_id is not None:
             contexts.append(store.constraint_ack(content, status, entry_id, near))
 
-        rationale = store.get_context_for_prompt(repo, prompt, session_id)
+        rationale = store.get_context_for_prompt(repo, prompt, session_id, host="gemini")
         if rationale:
             contexts.append(rationale)
         return _output("BeforeAgent", contexts)

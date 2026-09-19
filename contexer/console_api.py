@@ -44,6 +44,7 @@ import time
 from pathlib import Path
 
 from contexer import conflicts      # pure stdlib leaf (no cycle): open-conflict predicate
+from contexer import decision_impact
 from contexer import review_impact  # the shared review block; reads store, never console_api
 from contexer import revisions      # pure stdlib leaf (no cycle): revision lifecycle
 from contexer import store          # module object, not `from`-imports: see docstring above
@@ -59,6 +60,14 @@ _TRANSCRIPT_SIZE_CAP = 10 * 1024 * 1024  # 10 MB
 # path could be read out of it) or the path it claims is one `is_sane_repo` rejects. The
 # console renders it as "store unreadable", never as "no decisions".
 _NO_REPO_PATH = "store file names no usable repo_path"
+
+
+def decision_impact_report(repo_path: str, *, files: list[str] | None = None,
+                           limit: int = 10, receipt_id: str = "", cursor: str = "") -> dict:
+    """Shared bounded JSON projection for the optional local-console panel."""
+    result = decision_impact.report(
+        repo_path, files=files, limit=limit, receipt_id=receipt_id, cursor=cursor)
+    return decision_impact.scrubbed_report(result)
 
 
 def _read_store(repo_path: str) -> tuple[dict, str | None, float | None]:

@@ -1,4 +1,6 @@
 """Tests for the go-live profile loader (~/.contexer/config.toml)."""
+import json
+
 import pytest
 
 from contexer import config
@@ -200,3 +202,115 @@ def test_delegates_fail_soft_when_the_symbol_is_unresolvable(config_path, monkey
     monkeypatch.delattr(config, "redaction_enabled")
     assert store._redaction_enabled() is True
     assert remote._redaction_enabled() is True
+
+
+# ── Contract 04: independent impact consent and artifact-read grants ────────────
+
+def test_impact_and_policy_settings_default_off_and_empty(config_path):
+    assert config.load_diagnostics_settings() == config.DiagnosticsSettings()
+    assert config.load_policy_settings() == config.PolicySettings()
+    assert config.decision_impact_enabled() is False
+
+
+def test_impact_consent_and_exact_physical_roots_are_independent(config_path, tmp_path):
+    project = (tmp_path / "project").resolve()
+    project.mkdir()
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        "[diagnostics]\n"
+        "decision_impact = true\n\n"
+        "[policy]\n"
+        f'artifact_read_roots = ["{project}"]\n'
+    )
+
+    assert config.load_diagnostics_settings().decision_impact is True
+    assert config.load_policy_settings().artifact_read_roots == (str(project),)
+
+
+def test_malformed_impact_consent_fails_collection_off(config_path):
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text('[diagnostics]\ndecision_impact = "yes"\n')
+    with pytest.raises(ConfigError):
+        config.load_diagnostics_settings()
+    assert config.decision_impact_enabled() is False
+
+
+def test_oversized_local_policy_config_fails_consent_closed(config_path):
+    config_path.parent.mkdir(parents=True)
+    config_path.write_bytes(
+        b"[diagnostics]\ndecision_impact = true\n#" +
+        b"x" * config.MAX_LOCAL_POLICY_CONFIG_BYTES)
+    with pytest.raises(ConfigError):
+        config.load_diagnostics_settings()
+    assert config.decision_impact_enabled() is False
+
+
+@pytest.mark.parametrize("value", ["/", "relative/project"])
+def test_broad_or_relative_artifact_roots_are_refused(config_path, value):
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(f'[policy]\nartifact_read_roots = ["{value}"]\n')
+    with pytest.raises(ConfigError):
+        config.load_policy_settings()
+
+
+def test_home_and_protected_config_roots_are_refused(config_path, tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / ".contexer").mkdir(parents=True)
+    monkeypatch.setattr(config.Path, "home", lambda: home)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    for value in (home, home / ".contexer"):
+        config_path.write_text(f'[policy]\nartifact_read_roots = ["{value}"]\n')
+        with pytest.raises(ConfigError):
+            config.load_policy_settings()
+
+
+def test_artifact_root_count_and_duplicates_are_refused(config_path, tmp_path):
+    roots = []
+    for i in range(config.MAX_ARTIFACT_READ_ROOTS + 1):
+        root = (tmp_path / f"project-{i}").resolve()
+        root.mkdir()
+        roots.append(str(root))
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        "[policy]\nartifact_read_roots = " + json.dumps(roots) + "\n")
+    with pytest.raises(ConfigError):
+        config.load_policy_settings()
+    config_path.write_text(
+        "[policy]\nartifact_read_roots = " + json.dumps([roots[0], roots[0]]) + "\n")
+    with pytest.raises(ConfigError):
+        config.load_policy_settings()
+
+
+def test_symlink_artifact_root_is_refused_instead_of_silently_canonicalized(
+        config_path, tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(target, target_is_directory=True)
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(f'[policy]\nartifact_read_roots = ["{link}"]\n')
+    with pytest.raises(ConfigError):
+        config.load_policy_settings()
+
+
+def test_every_config_writer_preserves_diagnostics_and_policy_tables(config_path, tmp_path):
+    project = (tmp_path / "project").resolve()
+    project.mkdir()
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        'mode = "team"\nendpoint = "http://old/mcp"\n\n'
+        "[diagnostics]\ndecision_impact = true\n\n"
+        "[policy]\n"
+        f'artifact_read_roots = ["{project}"]\n\n'
+        "[ui]\nport = 32123\n"
+    )
+
+    config.write_team_profile("http://new/mcp")
+    assert config.load_diagnostics_settings().decision_impact is True
+    assert config.load_policy_settings().artifact_read_roots == (str(project),)
+    assert config.load_ui_settings().port == 32123
+
+    config.write_settings(autostart=True)
+    assert config.load_diagnostics_settings().decision_impact is True
+    assert config.load_policy_settings().artifact_read_roots == (str(project),)
+    assert config.load_ui_settings().autostart is True

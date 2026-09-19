@@ -2596,6 +2596,41 @@ def _guidance_fingerprint(entry: dict, data: dict | None = None) -> str:
         raw.encode("utf-8")).hexdigest()
 
 
+def _impact_guidance_row(entry: dict, data: dict, *, scope: str, tier: str,
+                         reason: str, rank: int | None = None,
+                         files: list[str] | None = None) -> dict:
+    """Content-free identity from the exact snapshot a renderer is already using."""
+    from contexer import policy
+
+    current = revisions.current_revision(entry) or {}
+    revision_id = (str(current.get("revision_id") or "")
+                   if _revision_identity_is_persisted(data, entry) else "legacy")
+    status = entry_status(entry)
+    authority = ("human_approved" if status == "approved" and entry.get("approved_by") == "human"
+                 else "trusted_approved" if status == "approved" and policy.is_trusted(entry)
+                 else "approved_untrusted" if status == "approved"
+                 else status)
+    proposal = entry.get("proposed_revision") or {}
+    proposal_identity = ""
+    if proposal:
+        raw = json.dumps(proposal, sort_keys=True, separators=(",", ":"), default=str)
+        proposal_identity = "sha256:" + hashlib.sha256(raw.encode()).hexdigest()
+    rule = entry.get("guard_check")
+    return {
+        "scope": scope,
+        "id": str(entry.get("id") or ""),
+        "revision_id": revision_id,
+        "fingerprint": _guidance_fingerprint(entry, data),
+        "authority": authority,
+        "proposal_id": proposal_identity,
+        "tier": tier,
+        "reason": reason,
+        "rank": rank,
+        "files": list(files if files is not None else entry.get("source_files") or [])[:10],
+        "rule_digest": policy.rule_digest(rule) if isinstance(rule, dict) and rule else "",
+    }
+
+
 def _new_decision_entry(content: str, session_id: str, subtype: str,
                         memory_key: str | None = None,
                         created_by: str = "ai",
@@ -5988,6 +6023,7 @@ def _render_prompt_decisions_with_records(
     active_only: bool = False,
     local_snapshot: dict | None = None,
     check_bootstrap_sources: bool = False,
+    impact_observation: bool = False,
 ) -> tuple[str, list[dict]]:
     """Render and receipt decisions from the same loaded local/global snapshots.
 
@@ -6061,7 +6097,13 @@ def _render_prompt_decisions_with_records(
         for extra in extras:
             lines.append(f"    {extra}")
         conflicted = conflicted or conflicts.has_open_conflict(e)
-        receipts.append({"scope": scope, "id": did, "fingerprint": fingerprint})
+        receipt = {"scope": scope, "id": did, "fingerprint": fingerprint}
+        if impact_observation:
+            receipt.update(_impact_guidance_row(
+                e, owner, scope=scope, tier="full",
+                reason=(request.get("reason") or "prompt_selected")
+                if isinstance(request, dict) else "prompt_selected"))
+        receipts.append(receipt)
     if conflicted:
         lines.append(f"\n{conflicts._CONFLICT_GUIDE}")
     return "\n".join(lines), receipts
@@ -6271,7 +6313,8 @@ def _prompt_file_hits(repo_path: str, prompt: str, ws: set[str] | list[dict],
         return [], [], []
 
 
-def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -> tuple[str, dict]:
+def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
+                            host: str = "") -> tuple[str, dict]:
     """Body of get_context_for_prompt, returning (text, meta). meta = {"kind": "strong"|
     "pointer"|"overview"|"global"|"", "count": int, "topics": [...]} - structured data for
     a caller's status line (claude.rationale) instead of scraping the rendered text."""
@@ -6399,8 +6442,13 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
                 strong_ids.add(did)
     strong = strong[:_STRONG_CAP]
     if strong:
+        try:
+            from contexer import decision_impact
+            observe_impact = decision_impact.collection_enabled()
+        except Exception:
+            observe_impact = False
         rendered, receipts = _render_prompt_decisions_with_records(
-            repo_path, strong, previous_records=ws)
+            repo_path, strong, previous_records=ws, impact_observation=observe_impact)
         if rendered:
             working_set.record_deliveries(repo_path, session_id, receipts)
             # Suffix (not part of the pinned header prefix): the block normally avoids a
@@ -6411,6 +6459,14 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
                     "call Contexer's get_context with concise subject keywords before reading files; "
                     "do not substitute another memory, graph, or search tool)\n"
                     f"{rendered}")
+            if observe_impact:
+                try:
+                    decision_impact.append(repo_path, decision_impact.guidance_envelope(
+                        repo_path, repo_path, route="indexed_prompt", rows=receipts,
+                        host=host, session_id=session_id, configured_cap=_STRONG_CAP,
+                        output_bytes=len(text.encode("utf-8"))))
+                except Exception:
+                    pass
             return text, _rendered_meta("strong", text)
 
     # WEAK: no strong content, but the prompt's topics overlap not-yet-injected docs →
@@ -6473,18 +6529,20 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -
     return "", dict(_EMPTY_META)
 
 
-def get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "") -> str:
+def get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
+                           host: str = "") -> str:
     """Auto-injected by UserPromptSubmit hook. Returns relevant stored decisions when
     the prompt is a rationale/decision or project-context question. Silent no-op otherwise.
     Searches repo decisions first; falls back to global decisions."""
-    return _get_context_for_prompt(repo_path, prompt, session_id)[0]
+    return _get_context_for_prompt(repo_path, prompt, session_id, host)[0]
 
 
-def get_context_for_prompt_with_meta(repo_path: str, prompt: str, session_id: str = "") -> tuple[str, dict]:
+def get_context_for_prompt_with_meta(repo_path: str, prompt: str, session_id: str = "",
+                                     host: str = "") -> tuple[str, dict]:
     """Same as get_context_for_prompt but also returns structured metadata about the
     injection - {"kind": ..., "count": int, "topics": [...]} - so a caller (claude.rationale)
     can build a status line without scraping the rendered text."""
-    return _get_context_for_prompt(repo_path, prompt, session_id)
+    return _get_context_for_prompt(repo_path, prompt, session_id, host)
 
 
 def _team_section(repo_path: str, query: str, entry_type: str, *,
@@ -6530,7 +6588,8 @@ def _team_display_cap() -> int:
 
 def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: int = 0,
                 files: list[str] | None = None, _active_only: bool = False,
-                _include_staleness: bool = True) -> str:
+                _include_staleness: bool = True,
+                _impact_rows: list[dict] | None = None) -> str:
     """Returns stored context for the given repo.
 
     files: optional repo-relative or absolute files the caller is about to work on - when
@@ -6561,6 +6620,7 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
     # a module-level `from contexer import guard_engine` here would recreate the store <->
     # guard_engine load-order cycle guard_engine.py's own docstring describes.
     file_hits: dict[str, dict] = {}
+    global_data: dict | None = None
     if files:
         from contexer import guard_engine
         file_hits = {h["decision_id"]: h
@@ -6580,7 +6640,8 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
         # file_hits already excludes `ignored` (guard_engine.decisions_for_files' own
         # filter) - pull the matching full entries from BOTH stores by id so global-scope
         # hits render too, not just repo-local ones.
-        global_entries = load_global().get("entries", [])
+        global_data = load_global()
+        global_entries = global_data.get("entries", [])
         by_id = {e.get("id"): e for e in entries if e.get("type") == "decision"}
         by_id.update({e.get("id"): e for e in global_entries if e.get("type") == "decision"})
         decisions = [by_id[did] for did in file_hits if did in by_id]
@@ -6653,10 +6714,18 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
             # has no replace_id path - so _conflict_view can only ever plain-render them.
             title, body, extras = conflicts._conflict_view(d)
             hit = file_hits.get(d.get("id")) if files else None
+            scope = hit["scope"] if hit else "personal"
+            if _impact_rows is not None:
+                owner = global_data if scope == "global" and global_data is not None else data
+                _impact_rows.append(_impact_guidance_row(
+                    d, owner, scope=scope, tier="full" if body is not None else "title",
+                    reason="files" if files else "query" if query else
+                    "entry_type" if entry_type else "overview",
+                    rank=len(_impact_rows) + 1,
+                    files=list((hit or {}).get("files_matched") or d.get("source_files") or [])))
             if d.get("bootstrap"):
                 from contexer import bootstrap
                 extras = bootstrap.render(d, repo_path) + (extras if conflicts.has_open_conflict(d) else [])
-            scope = hit["scope"] if hit else "personal"
             lines.append(f"- [scope={scope}] [{d['timestamp'][:10]}]{subtype_tag}{status_tag}"
                          f"{update_tag}{_recur_suffix(d)} {title}{id_tag}{stale.get(d.get('id'), '')}")
             if body is not None:
