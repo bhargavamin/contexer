@@ -273,3 +273,43 @@ class TestDeliveryTallyReachesTheRealRouter:
         rows = working_set.read_delivery_tally(tmp_repo)
         assert f"personal:{entry_id}" in rows, rows
         assert rows[f"personal:{entry_id}"]["renders"] == 1
+
+
+class TestTallyNeverBlocksTheHook:
+    """Review of 5794acb: a blocking flock has no timeout, so one stalled holder would hang
+    the prompt path for a counter nothing reads synchronously."""
+
+    def test_contention_drops_the_increment_instead_of_waiting(self, tmp_repo):
+        import threading
+        import time as _time
+
+        held = threading.Event()
+        release = threading.Event()
+
+        def hold_the_lock() -> None:
+            with store.store_lock(working_set._delivery_lock_slug(tmp_repo)):
+                held.set()
+                release.wait(timeout=30)
+
+        holder = threading.Thread(target=hold_the_lock)
+        holder.start()
+        assert held.wait(timeout=5)
+        try:
+            start = _time.perf_counter()
+            result = working_set.record_delivery_tally(
+                tmp_repo, "blocked", [{"scope": "personal", "id": "d", "fingerprint": "f"}])
+            elapsed = _time.perf_counter() - start
+        finally:
+            release.set()
+            holder.join(timeout=5)
+
+        assert result is False, "contention must be reported, not waited out"
+        budget = working_set._TALLY_LOCK_TRIES * working_set._TALLY_LOCK_BACKOFF
+        assert elapsed < budget + 1.0, f"waited {elapsed:.2f}s; the hook must never block"
+        assert working_set.read_delivery_tally(tmp_repo) == {}
+
+    def test_the_lock_is_released_so_the_next_delivery_succeeds(self, tmp_repo):
+        """The drop is transient, not sticky - a skipped increment must not poison the file."""
+        assert working_set.record_delivery_tally(
+            tmp_repo, "s1", [{"scope": "personal", "id": "d", "fingerprint": "f"}])
+        assert working_set.read_delivery_tally(tmp_repo)["personal:d"]["renders"] == 1

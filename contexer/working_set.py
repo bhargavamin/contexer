@@ -174,6 +174,15 @@ def _delivery_lock_slug(repo_path: str) -> str:
     return f"{store.repo_slug(repo_path)}_delivery"
 
 
+# Bounded, never unbounded: this runs on the per-prompt path, where the standing invariant is
+# that optional bookkeeping can never stop a hook rendering context. A blocking flock has no
+# timeout, so one stalled holder would hang the prompt for a counter nothing reads
+# synchronously. Three quick tries absorb ordinary brief contention; past that the increment is
+# dropped, which costs at most one render event and never costs the developer their output.
+_TALLY_LOCK_TRIES = 3
+_TALLY_LOCK_BACKOFF = 0.005
+
+
 def _valid_stamp(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and value == value
 
@@ -216,62 +225,70 @@ def read_delivery_tally(repo_path: str) -> dict:
 def record_delivery_tally(repo_path: str, session_id: str, delivered: list[dict]) -> bool:
     """Bump the durable per-decision render count. Never raises; never blocks output.
 
-    `renders` is a count of RENDER EVENTS, deliberately not of distinct sessions. Sessions
-    cannot be counted without persisting unbounded session identity per decision, and the
-    question this exists to answer - "was this decision ever delivered at all" - is a
-    boolean that no counting convention changes. `session` holds the most recent session id
-    and suppresses a consecutive repeat, which removes the two ways one session inflated the
-    figure (a compaction re-render, and a retry after the session ledger failed to persist
-    credit). Interleaved sessions still produce separate renders; that is why this is not
-    named `sessions`.
+    `renders` counts RENDER EVENTS, deliberately not distinct sessions. Counting sessions
+    needs unbounded session identity persisted per decision, and the question this exists to
+    answer - "was this decision ever delivered at all" - is a boolean that no counting
+    convention changes. `session` holds the most recent session id and suppresses a
+    consecutive repeat, which removes the two ways one session inflated the figure (a
+    compaction re-render, and a retry after the session ledger failed to persist credit).
+    Interleaved sessions still produce separate renders; that is why this is not `sessions`.
 
     Keyed by (scope, decision id) rather than appended per event, so the file is bounded by
     the store's entry cap instead of by prompt volume - the tail-capped retrieval_log would
     silently drop the START of a multi-week window, which is exactly what this must not do.
 
-    Locked across read-modify-write: atomic replacement prevents a torn file but not a lost
-    update, and two sessions delivering in one repo would otherwise silently drop one
-    another's increments - undercounting is the one failure mode that makes a used decision
-    look dead.
+    Locked across read-modify-write, because atomic replacement prevents a torn file but not
+    a lost update: two sessions delivering in one repo would otherwise drop each other's
+    increments, and undercounting is the one failure that makes a used decision look dead.
+    The lock is NON-BLOCKING with a bounded retry - a blocking flock has no timeout, so one
+    stalled holder would hang the prompt for a counter nothing reads synchronously, and the
+    standing invariant is that optional bookkeeping never stops a hook rendering context.
     """
-    try:
-        with store.store_lock(_delivery_lock_slug(repo_path)):
-            rows = read_delivery_tally(repo_path)
-            now = time.time()
-            changed = False
-            for row in delivered:
-                scope, decision_id = row.get("scope"), row.get("id")
-                if (not isinstance(scope, str) or scope not in SCOPES
-                        or not _valid_string(decision_id)):
-                    continue
-                existing = rows.get(f"{scope}:{decision_id}")
-                if existing is None:
-                    rows[f"{scope}:{decision_id}"] = {
-                        "renders": 1, "first": now, "last": now, "session": session_id or ""}
-                    changed = True
-                elif existing["session"] != (session_id or ""):
-                    existing["renders"] += 1
-                    existing["last"] = now
-                    existing["session"] = session_id or ""
-                    changed = True
-            if not changed:
-                return False
-            if len(rows) > store.MAX_ENTRIES:
-                # Evict least-recently-delivered first: the rows this exists to surface are
-                # the ones still doing work, and the longest-unseen is safest to forget.
-                rows = dict(sorted(rows.items(),
-                                   key=lambda kv: kv[1]["last"])[-store.MAX_ENTRIES:])
-            store.ensure_store_dir()
-            store.atomic_write(delivery_path(repo_path),
-                               json.dumps({"v": DELIVERY_VERSION, "rows": rows, "ts": now},
-                                          separators=(",", ":")))
-            return True
-    except Exception:
-        # Wider than OSError on purpose: this is bookkeeping on the per-prompt path, where the
-        # standing rule is that optional state can never stop a hook rendering context. A
-        # malformed persisted row is filtered by the reader above, but the boundary must hold
-        # for whatever the next shape of corruption turns out to be.
-        return False
+    for attempt in range(_TALLY_LOCK_TRIES):
+        try:
+            with store.store_lock(_delivery_lock_slug(repo_path), blocking=False):
+                rows = read_delivery_tally(repo_path)
+                now = time.time()
+                changed = False
+                for row in delivered:
+                    scope, decision_id = row.get("scope"), row.get("id")
+                    if (not isinstance(scope, str) or scope not in SCOPES
+                            or not _valid_string(decision_id)):
+                        continue
+                    existing = rows.get(f"{scope}:{decision_id}")
+                    if existing is None:
+                        rows[f"{scope}:{decision_id}"] = {
+                            "renders": 1, "first": now, "last": now,
+                            "session": session_id or ""}
+                        changed = True
+                    elif existing["session"] != (session_id or ""):
+                        existing["renders"] += 1
+                        existing["last"] = now
+                        existing["session"] = session_id or ""
+                        changed = True
+                if not changed:
+                    return False
+                if len(rows) > store.MAX_ENTRIES:
+                    # Evict least-recently-delivered first: the rows this exists to surface
+                    # are the ones still doing work, and the longest-unseen is safest to drop.
+                    rows = dict(sorted(rows.items(),
+                                       key=lambda kv: kv[1]["last"])[-store.MAX_ENTRIES:])
+                store.ensure_store_dir()
+                store.atomic_write(
+                    delivery_path(repo_path),
+                    json.dumps({"v": DELIVERY_VERSION, "rows": rows, "ts": now},
+                               separators=(",", ":")))
+                return True
+        except BlockingIOError:
+            # Another writer holds it. Back off briefly rather than wait - see the constants.
+            if attempt + 1 < _TALLY_LOCK_TRIES:
+                time.sleep(_TALLY_LOCK_BACKOFF)
+        except Exception:
+            # Wider than OSError on purpose: bookkeeping on the per-prompt path. A malformed
+            # persisted row is filtered by the reader above, but the boundary must hold for
+            # whatever the next shape of corruption turns out to be.
+            return False
+    return False
 
 
 def record_deliveries(repo_path: str, session_id: str, delivered: list[dict]) -> bool:
