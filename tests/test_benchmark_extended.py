@@ -532,11 +532,21 @@ class TestRetrievalAdmissionQuality:
     ):
         redirect_store_dir(monkeypatch, tmp_path / "router-quality")
         markers = {row[0] for row in ROUTER_QUALITY_DECISIONS}
-        true_positive = false_positive = false_negative = 0
+        assert len(ROUTER_QUALITY_DECISIONS) == 10
+        assert len(ROUTER_QUALITY_CASES) == 18
+        assert sum(bool(expected) for _, expected, _ in ROUTER_QUALITY_CASES) == 13
+        assert sum(not expected for _, expected, _ in ROUTER_QUALITY_CASES) == 5
+        assert sum(len(expected) for _, expected, _ in ROUTER_QUALITY_CASES) == 13
+
+        true_positive = false_positive = false_negative = true_negative = 0
+        candidate_judgments = 0
         unexpected_outputs = []
 
         for index, (prompt, expected, omitted) in enumerate(ROUTER_QUALITY_CASES):
             repo = f"/bench/router-quality/{index}"
+            available = markers - omitted
+            assert expected <= available
+            candidate_judgments += len(available)
             data = store.load(repo)
             for marker, content, subtype in ROUTER_QUALITY_DECISIONS:
                 if marker not in omitted:
@@ -549,11 +559,17 @@ class TestRetrievalAdmissionQuality:
             true_positive += len(actual & expected)
             false_positive += len(actual - expected)
             false_negative += len(expected - actual)
+            true_negative += len(available - actual - expected)
             if not expected and result:
                 unexpected_outputs.append((prompt, result))
 
-        precision = true_positive / (true_positive + false_positive)
-        recall = true_positive / (true_positive + false_negative)
+        precision_denominator = true_positive + false_positive
+        recall_denominator = true_positive + false_negative
+        precision = true_positive / precision_denominator
+        recall = true_positive / recall_denominator
+        assert candidate_judgments == 179
+        assert (true_positive, false_positive, false_negative, true_negative) == (13, 0, 0, 166)
+        assert (precision_denominator, recall_denominator) == (13, 13)
         assert precision == 1.0
         assert recall == 1.0
         assert unexpected_outputs == []
