@@ -38,6 +38,7 @@
     {"case_id":"P04-according-ticket","family":"P04","kind":"scope","prompt":"According to the ticket, n8n is only running in live and is not needed in staging","expected":{"captured":false}},
     {"case_id":"P04-no-longer","family":"P04","kind":"scope","prompt":"n8n is no longer only running in live; it is not required in staging","expected":{"captured":false}},
     {"case_id":"P04-mixed-question-scope","family":"P04","kind":"capture","prompt":"Can you run the tests? Also, n8n runs only in live and is not needed in staging","expected":{"result_status":"confirmation_required","result_content":"n8n runs only in live and is not needed in staging","entry_count":1,"live_status":"pending_approval"}},
+    {"case_id":"P04-earlier-scope-question","family":"P04","kind":"capture","prompt":"Is Redis only running in prod and not needed in staging? Also, n8n runs only in live and is not needed in staging","expected":{"result_status":"confirmation_required","result_content":"n8n runs only in live and is not needed in staging","entry_count":1,"live_status":"pending_approval"}},
 
     {"case_id":"P05-empty","family":"P05","kind":"scope","prompt":"","expected":{"captured":false}},
     {"case_id":"P05-fenced","family":"P05","kind":"scope","prompt":"```n8n runs only in live and is not needed in staging```","expected":{"captured":false}},

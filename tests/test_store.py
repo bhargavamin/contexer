@@ -1038,6 +1038,13 @@ class TestEnvironmentScopeDeclaration:
             "n8n runs only in live and is not needed in staging"
         )
 
+    def test_later_scope_fact_wins_over_earlier_scope_question(self):
+        text = ("Is Redis only running in prod and not needed in staging? Also, n8n runs only "
+                "in live and is not needed in staging")
+        assert prompt_capture.environment_scope_candidate(text) == (
+            "n8n runs only in live and is not needed in staging"
+        )
+
     @pytest.mark.parametrize("text", [
         "I thought n8n is only running in live env and it is not required in staging env, "
         "but that is wrong",

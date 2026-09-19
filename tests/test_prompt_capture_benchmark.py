@@ -62,10 +62,12 @@ def test_fixture_rejects_unknown_or_duplicate_gap_assertions():
         run.validate_fixture(fixture)
 
 
-def test_fixture_rejects_expected_failure_on_safety_assertion():
+@pytest.mark.parametrize("field", sorted(run.SAFETY_FIELDS))
+def test_fixture_rejects_expected_failure_on_safety_assertion(field):
     fixture = deepcopy(FIXTURE)
+    case = next(case for case in fixture["cases"] if field in case["expected"])
     fixture["known_gaps"] = [{
-        "assertion_id": "P08-human-proposal:live_content", "category": "safety",
+        "assertion_id": f"{case['case_id']}:{field}", "category": "safety",
         "baseline": "deadbeef", "rationale": "synthetic mutation", "owner": "benchmark-plan",
     }]
     with pytest.raises(run.FixtureError, match="safety assertions"):

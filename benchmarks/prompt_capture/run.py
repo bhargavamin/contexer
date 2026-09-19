@@ -30,7 +30,10 @@ FIXTURE_PATH = Path(__file__).with_name("cases.json")
 KINDS = {"scope", "lifecycle", "target", "capture", "adapter"}
 FAMILIES = {f"P{i:02d}" for i in range(1, 13)}
 HOSTS = {"claude", "codex", "cursor", "gemini"}
-SAFETY_FIELDS = {"live_content", "revision_count", "approved_by"}
+SAFETY_FIELDS = {
+    "result_target", "live_status", "live_content", "proposal_content", "proposal_source",
+    "revision_count", "approved_by",
+}
 
 
 class FixtureError(ValueError):

@@ -155,40 +155,35 @@ def environment_scope_candidate(text: str) -> str | None:
         return None
     if candidate.lower().startswith(_SYSTEM_TEXT_PREFIXES) or "```" in candidate:
         return None
-    placement = _SINGLE_ENV_DECLARATION.search(candidate)
-    exclusion = _OTHER_ENV_EXCLUSION.search(candidate)
-    if placement is None or exclusion is None:
-        return None
-    between = candidate[min(placement.end(), exclusion.end()):
-                        max(placement.start(), exclusion.start())]
-    if re.search(r"[.?!\n]", between):
-        return None
-    match_start = min(placement.start(), exclusion.start())
-    match_end = max(placement.end(), exclusion.end())
-    left_boundary = max(candidate.rfind(mark, 0, match_start) for mark in ".?!\n")
-    right_offsets = [candidate.find(mark, match_end) for mark in ".?!\n"]
-    right_boundary = min((offset for offset in right_offsets if offset >= 0), default=len(candidate))
-    terminator = candidate[right_boundary:right_boundary + 1]
-    clause = candidate[left_boundary + 1:right_boundary].strip()
-    clause = _LEADING_SCOPE_CONNECTOR.sub("", clause).strip()
-    if terminator == "?" or not clause or _DECLARATION_NONASSERTION.search(clause):
-        return None
-    matched = f"{placement.group(0)} {exclusion.group(0)}"
-    explicit_environment_evidence = (
-        (_KNOWN_ENVIRONMENT.search(placement.group(0))
-         or _ENVIRONMENT_MARKER.search(placement.group(0))
-         or _STRUCTURED_ENVIRONMENT.search(placement.group(0)))
-        and
-        (_KNOWN_ENVIRONMENT.search(exclusion.group(0))
-         or _ENVIRONMENT_MARKER.search(exclusion.group(0))
-         or _STRUCTURED_ENVIRONMENT.search(exclusion.group(0)))
-    )
-    # Company-specific labels such as mercury/venus remain supported when the sentence uses
-    # deployment language. Weak relationship words alone ("used in checkout", "required in
-    # settings") are too generic to establish that either token names an environment.
-    if not (explicit_environment_evidence or _STRONG_PLACEMENT_OPERATION.search(matched)):
-        return None
-    return " ".join(clause.split())
+    start = 0
+    boundaries = [*re.finditer(r"[.?!\n]", candidate), None]
+    for boundary in boundaries:
+        end = boundary.start() if boundary is not None else len(candidate)
+        terminator = boundary.group(0) if boundary is not None else ""
+        clause = _LEADING_SCOPE_CONNECTOR.sub("", candidate[start:end]).strip()
+        start = boundary.end() if boundary is not None else len(candidate)
+        if terminator == "?" or not clause or _DECLARATION_NONASSERTION.search(clause):
+            continue
+        placement = _SINGLE_ENV_DECLARATION.search(clause)
+        exclusion = _OTHER_ENV_EXCLUSION.search(clause)
+        if placement is None or exclusion is None:
+            continue
+        matched = f"{placement.group(0)} {exclusion.group(0)}"
+        explicit_environment_evidence = (
+            (_KNOWN_ENVIRONMENT.search(placement.group(0))
+             or _ENVIRONMENT_MARKER.search(placement.group(0))
+             or _STRUCTURED_ENVIRONMENT.search(placement.group(0)))
+            and
+            (_KNOWN_ENVIRONMENT.search(exclusion.group(0))
+             or _ENVIRONMENT_MARKER.search(exclusion.group(0))
+             or _STRUCTURED_ENVIRONMENT.search(exclusion.group(0)))
+        )
+        # Company-specific labels such as mercury/venus remain supported when the sentence uses
+        # deployment language. Weak relationship words alone ("used in checkout", "required in
+        # settings") are too generic to establish that either token names an environment.
+        if explicit_environment_evidence or _STRONG_PLACEMENT_OPERATION.search(matched):
+            return " ".join(clause.split())
+    return None
 
 
 def environment_scope_declaration(text: str) -> bool:
