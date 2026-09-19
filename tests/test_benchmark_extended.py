@@ -476,10 +476,11 @@ class TestRealisticPromptNoise:
         )
 
 
-# A labelled, multi-decision corpus for the two strong-tier admission guards. Unlike the
-# single regression probes in test_store.py, this measures both sides of the trade-off:
-# irrelevant one-hit candidates must stay out without losing related rationale questions.
-# Each case gets a fresh store so delivery suppression cannot affect the measurement.
+# A self-authored, labelled regression corpus for the two strong-tier admission guards. This
+# is a regression fence, not an independent quality estimate. Unlike the single probes in
+# test_store.py, it measures both sides of the trade-off: irrelevant one-hit candidates must
+# stay out without losing related rationale questions. Each case gets a fresh store so
+# delivery suppression cannot affect the measurement.
 ROUTER_QUALITY_DECISIONS = [
     ("PAR2_MARKER", "Deploy Scaleway infrastructure to the PAR-2 region, never PAR-1, "
      "because the selected services run there", "constraint"),
@@ -570,6 +571,13 @@ class TestRetrievalAdmissionQuality:
         assert candidate_judgments == 179
         assert (true_positive, false_positive, false_negative, true_negative) == (13, 0, 0, 166)
         assert (precision_denominator, recall_denominator) == (13, 13)
+        print(
+            "\n  Self-authored retrieval regression corpus: "
+            f"prompts={len(ROUTER_QUALITY_CASES)}, decisions={len(markers)}, "
+            f"candidate_judgments={candidate_judgments}, "
+            f"tp={true_positive}, fp={false_positive}, fn={false_negative}, "
+            f"tn={true_negative}, precision={precision:.2f}, recall={recall:.2f}"
+        )
         assert precision == 1.0
         assert recall == 1.0
         assert unexpected_outputs == []
