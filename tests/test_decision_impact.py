@@ -4,6 +4,8 @@ import fcntl
 import json
 import os
 
+import pytest
+
 from contexer import decision_impact, store
 
 
@@ -21,8 +23,67 @@ def _guidance(tmp_repo, decision_id="d1"):
     return decision_impact.guidance_envelope(
         tmp_repo, tmp_repo, route="explicit_lookup",
         rows=[{"scope": "personal", "id": decision_id, "revision_id": "r1",
-               "fingerprint": "sha256:x", "authority": "approved", "tier": "full",
+               "fingerprint": "sha256:" + "a" * 64, "authority": "approved", "tier": "full",
                "reason": "query", "files": ["src/app.py"]}])
+
+
+def _evaluation(tmp_repo):
+    return decision_impact.evaluation_envelope(
+        tmp_repo, tmp_repo, artifact={
+            "path": "src/app.py", "digest": "sha256:" + "a" * 64, "bytes": 10,
+            "kind": "file_content", "provenance": "authorized_server_read",
+        }, policy_set_version="sha256:" + "b" * 64, conditions=[{
+            "decision_id": "d1", "revision_id": "r1", "scope": "personal",
+            "authority": "trusted_approved", "rule_digest": "sha256:" + "c" * 64,
+            "rule_type": "regex", "profile": "bounded_file_v1", "files": ["src/app.py"],
+            "identity_complete": True, "result": "satisfied", "gap": "",
+            "applicable_units": 1, "evaluated_units": 1, "complete": True,
+            "verified": True, "match_count": 0,
+        }], guidance_refs=[{"receipt_id": "d" * 32, "attribution": "caller_linked"}])
+
+
+@pytest.mark.parametrize("target", ["decision", "coverage", "condition", "artifact", "reference"])
+def test_nested_content_fields_are_rejected_on_write_and_read(tmp_repo, target):
+    _enable(tmp_repo)
+    envelope = _guidance(tmp_repo) if target in ("decision", "coverage") else _evaluation(tmp_repo)
+    rid = decision_impact.append(tmp_repo, envelope, now=100)
+    assert rid, "the valid control must be retained"
+    nested = {
+        "decision": lambda e: e["decisions"][0],
+        "coverage": lambda e: e["coverage"],
+        "condition": lambda e: e["conditions"][0],
+        "artifact": lambda e: e["artifact"],
+        "reference": lambda e: e["guidance_refs"][0],
+    }[target]
+    nested(envelope)["prompt_text"] = "private task instructions"
+    before = decision_impact.path(tmp_repo).read_bytes()
+    assert decision_impact.append(tmp_repo, envelope, now=101) == ""
+    assert decision_impact.path(tmp_repo).read_bytes() == before
+
+    state = json.loads(before)
+    nested(state["records"][0])["prompt_text"] = "private task instructions"
+    decision_impact.path(tmp_repo).write_text(json.dumps(state))
+    result = decision_impact.report(tmp_repo, now=102)
+    assert result["status"] == "history_unavailable"
+    assert "private task instructions" not in json.dumps(decision_impact.scrubbed_report(result))
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("verified", "true"), ("result", "task_improved"), ("rule_type", "private regex text"),
+    ("evaluated_units", True), ("rule_digest", "plain regex text"),
+    ("complete", False), ("identity_complete", False), ("applicable_units", 0),
+])
+def test_condition_metadata_has_closed_types_and_values(tmp_repo, field, value):
+    _enable(tmp_repo)
+    envelope = _evaluation(tmp_repo)
+    assert decision_impact.append(tmp_repo, envelope, now=100)
+    envelope["conditions"][0][field] = value
+    assert decision_impact.append(tmp_repo, envelope, now=101) == ""
+
+    state = json.loads(decision_impact.path(tmp_repo).read_text())
+    state["records"][0]["conditions"][0][field] = value
+    decision_impact.path(tmp_repo).write_text(json.dumps(state))
+    assert decision_impact.report(tmp_repo, now=102)["status"] == "history_unavailable"
 
 
 def test_disabled_collection_creates_no_history_or_lock(tmp_repo):
@@ -191,7 +252,7 @@ def test_page_and_text_projection_remain_below_the_response_cap(tmp_repo):
     _enable(tmp_repo)
     rows = [{
         "scope": "personal", "id": f"d{i}", "revision_id": "r" * 100,
-        "fingerprint": "f" * 120, "authority": "approved", "tier": "full",
+        "fingerprint": "sha256:" + "f" * 64, "authority": "approved", "tier": "full",
         "reason": "query", "files": [f"src/{i}.py"],
     } for i in range(32)]
     envelope = decision_impact.guidance_envelope(

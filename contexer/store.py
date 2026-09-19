@@ -2550,7 +2550,7 @@ def _capture_guidance_provenance(data: dict) -> None:
     data[_GUIDANCE_PROVENANCE_KEY] = persisted
 
 
-def _revision_identity_is_persisted(data: dict | None, entry: dict) -> bool:
+def revision_identity_is_persisted(data: dict | None, entry: dict) -> bool:
     """Whether this entry's current revision UUID came from the loaded snapshot."""
     if data is None or _GUIDANCE_PROVENANCE_KEY not in data:
         # Callers can construct normalized data directly (tests/imports). There was no
@@ -2581,7 +2581,7 @@ def _guidance_fingerprint(entry: dict, data: dict | None = None) -> str:
     payload = {
         "version": _GUIDANCE_FINGERPRINT_VERSION,
         "revision_id": (current.get("revision_id", "")
-                        if _revision_identity_is_persisted(data, entry) else "legacy"),
+                        if revision_identity_is_persisted(data, entry) else "legacy"),
         "status": entry_status(entry),
         "authority": {
             "created_by": entry.get("created_by", ""),
@@ -2604,7 +2604,7 @@ def _impact_guidance_row(entry: dict, data: dict, *, scope: str, tier: str,
 
     current = revisions.current_revision(entry) or {}
     revision_id = (str(current.get("revision_id") or "")
-                   if _revision_identity_is_persisted(data, entry) else "legacy")
+                   if revision_identity_is_persisted(data, entry) else "legacy")
     status = entry_status(entry)
     authority = ("human_approved" if status == "approved" and entry.get("approved_by") == "human"
                  else "trusted_approved" if status == "approved" and policy.is_trusted(entry)

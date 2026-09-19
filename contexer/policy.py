@@ -736,6 +736,12 @@ def _decision_id(applicable) -> str:
     return str(applicable.get("decision_id") or "") if isinstance(applicable, Mapping) else ""
 
 
+def _observed_rule_type(rule: object) -> str:
+    """Keep malformed rules visible without copying arbitrary content into diagnostics."""
+    value = rule.get("type") if isinstance(rule, Mapping) else None
+    return value if isinstance(value, str) and value in ("regex", "secret") else "unknown"
+
+
 def evaluate_policies(policies: list, request: Mapping, unchecked: list | None = None, *,
                       profile: str = "", observer=None, budget_exhausted=None) -> dict:
     """Judge every selected policy against one request's artifact. Pure: no filesystem, no
@@ -811,8 +817,7 @@ def evaluate_policies(policies: list, request: Mapping, unchecked: list | None =
                 "scope": str(applicable.get("scope") or "personal"),
                 "authority": str(applicable.get("authority") or "trusted_approved"),
                 "rule_digest": rule_digest(observed_rule or {}),
-                "rule_type": str(observed_rule.get("type") or "")
-                if isinstance(observed_rule, Mapping) else "",
+                "rule_type": _observed_rule_type(observed_rule),
                 "profile": profile or "legacy",
                 "files": list(applicable.get("matched_files") or files)[:32],
                 "identity_complete": bool(
@@ -875,8 +880,7 @@ def evaluate_policies(policies: list, request: Mapping, unchecked: list | None =
                     "scope": str(item.get("scope") or "personal"),
                     "authority": str(item.get("authority") or "trusted_approved"),
                     "rule_digest": rule_digest(item.get("rule") or {}),
-                    "rule_type": str(item["rule"].get("type") or "")
-                    if isinstance(item.get("rule"), Mapping) else "",
+                    "rule_type": _observed_rule_type(item.get("rule")),
                     "profile": profile or "legacy", "result": "error",
                     "gap": "evaluator-error", "applicable_units": 0,
                     "evaluated_units": 0, "complete": False, "verified": False,

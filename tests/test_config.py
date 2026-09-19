@@ -1,5 +1,6 @@
 """Tests for the go-live profile loader (~/.contexer/config.toml)."""
 import json
+import tomllib
 
 import pytest
 
@@ -314,3 +315,69 @@ def test_every_config_writer_preserves_diagnostics_and_policy_tables(config_path
     assert config.load_diagnostics_settings().decision_impact is True
     assert config.load_policy_settings().artifact_read_roots == (str(project),)
     assert config.load_ui_settings().autostart is True
+
+
+@pytest.mark.parametrize("writer", ["login", "settings"])
+@pytest.mark.parametrize("form", ["spaced", "quoted", "commented", "dotted", "inline"])
+def test_permission_tables_survive_every_valid_toml_spelling(config_path, tmp_path, writer, form):
+    project = (tmp_path / "project").resolve()
+    project.mkdir()
+    roots = json.dumps([str(project)])
+    if form == "dotted":
+        body = f"diagnostics.decision_impact = true\npolicy.artifact_read_roots = {roots}\n"
+    elif form == "inline":
+        body = ("diagnostics = { decision_impact = true }\n"
+                f"policy = {{ artifact_read_roots = {roots} }}\n")
+    else:
+        headers = {
+            "spaced": ("[ diagnostics ]", "[ policy ]"),
+            "quoted": ('["diagnostics"]', "['policy']"),
+            "commented": ("[diagnostics] # consent", "[policy] # grant"),
+        }[form]
+        body = f"{headers[0]}\ndecision_impact = true\n{headers[1]}\nartifact_read_roots = {roots}\n"
+    body += "[ui] # next table\nport = 32123\n"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(body)
+    before = tomllib.loads(body)
+
+    if writer == "login":
+        config.write_team_profile("http://new/mcp")
+    else:
+        config.write_settings(autostart=True)
+
+    after = tomllib.loads(config_path.read_text())
+    assert after["diagnostics"] == before["diagnostics"]
+    assert after["policy"] == before["policy"]
+    assert config.load_diagnostics_settings().decision_impact is True
+    assert config.load_policy_settings().artifact_read_roots == (str(project),)
+    assert config.load_ui_settings().port == 32123
+
+
+@pytest.mark.parametrize("writer", ["login", "settings"])
+def test_permission_preservation_does_not_fix_or_drop_invalid_values(config_path, writer):
+    body = '''
+diagnostics = { decision_impact = "true", future = 1979-05-27T07:32:00Z }
+[ "policy" ] # deliberately invalid permissions, still valid TOML
+artifact_read_roots = "not a list"
+note = """a multiline value
+[diagnostics]
+decision_impact = true
+"""
+[policy.future]
+unicode = "🔒"
+escaped_control = "\\u007f"
+"quoted key" = [true, 42, inf, { nested = "value" }]
+'''
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(body)
+    before = tomllib.loads(body)
+    if writer == "login":
+        config.write_team_profile("http://new/mcp")
+    else:
+        config.write_settings(autostart=True)
+    after = tomllib.loads(config_path.read_text())
+    assert after["diagnostics"] == before["diagnostics"]
+    assert after["policy"] == before["policy"]
+    assert config.decision_impact_enabled() is False
+    with pytest.raises(ConfigError):
+        config.load_policy_settings()

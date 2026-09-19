@@ -1292,8 +1292,8 @@
           })
         : h("div", { class: "list" }, impactRows.map((row) => {
             const conditions = asList(row.conditions, "conditions");
-            const satisfied = conditions.filter((c) => c.result === "satisfied").length;
-            const violated = conditions.filter((c) => c.result === "violated").length;
+            const satisfied = conditions.filter((c) => c.result === "satisfied" && c.verified === true).length;
+            const violated = conditions.filter((c) => c.result === "violated" && c.verified === true).length;
             const unverified = conditions.length - satisfied - violated;
             const artifact = row.artifact || {};
             const summary = row.kind === "evaluation"

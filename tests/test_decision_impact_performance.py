@@ -21,7 +21,7 @@ def test_full_history_append_traversal_and_old_receipt_lookup_remain_bounded(tmp
     envelope = decision_impact.guidance_envelope(
         tmp_repo, tmp_repo, route="explicit_lookup", rows=[{
             "scope": "personal", "id": "d", "revision_id": "r",
-            "fingerprint": "guidance-v1:x", "authority": "approved",
+            "fingerprint": "guidance-v1:" + "a" * 64, "authority": "approved",
             "tier": "full", "reason": "query", "files": ["src/app.py"],
         }])
     ids = [decision_impact.append(tmp_repo, envelope, now=100 + i)

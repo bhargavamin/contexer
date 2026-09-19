@@ -150,35 +150,130 @@ def _bounded(value: object, depth: int = 0) -> bool:
     return False
 
 
-def _mapping_list(value: object) -> bool:
-    return isinstance(value, list) and all(isinstance(item, dict) for item in value)
+def _choice(*values):
+    return lambda value: isinstance(value, str) and value in values
+
+
+def _pattern(pattern: str):
+    compiled = re.compile(pattern)
+    return lambda value: isinstance(value, str) and compiled.fullmatch(value) is not None
+
+
+def _count(value: object) -> bool:
+    return type(value) is int and 0 <= value <= 2**31 - 1
+
+
+def _fields(value: object, schema: dict, optional: tuple[str, ...] = ()) -> bool:
+    return (isinstance(value, dict) and set(value) <= schema.keys()
+            and schema.keys() - set(optional) <= value.keys()
+            and all(schema[key](item) for key, item in value.items()))
+
+
+def _rows(value: object, validator, limit: int = 32) -> bool:
+    return isinstance(value, list) and len(value) <= limit and all(validator(row) for row in value)
+
+
+def _relative_path(value: object) -> bool:
+    return (isinstance(value, str) and 0 < len(value) <= 300
+            and not value.startswith(("/", "\\")) and not re.match(r"[A-Za-z]:", value)
+            and ".." not in value.replace("\\", "/").split("/")
+            and not any(ord(char) < 32 for char in value))
+
+
+_TOKEN = _pattern(r"[A-Za-z0-9_.:-]{1,128}")
+_DIGEST = _pattern(r"sha256:[0-9a-f]{64}")
+_AUTHORITY = _choice("human_approved", "trusted_approved", "approved_untrusted",
+                     "approved", "suggested", "pending_approval", "ignored")
+_SCOPE = _choice("personal", "global")
+def _files(value: object) -> bool:
+    return _rows(value, _relative_path)
+
+
+_GUIDANCE_SCHEMA = {
+    "scope": _SCOPE, "id": _TOKEN, "revision_id": _TOKEN,
+    "fingerprint": _pattern(r"(?:guidance-v[0-9]+|sha256):[0-9a-f]{64}"),
+    "authority": _AUTHORITY, "proposal_id": lambda value: value == "" or _DIGEST(value),
+    "tier": _choice("full", "excerpt", "title", "pointer"),
+    "reason": _choice("files", "query", "entry_type", "overview", "prompt_selected",
+                      "source_files match"),
+    "rank": lambda value: value is None or _count(value), "files": _files,
+    "rule_digest": lambda value: value == "" or _DIGEST(value),
+}
+_CONDITION_SCHEMA = {
+    "decision_id": lambda value: value == "" or _TOKEN(value),
+    "revision_id": lambda value: value == "" or _TOKEN(value),
+    "scope": _SCOPE, "authority": _AUTHORITY, "rule_digest": _DIGEST,
+    "rule_type": _choice("regex", "secret", "unknown", ""),
+    "profile": _choice("bounded_file_v1"), "files": _files,
+    "identity_complete": lambda value: type(value) is bool,
+    "result": _choice("satisfied", "violated", "unchecked", "error"),
+    "gap": _choice("", "budget", "omitted", "unsupported-check", "unattributable",
+                   "bad-pattern", "evaluator-error"),
+    "applicable_units": _count, "evaluated_units": _count, "match_count": _count,
+    "complete": lambda value: type(value) is bool,
+    "verified": lambda value: type(value) is bool,
+}
+_ARTIFACT_SCHEMA = {
+    "path": _relative_path, "digest": _DIGEST,
+    "bytes": lambda value: _count(value) and value <= 64 * 1024,
+    "kind": _choice("file_content"), "provenance": _choice("authorized_server_read"),
+}
+_REFERENCE_SCHEMA = {
+    "receipt_id": _pattern(r"[0-9a-f]{32}"), "attribution": _choice("caller_linked"),
+}
+_COVERAGE_SCHEMA = {key: _count for key in (
+    "selected", "rendered", "prepared", "configured_cap", "output_bytes")}
+
+
+def _valid_condition(row: object) -> bool:
+    if not _fields(row, _CONDITION_SCHEMA, ("match_count",)):
+        return False
+    if row["verified"]:
+        return (row["complete"] and row["identity_complete"]
+                and row["result"] in ("satisfied", "violated") and row["gap"] == ""
+                and row["applicable_units"] > 0
+                and row["applicable_units"] == row["evaluated_units"]
+                and bool(row["decision_id"]) and row["revision_id"] not in ("", "legacy")
+                and row["authority"] in ("trusted_approved", "human_approved"))
+    return True
 
 
 def _valid_record_shape(record: dict) -> bool:
-    """Validate kind-specific containers before readers dereference them."""
+    """Closed schemas reject unexpected content at ingestion and when loading history."""
+    schema = {
+        "kind": _choice("guidance", "evaluation"),
+        "producer_version": _pattern(r"[A-Za-z0-9_.+-]{1,64}"),
+        "repository": _DIGEST, "checkout": _DIGEST,
+        "truncated": lambda value: type(value) is bool,
+    }
     if record.get("kind") == "guidance":
-        decisions = record.get("decisions", [])
-        if not _mapping_list(decisions):
-            return False
-        for row in decisions:
-            files = row.get("files", [])
-            if not isinstance(files, list) or not all(isinstance(item, str) for item in files):
-                return False
-        if "coverage" in record and not isinstance(record["coverage"], dict):
-            return False
-    elif record.get("kind") == "evaluation":
-        if not _mapping_list(record.get("conditions", [])):
-            return False
-        if not isinstance(record.get("artifact", {}), dict):
-            return False
-        if not _mapping_list(record.get("guidance_refs", [])):
-            return False
-        gaps = record.get("linkage_gaps", [])
-        if not isinstance(gaps, list) or not all(isinstance(item, str) for item in gaps):
-            return False
-        if "coverage" in record and not isinstance(record["coverage"], str):
-            return False
-    return True
+        schema.update({
+            "route": _choice("explicit_lookup", "indexed_prompt"),
+            "host": _choice("", "mcp", "claude", "codex", "gemini"),
+            **{key: lambda value: value == "" or _DIGEST(value)
+               for key in ("session", "request", "process")},
+            "stage": _choice("prepared"),
+            "reason": _choice("", "gate_closed", "no_candidate", "already_delivered_revision",
+                              "budget_limited", "render_skipped", "branch_uninstrumented", "error"),
+            "decisions": lambda value: _rows(value, lambda row: _fields(
+                row, _GUIDANCE_SCHEMA, ("rank", "proposal_id", "rule_digest"))),
+            "coverage": lambda value: _fields(value, _COVERAGE_SCHEMA),
+        })
+    else:
+        schema.update({
+            "artifact": lambda value: _fields(value, _ARTIFACT_SCHEMA),
+            "evaluator": _choice("bounded_file_v1"), "policy_set_version": _DIGEST,
+            "conditions": lambda value: _rows(value, _valid_condition),
+            "guidance_refs": lambda value: _rows(
+                value, lambda row: _fields(row, _REFERENCE_SCHEMA), 8),
+            "linkage_gaps": lambda value: _rows(value, _choice(
+                "invalid_reference", "not_retained_or_unknown", "identity_mismatch",
+                "reference_limit", "history_unavailable"), 8),
+            "coverage": _choice("complete", "partial", "error", "no_applicable_conditions"),
+        })
+    content = {key: value for key, value in record.items()
+               if key not in ("receipt_id", "sequence", "created_at")}
+    return _fields(content, schema)
 
 
 def _valid_record(record: object, *, stored: bool = False) -> bool:

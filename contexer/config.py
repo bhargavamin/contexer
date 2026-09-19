@@ -5,10 +5,13 @@ store paths (a later ticket does). With no config file (or absent keys) the
 profile is pure-local: mode 'local', endpoint/token None, so existing behavior
 is completely unchanged.
 """
+import json
 import os
+import re
 import tempfile
 import tomllib
 from dataclasses import dataclass
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Literal
 
@@ -117,11 +120,10 @@ def write_team_profile(endpoint: str, path: Path | None = None) -> None:
         lines.append("skip_confirm = true")
     if not existing.redact_secrets:  # preserve the redaction opt-out across `contexer login`
         lines.append("redact_secrets = false")
-    # These permissions are independent of Teams login. Preserve their exact tables rather
-    # than reconstructing them here: a credential refresh must never enable, broaden, or erase
-    # local diagnostics/file-read consent.
-    lines.extend(_raw_table_lines(config_path, "diagnostics"))
-    lines.extend(_raw_table_lines(config_path, "policy"))
+    # Preserve parsed values, including invalid settings, independent of TOML spelling.
+    # Login must never enable, broaden, or erase local diagnostics/file-read consent.
+    lines.extend(_preserved_table_lines(config_path, "diagnostics"))
+    lines.extend(_preserved_table_lines(config_path, "policy"))
     lines.extend(_preserved_ui_lines(config_path))  # `contexer login` must not reset [ui]
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -340,8 +342,8 @@ def write_settings(path: Path | None = None, /, **allowlisted: object) -> None:
         lines.append("skip_confirm = true")
     if not redact_secrets:
         lines.append("redact_secrets = false")
-    lines.extend(_raw_table_lines(config_path, "diagnostics"))
-    lines.extend(_raw_table_lines(config_path, "policy"))
+    lines.extend(_preserved_table_lines(config_path, "diagnostics"))
+    lines.extend(_preserved_table_lines(config_path, "policy"))
     lines.extend(_ui_lines(merged))
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -358,45 +360,45 @@ def _preserved_ui_lines(config_path: Path) -> list[str]:
     one: `contexer login` used to complete the entire browser flow, save the tokens, and then
     die here on a hand-edited `port = "31500"` — leaving mode/endpoint unwritten and team sync
     off with nothing pointing at why. A table that will not validate is therefore copied
-    through VERBATIM rather than dropped or silently "corrected": login is not the place to
-    rewrite a value the user typed, and the loaders that actually read `[ui]` still reject it,
+    through with its parsed values intact rather than dropped or silently "corrected": login
+    is not the place to rewrite a value the user typed, and the loaders that read `[ui]` still reject it,
     where the error means something.
     """
     try:
         return _ui_lines(load_ui_settings(config_path))
     except ConfigError:
-        return _raw_ui_lines(config_path)
+        return _preserved_table_lines(config_path, "ui")
 
 
-def _raw_ui_lines(config_path: Path) -> list[str]:
-    """The file's `[ui]` header and everything after it, unparsed.
+def _toml_value(value: object) -> str:
+    """Lossless value serialization for tomllib's types, including invalid setting values."""
+    if isinstance(value, str):
+        # JSON allows literal DEL, but TOML requires it to be escaped.
+        return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    if isinstance(value, dict):
+        return "{ " + ", ".join(
+            f"{key if re.fullmatch(r'[A-Za-z0-9_-]+', key) else _toml_value(key)} = "
+            + _toml_value(item) for key, item in value.items()) + " }"
+    raise ConfigError(f"cannot preserve TOML value of type {type(value).__name__}")
 
-    TOML binds every key after a table header to that table, so the header to EOF IS the
-    table — and the file has already parsed as TOML (load_profile would have raised first),
-    so copying that tail through cannot produce something unreadable."""
-    return _raw_table_lines(config_path, "ui")
 
+def _preserved_table_lines(config_path: Path, table: str) -> list[str]:
+    """Preserve a parsed top-level value; append before any explicit table headers.
 
-def _raw_table_lines(config_path: Path, table: str) -> list[str]:
-    """One top-level TOML table block, preserved without swallowing later tables."""
-    try:
-        lines = config_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
-    start = next((index for index, line in enumerate(lines)
-                  if line.strip() == f"[{table}]"), None)
-    if start is None:
-        return []
-    end = len(lines)
-    for index in range(start + 1, len(lines)):
-        stripped = lines[index].strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            end = index
-            break
-    block = lines[start:end]
-    while block and not block[-1].strip():
-        block.pop()
-    return ["", *block]
+    Spaced/quoted headers, dotted keys, inline tables, comments and multiline values all
+    have the same semantics after parsing. Serializing that value also preserves malformed
+    permissions verbatim in meaning, so a credential/UI save cannot accidentally enable them.
+    """
+    data = _config_data(config_path)
+    return [f"{table} = {_toml_value(data[table])}"] if table in data else []
 
 
 def _ui_lines(ui: UiSettings) -> list[str]:

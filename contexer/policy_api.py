@@ -58,13 +58,13 @@ def _participants(repo: str) -> list:
     global_data = store.load_global()
     personal = [dict(
                     entry, _policy_scope="personal",
-                    _policy_revision_persisted=store._revision_identity_is_persisted(
+                    _policy_revision_persisted=store.revision_identity_is_persisted(
                         personal_data, entry))
                 for entry in (personal_data.get("entries") or [])
                 if isinstance(entry, dict)]
     global_rows = [dict(
                        entry, _policy_scope="global",
-                       _policy_revision_persisted=store._revision_identity_is_persisted(
+                       _policy_revision_persisted=store.revision_identity_is_persisted(
                            global_data, entry))
                    for entry in (global_data.get("entries") or [])
                    if isinstance(entry, dict)]
@@ -101,7 +101,7 @@ def _artifact_relative_path(value: str) -> str:
     return path.as_posix()
 
 
-def _authorized_physical_repo(repo_path: str) -> tuple[str, str]:
+def _authorized_physical_repo(repo_path: str) -> tuple[str, str, tuple[int, int]]:
     """Resolve a file-read root without ever accepting the shared current-repo pointer."""
     resolved, source = store.resolve_repo_verbose(repo_path)
     if (not resolved or source == "pointer"
@@ -109,16 +109,20 @@ def _authorized_physical_repo(repo_path: str) -> tuple[str, str]:
         raise ValueError("workspace_not_authorized")
     try:
         physical = str(Path(resolved).resolve(strict=True))
+        authorized_root = os.stat(physical, follow_symlinks=False)
+        if not stat.S_ISDIR(authorized_root.st_mode):
+            raise ValueError("workspace_not_authorized")
         grants = config.load_policy_settings(
             store.store_dir() / "config.toml").artifact_read_roots
     except (config.ConfigError, OSError, RuntimeError) as exc:
         raise ValueError("workspace_not_authorized") from exc
     if physical not in grants:
         raise ValueError("workspace_not_authorized")
-    return resolved, physical
+    return resolved, physical, (authorized_root.st_dev, authorized_root.st_ino)
 
 
-def _read_confined_file(root: str, relative: str) -> tuple[str, dict]:
+def _read_confined_file(root: str, relative: str, *,
+                        root_identity: tuple[int, int] | None = None) -> tuple[str, dict]:
     """Read one regular UTF-8 file through no-follow directory-relative handles."""
     parts = PurePosixPath(relative).parts
     nofollow = getattr(os, "O_NOFOLLOW", 0)
@@ -136,6 +140,11 @@ def _read_confined_file(root: str, relative: str) -> tuple[str, dict]:
         root_fd = os.open(root, directory)
         fds.append(root_fd)
         root_before = os.fstat(root_fd)
+        # Bind authorization to the same directory we traverse. Checking only the current
+        # pathname after the read would accept a replacement made between grant and open.
+        if root_identity is not None and (
+                root_before.st_dev, root_before.st_ino) != root_identity:
+            raise ValueError("artifact_unstable")
         parent_fd = root_fd
         for part in parts[:-1]:
             child = os.open(part, directory, dir_fd=parent_fd)
@@ -226,8 +235,9 @@ def evaluate_operation(repo_path: str, *, intent: str = "", operation: str,
     if artifact_path:
         try:
             relative = _artifact_relative_path(artifact_path)
-            repo, physical_repo = _authorized_physical_repo(repo_path)
-            artifact, artifact_meta = _read_confined_file(physical_repo, relative)
+            repo, physical_repo, root_identity = _authorized_physical_repo(repo_path)
+            artifact, artifact_meta = _read_confined_file(
+                physical_repo, relative, root_identity=root_identity)
         except ValueError as exc:
             resolved, _source = store.resolve_repo_verbose(repo_path)
             return _rejected(resolved, [str(exc)])

@@ -11,6 +11,7 @@ a `secret` rule matching `[REDACTED:...]` and finding nothing, and scrubbing now
 print the key. Only asserting BOTH - verdict `block` AND the key absent from the render -
 says the boundary is in the right place.
 """
+import json
 import os
 import subprocess
 import sys
@@ -443,6 +444,33 @@ def test_file_mode_detects_replacement_of_the_granted_root(tmp_repo, monkeypatch
     assert result["errors"] == ["artifact_unstable"]
 
 
+def test_file_mode_rejects_root_replaced_after_authorization_before_any_read(tmp_repo, monkeypatch):
+    _grant_file_reads(tmp_repo)
+    root = Path(tmp_repo)
+    (root / "app.py").write_text("original\n")
+    authorize = policy_api._authorized_physical_repo
+
+    def replace_after_authorization(repo):
+        authorized = authorize(repo)
+        root.rename(root.with_name(root.name + "-original"))
+        root.mkdir()
+        (root / "app.py").write_text("ungranted replacement\n")
+        return authorized
+
+    reads = []
+    original_read = os.read
+
+    def observed_read(fd, count):
+        reads.append(fd)
+        return original_read(fd, count)
+
+    monkeypatch.setattr(policy_api, "_authorized_physical_repo", replace_after_authorization)
+    monkeypatch.setattr(policy_api.os, "read", observed_read)
+    result = policy_api.evaluate_operation(tmp_repo, operation="commit", artifact_path="app.py")
+    assert result["errors"] == ["artifact_unstable"]
+    assert reads == [], "replacement contents must not be read before the race is detected"
+
+
 def test_file_mode_is_mutually_exclusive_with_caller_supplied_content(tmp_repo):
     result = policy_api.evaluate_operation(
         tmp_repo, operation="commit", artifact_path="app.py",
@@ -450,7 +478,10 @@ def test_file_mode_is_mutually_exclusive_with_caller_supplied_content(tmp_repo):
     assert result["errors"] == ["artifact_path conflicts with files/artifact input"]
 
 
-@pytest.mark.parametrize(("field", "value"), [("flags", []), ("paths", ["*.py"])])
+@pytest.mark.parametrize(("field", "value"), [
+    ("flags", []), ("paths", ["*.py"]),
+    ("type", "private arbitrary rule text"), ("type", ["regex"]),
+])
 def test_file_mode_reports_malformed_stored_rules_unchecked(tmp_repo, field, value):
     _grant_file_reads(tmp_repo, diagnostics=True)
     (Path(tmp_repo) / "app.py").write_text("ready\n")
@@ -470,6 +501,9 @@ def test_file_mode_reports_malformed_stored_rules_unchecked(tmp_repo, field, val
     assert receipt["conditions"][0]["result"] == "unchecked"
     assert receipt["conditions"][0]["gap"] == "unsupported-check"
     assert receipt["conditions"][0]["verified"] is False
+    if field == "type":
+        assert receipt["conditions"][0]["rule_type"] == "unknown"
+        assert "private arbitrary rule text" not in json.dumps(receipt)
 
 
 def test_file_mode_rejects_binary_oversized_and_overlong_line_inputs(tmp_repo):
@@ -518,7 +552,7 @@ def test_exact_guidance_reference_links_without_changing_the_check(tmp_repo):
         tmp_repo, policy_api.decision_impact.guidance_envelope(
             tmp_repo, tmp_repo, route="explicit_lookup", rows=[{
                 "scope": "personal", "id": entry["id"], "revision_id": revision_id,
-                "fingerprint": "guidance-v1:test", "authority": "trusted_approved",
+                "fingerprint": "guidance-v1:" + "a" * 64, "authority": "trusted_approved",
                 "tier": "full", "reason": "query", "files": ["app.py"],
                 "rule_digest": policy.rule_digest(persisted["guard_check"]),
             }]))
@@ -544,9 +578,9 @@ def test_wrong_guidance_reference_is_only_a_linkage_gap(tmp_repo):
         tmp_repo, policy_api.decision_impact.guidance_envelope(
             tmp_repo, tmp_repo, route="explicit_lookup", rows=[{
                 "scope": "personal", "id": "different", "revision_id": "different",
-                "fingerprint": "guidance-v1:test", "authority": "trusted_approved",
+                "fingerprint": "guidance-v1:" + "a" * 64, "authority": "trusted_approved",
                 "tier": "full", "reason": "query", "files": ["app.py"],
-                "rule_digest": "sha256:different",
+                "rule_digest": "sha256:" + "b" * 64,
             }]))
 
     result = policy_api.evaluate_operation(
