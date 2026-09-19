@@ -37,7 +37,7 @@ CALLER_ROOTS = ("contexer", "benchmarks")
 # `reconcile` is a coordinator above store rather than a leaf; it remains listed only so Rule 3
 # also rejects any future downward alias from store to that coordinator.
 LEAVES = frozenset({
-    "revisions", "reconciliation", "review", "retrieval", "redact", "miner",
+    "revisions", "reconciliation", "review", "retrieval", "prompt_capture", "redact", "miner",
     "conflicts", "guard_engine", "anchors", "console_api", "scope_audit", "memory_sync",
     "sidecars", "share_status", "evidence", "spool", "candidates", "reconcile", "lifecycle",
     "policy", "policy_api", "review_impact", "working_set",

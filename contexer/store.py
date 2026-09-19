@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from contexer import (  # pure stdlib leaves (no cycles)
+    prompt_capture,
     reconciliation,
     sidecars,
     redact,
@@ -1972,6 +1973,24 @@ def _match_overlap(content: str, match: dict) -> float:
     return _overlap_ratio(_tokenize(content), _tokenize(match.get("content", "")))
 
 
+def _propose_environment_lifecycle_revision(
+    repo_path: str, data: dict, target: dict, content: str, session_id: str,
+) -> tuple[str, str, str, dict]:
+    """Hold a factual lifecycle correction for review without changing the live revision."""
+    now = datetime.now(timezone.utc).isoformat()
+    proposal = target.get("proposed_revision")
+    if proposal:
+        if proposal.get("content") == content:
+            return target["id"], content, "revision_proposed", {}
+        return target["id"], content, "confirmation_conflict", {}
+    target["proposed_revision"] = review.build_proposal(
+        target, content, target.get("subtype", "constraint"), session_id, now,
+        source="ai", preserve_case=True,
+    )
+    save(repo_path, data)
+    return target["id"], content, "revision_proposed", {}
+
+
 def capture_user_constraint(
     repo_path: str, prompt: str, session_id: str,
     near_misses: list | None = None, repo_source: str = "", *, source: str = "",
@@ -2011,10 +2030,17 @@ def capture_user_constraint_with_meta(
     matches (see _near_misses) for a brand-new entry - the caller forwards it to
     constraint_ack so the developer can confirm a consolidation.
 
+    Factual environment-scoped declarations are held pending because descriptive wording does
+    not prove rule-setting intent. A lifecycle reversal can attach a Suggested Update to one
+    unambiguous approved, still-retired environment decision, but it never advances that
+    decision without the developer's separate review receipt; unsafe matches remain standalone
+    confirmation candidates.
+
     Returns (entry_id, sanitized_content, status, meta) - the first three exactly as
     `capture_user_constraint` has always returned them, so no existing caller changes.
     `status` is one of "approved" | "pending_approval" | "promoted" | "revision_proposed" |
-    "revision_already_pending" - pass it to constraint_ack() for the matching notice.
+    "revision_already_pending" | "confirmation_required" | "confirmation_conflict" - pass it
+    to constraint_ack() for the matching notice.
 
     `meta` is `{}` except on the SILENT paths, where the 3-tuple is (None, None, None) and a
     caller has no way to tell "not a directive" from "the developer said this again". A
@@ -2024,10 +2050,22 @@ def capture_user_constraint_with_meta(
     `source` is the caller's own source category, recorded on the history row for the same
     reason: only the caller knows which host prompt hook it came from.
     """
+    lifecycle_revision = prompt_capture.environment_lifecycle_revision(prompt)
     is_constraint, subtype = _is_prescriptive_constraint(prompt)
-    if not is_constraint:
-        return None, None, None, {}
-    content = _sanitize_directive(_directive_policy_text(prompt).strip())[:600]
+    if lifecycle_revision is not None:
+        subtype = "constraint"
+        confirmation_required = True
+        content = lifecycle_revision[1][:600]
+    elif not is_constraint:
+        scope_candidate = prompt_capture.environment_scope_candidate(prompt)
+        if scope_candidate is None:
+            return None, None, None, {}
+        subtype = "constraint"
+        confirmation_required = True
+        content = scope_candidate[:600]
+    else:
+        confirmation_required = False
+        content = _sanitize_directive(_directive_policy_text(prompt).strip())[:600]
     if not _is_storable(content):
         return None, None, None, {}
     deictic = _is_deictic(content)
@@ -2044,17 +2082,46 @@ def capture_user_constraint_with_meta(
         _CONSTRAINT_TRIGGER.search(_CAN_ONLY_TRIGGER.sub("", content))
         or _EXPLICIT_AUTHORITY_LABEL.search(content)
     )
-    status = "pending_approval" if deictic or ambiguous_label or bare_can_only else "approved"
-    review_required = status == "pending_approval"
+    status = ("confirmation_required" if confirmation_required else
+              "pending_approval" if deictic or ambiguous_label or bare_can_only else "approved")
+    review_required = status != "approved"
+    entry_status_value = "pending_approval" if review_required else "approved"
     with store_lock(repo_slug(repo_path), blocking=blocking):
         data = load(repo_path)
         # 'ignored' entries never block a re-typed rule from landing fresh (Fix 3).
         decisions_only = [e for e in data["entries"]
                           if e["type"] == "decision" and e.get("status") != "ignored"]
+        if lifecycle_revision is not None:
+            target = prompt_capture.find_environment_lifecycle_target(
+                lifecycle_revision[0], content, decisions_only)
+            if target is not None:
+                return _propose_environment_lifecycle_revision(
+                    repo_path, data, target, content, session_id)
+            exact = [
+                entry for entry in decisions_only
+                if entry_status(entry) == "approved"
+                and " ".join(revisions.current_content(entry).split()).casefold()
+                == " ".join(content.split()).casefold()
+            ]
+            if len(exact) == 1:
+                _record_recurrence(exact[0], session_id, source=source, overlap=1.0)
+                save(repo_path, data)
+                return None, None, None, {"recurrence": {
+                    "entry_id": exact[0]["id"], "match_kind": "overlap", "content": content,
+                    "overlap": 1.0,
+                    "occurrence_count": exact[0].get("occurrence_count", 1)}}
+            if len(exact) > 1:
+                return None, None, None, {}
+        # An extracted lifecycle fact with no unique safe target must become its own pending
+        # candidate. Letting it fall through ordinary overlap/containment routing would undo
+        # the lifecycle target gate and could attach the correction to one arbitrary candidate.
+        match_candidates = [] if lifecycle_revision is not None else decisions_only
         # This hook fires on every prompt; a near-duplicate is normally a silent no-op (no
         # write) - EXCEPT a clean restatement of this path's own pending twin, which promotes.
-        match = _find_match(content, decisions_only)
+        match = _find_match(content, match_candidates)
         if match is not None:
+            if confirmation_required and entry_status(match) == "pending_approval":
+                return match["id"], content, "confirmation_conflict", {}
             # A pending entry with created_by="human" can only have been born here: the normal
             # update_decision path always classifies created_by="human" as auto-approved.
             if (not review_required and match.get("status") == "pending_approval"
@@ -2084,14 +2151,15 @@ def capture_user_constraint_with_meta(
         # Containment routing: a superset/subset restatement of a stored rule evades the
         # max-denominator metric above - consolidate onto the first contained entry
         # instead of accumulating a new overlapping one.
-        hit = _find_containment(content, decisions_only)
+        hit = _find_containment(content, match_candidates)
         if hit is not None:
             return _route_containment(repo_path, data, hit, content, subtype,
-                                      review_required, session_id, source)
+                                      status, session_id, source)
         if near_misses is not None:
-            near_misses.extend(_near_misses(content, decisions_only))
+            near_misses.extend(_near_misses(content, match_candidates))
         entry = _new_decision_entry(content, session_id, subtype,
-                                    created_by="human", status=status)
+                                    created_by="human", status=entry_status_value,
+                                    preserve_case=confirmation_required)
         # Which signal chose this store - see resolve_repo_verbose. This surface matters
         # MORE than update_context's, not less: it is driven from a per-prompt HOOK process,
         # which has no MCP server binding of its own and so is the path most likely to fall
@@ -2105,7 +2173,7 @@ def capture_user_constraint_with_meta(
         # just strand this review-only metadata. `_guard_pairs` never reads
         # `anchor_candidates`; the review surface labels these sidecar guesses as possible and
         # plain approval expires them unless the reviewer explicitly selects source_files.
-        if status == "pending_approval":
+        if review_required:
             candidates = _read_edited_files(repo_path)
             if candidates:
                 entry["anchor_candidates"] = candidates[-MAX_SOURCE_FILES:]
@@ -2126,7 +2194,7 @@ def capture_user_constraint_with_meta(
 
 
 def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subtype: str,
-                       review_required: bool, session_id: str, source: str = "") -> tuple:
+                       capture_status: str, session_id: str, source: str = "") -> tuple:
     """Route a containment hit from capture_user_constraint onto the matched entry `hit`.
     Called under the store lock; saves and returns the capture 4-tuple (see
     capture_user_constraint_with_meta - the recurrence branches carry the meta that lets a
@@ -2154,6 +2222,8 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
     longer = len(_tokenize(content)) > len(_tokenize(hit.get("content", "")))
     pending = entry_status(hit) == "pending_approval"
     pending_twin = pending and hit.get("created_by") == "human"
+    review_required = capture_status in ("pending_approval", "confirmation_required")
+    confirmation_required = capture_status == "confirmation_required"
 
     contained = _containment_ratio(_tokenize(content), _tokenize(hit.get("content", "")))
 
@@ -2168,19 +2238,25 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
             "overlap": round(contained, 2),
             "occurrence_count": hit.get("occurrence_count", 1)}}
 
+    if confirmation_required and pending:
+        return hit["id"], content, "confirmation_conflict", {}
+
     if longer:
         if pending_twin:
             if review_required:
                 # Pre-approval amend precedent: rewrite v1 in place, stays pending.
                 rev = revisions.current_revision(hit)
                 if rev is not None:
-                    rev["content"] = revisions.normalize_content(content)
+                    rev["content"] = (" ".join(content.split()) if confirmation_required
+                                      else revisions.normalize_content(content))
+                if confirmation_required:
+                    hit["preserve_case"] = True
                 revisions.sync_decision_cache(hit)
                 hit["updated_at"] = now
                 _record_recurrence(hit, session_id, source=source,
                                    match_kind="containment", overlap=contained)
                 save(repo_path, data)
-                return hit["id"], revisions.current_content(hit), "pending_approval", {}
+                return hit["id"], revisions.current_content(hit), capture_status, {}
             revisions.append_revision(hit, content, source="human", approved_at=now)
             hit["status"] = "approved"
             hit["approved_at"] = now
@@ -2191,10 +2267,12 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
             return hit["id"], revisions.current_content(hit), "promoted", {}
         if pending:
             return _recurred()  # never propose on an unreviewed base
-        norm = revisions.normalize_content(content)
+        norm = content if confirmation_required else revisions.normalize_content(content)
         prop = hit.get("proposed_revision")
         displaced = False
         if prop and prop.get("content") != norm:
+            if confirmation_required:
+                return hit["id"], norm, "confirmation_conflict", {}
             # A DIFFERENT Suggested Update is already awaiting review on this entry. The slot
             # is trust-ordered (issue #200): this path IS the developer restating the rule,
             # the highest-trust source there is, so it displaces a lower-trust (ai/scan)
@@ -2212,7 +2290,9 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
             prop, displaced = None, True
         if not prop:
             hit["proposed_revision"] = review.build_proposal(
-                hit, content, subtype, session_id, now, source="human")
+                hit, content, subtype, session_id, now,
+                source="ai" if confirmation_required else "human",
+                preserve_case=confirmation_required)
             save(repo_path, data)
             # No .pending_review flag on a FRESH attach, for the same reason as new captures:
             # the in-band revision_proposed ack already notifies the developer. A displaced
@@ -2220,7 +2300,8 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
             # one arms the deterministic nudge too.
             if displaced:
                 touch_pending_review(repo_path)
-        return hit["id"], norm, "revision_proposed", {}
+        return hit["id"], norm, (
+            "confirmation_required" if confirmation_required else "revision_proposed"), {}
 
     if pending_twin and not review_required:
         # Terse clean restatement is the activation gesture: bless revision 1 in place,
@@ -2266,6 +2347,23 @@ def constraint_ack(content: str, status: str, entry_id: str = "",
             "the developer it was stored pending review. Do NOT approve it yourself; only the "
             "developer decides (they can run `contexer review`, or ask you to show it via "
             "review_pending)." + near_note
+        )
+    if status == "confirmation_required":
+        return (
+            f"This sounds like reusable operational context: '{content}'. It has been "
+            "held pending review rather than activated from factual wording alone. Ask the "
+            "developer, 'Should I keep this as a Contexer constraint?' If yes, approve this "
+            f"decision ({entry_id[:8]}); if no, ignore it. Do NOT decide or approve it yourself."
+            + near_note
+        )
+    if status == "confirmation_conflict":
+        return (
+            f"Possible operational context not stored: '{content}'. A related decision "
+            f"({entry_id[:8]}) is already awaiting review, so this unconfirmed wording was "
+            "not allowed to replace it. Ask the developer whether this wording should be "
+            "folded into that pending decision. If yes, show the existing item with "
+            "review_pending and use approve_decision(action='edit') with the corrected text; "
+            "if no, leave it unchanged. Do NOT decide or approve it yourself."
         )
     if status == "promoted":
         return (
@@ -2502,10 +2600,13 @@ def _new_decision_entry(content: str, session_id: str, subtype: str,
                         memory_key: str | None = None,
                         created_by: str = "ai",
                         status: str = "",
-                        title: str = "") -> dict:
+                        title: str = "",
+                        preserve_case: bool = False) -> dict:
     """Build a decision entry with its first revision. Single source of truth for the
-    entry schema - both manual capture (`update_decision`) and memory import use this."""
-    content = revisions.normalize_content(content)
+    entry schema - both manual capture (`update_decision`) and memory import use this.
+    `preserve_case` is reserved for factual candidates whose leading token may be a
+    case-sensitive product identifier; normal decision captures keep legacy normalization."""
+    content = " ".join(content.split()) if preserve_case else revisions.normalize_content(content)
     effective_title = revisions.normalize_title(title) or revisions.derive_title(content)
     if not status:
         level = _classify_level(content, subtype, created_by)
@@ -2528,6 +2629,8 @@ def _new_decision_entry(content: str, session_id: str, subtype: str,
         "status": status,
         "created_by": created_by,
     }
+    if preserve_case:
+        entry["preserve_case"] = True
     if memory_key is not None:
         entry["memory_key"] = memory_key
     # First revision. approved_at is set only when the decision is born trusted (not pending).
@@ -2536,7 +2639,7 @@ def _new_decision_entry(content: str, session_id: str, subtype: str,
     rev = revisions.new_revision(decision_id, 1, content, source=created_by,
                         confidence_score=score, evidence=factors,
                         approved_at=approved_at, created_at=now,
-                        title=effective_title)
+                        title=effective_title, normalize=not preserve_case)
     entry["revisions"] = [rev]
     entry["current_revision_id"] = rev["revision_id"]
     revisions.sync_decision_cache(entry)
@@ -2639,8 +2742,10 @@ def _promote_proposal(repo_path: str, entry: dict, content: str | None = None) -
     new_content = content if content else prop_content
     now = datetime.now(timezone.utc).isoformat()
     carried_title = prop.get("title", "") if new_content == prop_content else ""
-    revisions.append_revision(entry, new_content, source=prop.get("source", "human"), approved_at=now,
-                     title=carried_title)
+    revisions.append_revision(
+        entry, new_content, source=prop.get("source", "human"), approved_at=now,
+        title=carried_title, normalize=not prop.get("preserve_case", False),
+    )
     if prop.get("source_files"):
         _anchor_sources(repo_path, entry, prop["source_files"])
     reconciliation.record_outcome(
@@ -3526,7 +3631,8 @@ def apply_approval(data: dict, entry_id: str, action: str, content: str,
 
     cur = revisions.current_revision(entry)
     if action == "edit" and cur is not None:
-        cur["content"] = revisions.normalize_content(content)
+        cur["content"] = (" ".join(content.split()) if entry.get("preserve_case")
+                          else revisions.normalize_content(content))
     entry["status"] = "approved"
     entry["approved_at"] = now
     entry["approved_by"] = "human"

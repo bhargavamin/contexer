@@ -143,6 +143,45 @@ class TestClaudeCaptureEntrypoints:
         entry = next(e for e in data["entries"] if e["type"] == "decision")
         assert entry["status"] == "pending_approval"
 
+    def test_capture_environment_declaration_asks_whether_to_keep_it(self, tmp_repo):
+        raw = _json.dumps({
+            "prompt": "n8n was is only running in live env it is not required in staging env",
+            "session_id": "s1",
+        })
+
+        out = _json.loads(claude.capture_constraint(tmp_repo, raw))
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        assert "Should I keep this as a Contexer constraint?" in ctx
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision")
+        assert entry["status"] == "pending_approval"
+
+    def test_capture_lifecycle_correction_proposes_neuraverse_revision(self, tmp_repo):
+        data = store.load(tmp_repo)
+        retired = store._new_decision_entry(
+            "The staging environment was retired", "old-session", "architecture",
+            created_by="human", status="approved",
+        )
+        data["entries"].append(retired)
+        store.save(tmp_repo, data)
+        raw = _json.dumps({
+            "prompt": "make a pr and commit it. Also the staging env was removed but now its "
+                      "recreated in new project",
+            "session_id": "new-session",
+        })
+
+        out = _json.loads(claude.capture_constraint(tmp_repo, raw))
+
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        assert "suggested update to existing rule" in ctx
+        assert "current rule stays active until it is reviewed" in ctx
+        updated = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == retired["id"])
+        assert updated["revision"] == 1
+        assert updated["proposed_revision"]["content"] == (
+            "the staging env was removed but now its recreated in new project"
+        )
+        assert updated["content"] == "The staging environment was retired"
+        assert "make a pr" not in updated["content"].lower()
+
     def test_rationale_injects_when_decisions_match(self, populated_repo):
         # Targets the fixture's retrievable (suggested) decision. The JWT entry classifies
         # as pending_approval and is deliberately not auto-injected (only approved/suggested
@@ -327,6 +366,7 @@ class TestCursorFormatters:
         assert d["additional_context"].startswith("RULES")
         assert "get_context" in d["additional_context"]   # behavioral nudge appended
         assert "update_context" in d["additional_context"]
+        assert "Should I keep this as a Contexer constraint?" in d["additional_context"]
         assert "systemMessage" not in d  # cursor has no systemMessage channel
 
     def test_session_start_empty_context_still_emits_nudge_only(self):
@@ -355,6 +395,9 @@ class TestCursorEntrypoints:
         assert "alwaysApply: true" in body
         assert "managed by contexer" in body
         assert "get_context" in body and "update_context" in body
+        assert "Should I keep this as a Contexer constraint?" in body
+        assert "one explicitly named environment" in body
+        assert "live/production" not in body
 
     def test_session_start_does_not_overwrite_user_rule_file(self, tmp_repo):
         rule = Path(tmp_repo) / ".cursor" / "rules" / "contexer.mdc"
@@ -387,6 +430,20 @@ class TestCursorEntrypoints:
         assert _json.loads(cursor.capture_constraint(tmp_repo, raw)) == {"continue": True}
         assert "conventional commits" in store.get_context(tmp_repo, entry_type="convention").lower() \
             or "conventional commits" in store.get_context(tmp_repo, entry_type="constraint").lower()
+
+    def test_deployment_candidate_is_pending_and_managed_rule_requires_question(self, tmp_repo):
+        from contexer import store
+        startup = _json.dumps({"workspace_roots": [tmp_repo], "session_id": "s1"})
+        cursor.session_start("", startup)
+        prompt = "n8n only runs in production; staging doesn't need it"
+        raw = _json.dumps({"prompt": prompt, "session_id": "s1"})
+
+        assert _json.loads(cursor.capture_constraint(tmp_repo, raw)) == {"continue": True}
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision")
+        assert entry["status"] == "pending_approval"
+        rule = Path(tmp_repo, ".cursor", "rules", "contexer.mdc").read_text()
+        assert "Should I keep this as a Contexer constraint?" in rule
+        assert "Do not approve it yourself" in rule
 
     def test_entrypoints_never_raise(self, tmp_repo):
         assert _json.loads(cursor.capture_constraint(tmp_repo, "garbage")) == {"continue": True}
