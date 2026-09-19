@@ -5467,6 +5467,41 @@ class TestFileRoute:
             tmp_repo, "what about postgres?", set(), index)
         assert (anchor_ids, mention_hits, file_artifacts) == ([], [], [])
 
+    def test_file_route_accepts_explicit_scoped_credit_without_set_ambiguity(self, tmp_repo):
+        store.update_decision(
+            tmp_repo, "guard_engine.py pairs decisions against staged files",
+            RV1_SESSION, "architecture", source_files=["guard_engine.py"])
+        index = store._read_retrieval_index(tmp_repo)
+        decision_id, doc = next(iter(index["docs"].items()))
+        rows = [{
+            "scope": "personal", "id": decision_id,
+            "fingerprint": doc["guidance_fingerprint"],
+        }]
+
+        assert store._prompt_file_hits(
+            tmp_repo, "fix guard_engine.py", rows, index,
+            credit_check=working_set.credit_checker(rows),
+        ) == ([], [], ["guard_engine.py"])
+        anchor_ids, _, _ = store._prompt_file_hits(
+            tmp_repo, "fix guard_engine.py", {decision_id}, index)
+        assert anchor_ids == []  # the legacy set remains a set of decision IDs
+
+    def test_file_route_legacy_record_without_fingerprint_does_not_suppress(self, tmp_repo):
+        store.update_decision(
+            tmp_repo, "guard_engine.py pairs decisions against staged files",
+            RV1_SESSION, "architecture", source_files=["guard_engine.py"])
+        index = store._read_retrieval_index(tmp_repo)
+        decision_id = next(iter(index["docs"]))
+
+        anchor_ids, mention_hits, file_artifacts = store._prompt_file_hits(
+            tmp_repo, "fix guard_engine.py", [{"scope": "personal", "id": decision_id}],
+            index,
+        )
+
+        assert anchor_ids == [{"scope": "personal", "id": decision_id}]
+        assert mention_hits == []
+        assert file_artifacts == ["guard_engine.py"]
+
     def test_bare_basename_with_no_matching_decision_stays_silent(self, tmp_repo):
         # "utils.py" IS pathlike (has an extension), but nothing in either store references
         # it — decisions_for_files finds no signal, so the file route contributes nothing.

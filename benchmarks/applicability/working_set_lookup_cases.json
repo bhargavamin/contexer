@@ -1,0 +1,157 @@
+{
+  "version": 2,
+  "fixture_version": 2,
+  "fixture_sha256": "3c70b67980fbca84ec56b38c137b14e211e9ca247611f851bc6aff727ec7efbb",
+  "corpus_size": 500,
+  "warmup": 20,
+  "samples_per_arm_per_batch": 100,
+  "pairs_per_phase": 5,
+  "expected_behaviors": {
+    "dense_full": {"output_count": 1, "output_bytes": 0, "ledger_size": 500, "behavior_sha256": "aa0482d633e17244639ea121f28b0aa45b1c5b963bb8c32a18add2b8a63f0a25"},
+    "dense_empty": {"output_count": 1, "output_bytes": 88, "ledger_size": 0, "behavior_sha256": "1fa3c889aa139795cf1da50d81788a1f3bc3439a68b31b6e2e78e2a23a96d5df"},
+    "dense_10": {"output_count": 1, "output_bytes": 88, "ledger_size": 10, "behavior_sha256": "0a2500c3e0edd62e061be02eeabd81a9ea2cab492545612b16472ad5113e47cf"},
+    "dense_50": {"output_count": 1, "output_bytes": 88, "ledger_size": 50, "behavior_sha256": "e92e73f287f23ebfeeb5a65d44814ca036cb9fca5797c6a69ce576b0a3c9b249"},
+    "low_0": {"output_count": 1, "output_bytes": 0, "ledger_size": 500, "behavior_sha256": "aa0482d633e17244639ea121f28b0aa45b1c5b963bb8c32a18add2b8a63f0a25"},
+    "low_1_first": {"output_count": 1, "output_bytes": 0, "ledger_size": 500, "behavior_sha256": "aa0482d633e17244639ea121f28b0aa45b1c5b963bb8c32a18add2b8a63f0a25"},
+    "low_1_last": {"output_count": 1, "output_bytes": 0, "ledger_size": 500, "behavior_sha256": "aa0482d633e17244639ea121f28b0aa45b1c5b963bb8c32a18add2b8a63f0a25"},
+    "low_1_miss": {"output_count": 1, "output_bytes": 445, "ledger_size": 500, "behavior_sha256": "1e49179b098502e41ec18cae4b0b97ce936cbd712b961fc770b4bdcb7ca815e0"},
+    "low_5_mixed": {"output_count": 1, "output_bytes": 0, "ledger_size": 500, "behavior_sha256": "02cfefb7ff692721c41b56854e8e049ba75dd6349cc4cf3d3a9db05cf81af808"},
+    "candidate_50": {"output_count": 1, "output_bytes": 0, "ledger_size": 500, "behavior_sha256": "aa0482d633e17244639ea121f28b0aa45b1c5b963bb8c32a18add2b8a63f0a25"},
+    "candidate_500": {"output_count": 1, "output_bytes": 0, "ledger_size": 500, "behavior_sha256": "aa0482d633e17244639ea121f28b0aa45b1c5b963bb8c32a18add2b8a63f0a25"},
+    "file_combined": {"output_count": 1, "output_bytes": 0, "ledger_size": 500, "behavior_sha256": "aa0482d633e17244639ea121f28b0aa45b1c5b963bb8c32a18add2b8a63f0a25"},
+    "file_global_anchor": {"output_count": 1, "output_bytes": 397, "ledger_size": 500, "behavior_sha256": "a14988c057b671010c12e963c0f2e894c3cd2cf50319466078d4ed86b3e699db"},
+    "file_mention_only": {"output_count": 1, "output_bytes": 132, "ledger_size": 0, "behavior_sha256": "b3d48434f2300eb8c28c38939077b812fd14524749b872f320a0999d5a204d1d"},
+    "first_relevant": {"output_count": 1, "output_bytes": 369, "ledger_size": 1, "behavior_sha256": "852ae6592dd40685cacfeb4942f2bc2f689bfc04af98b872f33aeecb02feb9a4"},
+    "diagnostics_on_first_relevant": {"output_count": 1, "output_bytes": 369, "ledger_size": 1, "behavior_sha256": "2e87a27364ef21f4c7dd6b342d99ab527300b911bc38be5dabf10b0ffa904059"},
+    "revised_guidance": {"output_count": 1, "output_bytes": 445, "ledger_size": 500, "behavior_sha256": "1e49179b098502e41ec18cae4b0b97ce936cbd712b961fc770b4bdcb7ca815e0"},
+    "no_session_repeated": {"output_count": 2, "output_bytes": 176, "ledger_size": 0, "behavior_sha256": "9236b070ad61cf3e5d96e698547bbc3b1cceb66ef3dd3b3cab88a3b1be7e8703"},
+    "compaction_then_omitted": {"output_count": 2, "output_bytes": 3241, "ledger_size": 500, "behavior_sha256": "2ed8f306c25f3f68e6aa8040cfca69b99211ac4a7b0d06f5af64df22b6373333"},
+    "closed_gate": {"output_count": 1, "output_bytes": 0, "ledger_size": 500, "behavior_sha256": "aa0482d633e17244639ea121f28b0aa45b1c5b963bb8c32a18add2b8a63f0a25"},
+    "missing_index_relevant": {"output_count": 1, "output_bytes": 3767, "ledger_size": 500, "behavior_sha256": "9f0e6d809aa35fb82566f78f523e4bc8ed9a2c865aaf36a3c01af73a287a52f5"},
+    "missing_index_irrelevant": {"output_count": 1, "output_bytes": 0, "ledger_size": 500, "behavior_sha256": "aa0482d633e17244639ea121f28b0aa45b1c5b963bb8c32a18add2b8a63f0a25"},
+    "corrupt_index_relevant": {"output_count": 1, "output_bytes": 3767, "ledger_size": 500, "behavior_sha256": "9f0e6d809aa35fb82566f78f523e4bc8ed9a2c865aaf36a3c01af73a287a52f5"},
+    "corrupt_index_irrelevant": {"output_count": 1, "output_bytes": 0, "ledger_size": 500, "behavior_sha256": "aa0482d633e17244639ea121f28b0aa45b1c5b963bb8c32a18add2b8a63f0a25"}
+  },
+  "cases": [
+    {
+      "name": "dense_full", "query": "dense", "query_sha256": "dc7f875313208ab6cc317074a221bdd3bf76fe8dbdc9aae9bae6fce1a6b6fb2a",
+      "ledger": "full", "ledger_size": 500, "ledger_order": "fixture order", "hit_positions": "all",
+      "expected_probes": 1000, "expected_route_probes": {"file": 0, "ranked": 500, "topic": 500, "other": 0}
+    },
+    {
+      "name": "dense_empty", "query": "dense", "query_sha256": "dc7f875313208ab6cc317074a221bdd3bf76fe8dbdc9aae9bae6fce1a6b6fb2a",
+      "ledger": "empty", "ledger_size": 0, "ledger_order": "empty", "hit_positions": "all misses",
+      "expected_probes": 1000, "expected_route_probes": {"file": 0, "ranked": 500, "topic": 500, "other": 0}
+    },
+    {
+      "name": "dense_10", "query": "dense", "query_sha256": "dc7f875313208ab6cc317074a221bdd3bf76fe8dbdc9aae9bae6fce1a6b6fb2a",
+      "ledger": "first_10", "ledger_size": 10, "ledger_order": "fixture[0:10]", "hit_positions": "first ten",
+      "expected_probes": 1000, "expected_route_probes": {"file": 0, "ranked": 500, "topic": 500, "other": 0}
+    },
+    {
+      "name": "dense_50", "query": "dense", "query_sha256": "dc7f875313208ab6cc317074a221bdd3bf76fe8dbdc9aae9bae6fce1a6b6fb2a",
+      "ledger": "first_50", "ledger_size": 50, "ledger_order": "fixture[0:50]", "hit_positions": "first fifty",
+      "expected_probes": 1000, "expected_route_probes": {"file": 0, "ranked": 500, "topic": 500, "other": 0}
+    },
+    {
+      "name": "low_0", "query": "absent", "query_sha256": "aea76eb3ca8ff4cb342ee26e2f792ca45c193a7531ce6fed541f7b144167bc36",
+      "ledger": "full", "ledger_size": 500, "ledger_order": "fixture order", "hit_positions": "no probes",
+      "expected_probes": 0, "expected_route_probes": {"file": 0, "ranked": 0, "topic": 0, "other": 0}
+    },
+    {
+      "name": "low_1_first", "query": "one_first", "query_sha256": "6e63afd8b3623ea5146af6c2f3cea154064185c358914ee2695ad609260306ad",
+      "ledger": "full", "ledger_size": 500, "ledger_order": "fixture order", "hit_positions": [0],
+      "expected_probes": 1, "expected_route_probes": {"file": 0, "ranked": 1, "topic": 0, "other": 0}
+    },
+    {
+      "name": "low_1_last", "query": "one_last", "query_sha256": "a40299d41feb1f84d1c46c38e0ff579066297df5b0feaeb78b6d86810a50b1b0",
+      "ledger": "full", "ledger_size": 500, "ledger_order": "fixture order", "hit_positions": [499],
+      "expected_probes": 1, "expected_route_probes": {"file": 0, "ranked": 1, "topic": 0, "other": 0}
+    },
+    {
+      "name": "low_1_miss", "query": "one_first", "query_sha256": "6e63afd8b3623ea5146af6c2f3cea154064185c358914ee2695ad609260306ad",
+      "ledger": "one_miss", "ledger_size": 500, "ledger_order": "fixture order with stale fingerprint at 0", "hit_positions": "fingerprint miss at 0",
+      "expected_probes": 1, "expected_route_probes": {"file": 0, "ranked": 1, "topic": 0, "other": 0}
+    },
+    {
+      "name": "low_5_mixed", "query": "five", "query_sha256": "5b7a5975bcf9db84120a56ef98d6479b35c864c2fcbbc8e109f741b4691184d8",
+      "ledger": "mixed_five", "ledger_size": 500, "ledger_order": "0,5..249,2,250..499,4,1,3", "hit_positions": [0, 246, 497, 498, 499],
+      "expected_probes": 5, "expected_route_probes": {"file": 0, "ranked": 5, "topic": 0, "other": 0}
+    },
+    {
+      "name": "candidate_50", "query": "fifty", "query_sha256": "4442a1d00ec70f3f430ede5bfe1e8afe44ad64199a6737b3b9014448990dcc6f",
+      "ledger": "full", "ledger_size": 500, "ledger_order": "fixture order", "hit_positions": "fixture[0:50]",
+      "expected_probes": 50, "expected_route_probes": {"file": 0, "ranked": 50, "topic": 0, "other": 0}
+    },
+    {
+      "name": "candidate_500", "query": "all_unique", "query_sha256": "fbde13aaae40504dcf2e001c16a7ccf8cf6d9ea58013b8353e845d9f880326fb",
+      "ledger": "full", "ledger_size": 500, "ledger_order": "fixture order", "hit_positions": "all",
+      "expected_probes": 500, "expected_route_probes": {"file": 0, "ranked": 500, "topic": 0, "other": 0}
+    },
+    {
+      "name": "file_combined", "query": "file_dense", "query_sha256": "ffeb957f84050724989844a59fcf4469883d1d20bc886b86d9c1b222670489f1",
+      "ledger": "full", "ledger_size": 500, "ledger_order": "fixture order", "hit_positions": "personal anchor at 0 plus all lexical/topic",
+      "expected_probes": 1001, "expected_route_probes": {"file": 1, "ranked": 500, "topic": 500, "other": 0}
+    },
+    {
+      "name": "file_global_anchor", "query": "file_global", "query_sha256": "e6cf442c1ee32e2a14638da3d80818c52e678a9588672388649f2690eedcd13d",
+      "ledger": "full", "ledger_size": 500, "ledger_order": "fixture order", "hit_positions": "global anchor miss",
+      "expected_probes": 1, "expected_route_probes": {"file": 1, "ranked": 0, "topic": 0, "other": 0}
+    },
+    {
+      "name": "file_mention_only", "query": "file_mention", "query_sha256": "ebe8a82cf2150b447b7105f3311969d5955e4049446a783d3495db453e5bde9a",
+      "ledger": "empty", "ledger_size": 0, "ledger_order": "empty", "hit_positions": "personal mention miss",
+      "expected_probes": 2, "expected_route_probes": {"file": 1, "ranked": 1, "topic": 0, "other": 0}
+    },
+    {
+      "name": "first_relevant", "query": "one_first", "query_sha256": "6e63afd8b3623ea5146af6c2f3cea154064185c358914ee2695ad609260306ad",
+      "ledger": "empty", "ledger_size": 0, "ledger_order": "empty", "hit_positions": "ranked miss",
+      "expected_probes": 1, "expected_route_probes": {"file": 0, "ranked": 1, "topic": 0, "other": 0}
+    },
+    {
+      "name": "diagnostics_on_first_relevant", "query": "one_first", "query_sha256": "6e63afd8b3623ea5146af6c2f3cea154064185c358914ee2695ad609260306ad",
+      "ledger": "empty", "ledger_size": 0, "ledger_order": "empty", "hit_positions": "ranked miss with Contract 04 collection enabled", "diagnostics": true,
+      "expected_probes": 1, "expected_route_probes": {"file": 0, "ranked": 1, "topic": 0, "other": 0}
+    },
+    {
+      "name": "revised_guidance", "query": "one_first", "query_sha256": "6e63afd8b3623ea5146af6c2f3cea154064185c358914ee2695ad609260306ad",
+      "ledger": "one_miss", "ledger_size": 500, "ledger_order": "fixture order with stale fingerprint at 0", "hit_positions": "changed view at 0",
+      "expected_probes": 1, "expected_route_probes": {"file": 0, "ranked": 1, "topic": 0, "other": 0}
+    },
+    {
+      "name": "no_session_repeated", "query": "dense", "query_sha256": "dc7f875313208ab6cc317074a221bdd3bf76fe8dbdc9aae9bae6fce1a6b6fb2a",
+      "ledger": "no_session", "ledger_size": 0, "ledger_order": "no ledger", "hit_positions": "all misses twice", "repetitions": 2,
+      "expected_probes": 2000, "expected_route_probes": {"file": 0, "ranked": 1000, "topic": 1000, "other": 0}
+    },
+    {
+      "name": "compaction_then_omitted", "query": "one_first", "query_sha256": "6e63afd8b3623ea5146af6c2f3cea154064185c358914ee2695ad609260306ad",
+      "ledger": "full", "ledger_size": 500, "ledger_order": "fixture order before replay", "hit_positions": "omitted first row", "sequence": "compaction_prompt",
+      "expected_probes": 1, "expected_route_probes": {"file": 0, "ranked": 1, "topic": 0, "other": 0}
+    },
+    {
+      "name": "closed_gate", "query": "closed", "query_sha256": "517a827686aab4d1e183f4c7576036b57806c44338a82f015dc7b62d4db737bf",
+      "ledger": "full", "ledger_size": 500, "ledger_order": "fixture order", "hit_positions": "no probes",
+      "expected_probes": 0, "expected_route_probes": {"file": 0, "ranked": 0, "topic": 0, "other": 0}
+    },
+    {
+      "name": "missing_index_relevant", "query": "legacy_relevant", "query_sha256": "79b8001470f276820326f73ac3cca028027f665d52890165a9e77b0b9102a96d",
+      "ledger": "full", "ledger_size": 500, "ledger_order": "fixture order", "hit_positions": "legacy fallback", "index": "missing",
+      "expected_probes": 0, "expected_route_probes": {"file": 0, "ranked": 0, "topic": 0, "other": 0}
+    },
+    {
+      "name": "missing_index_irrelevant", "query": "legacy_irrelevant", "query_sha256": "517a827686aab4d1e183f4c7576036b57806c44338a82f015dc7b62d4db737bf",
+      "ledger": "full", "ledger_size": 500, "ledger_order": "fixture order", "hit_positions": "silent legacy fallback", "index": "missing",
+      "expected_probes": 0, "expected_route_probes": {"file": 0, "ranked": 0, "topic": 0, "other": 0}
+    },
+    {
+      "name": "corrupt_index_relevant", "query": "legacy_relevant", "query_sha256": "79b8001470f276820326f73ac3cca028027f665d52890165a9e77b0b9102a96d",
+      "ledger": "full", "ledger_size": 500, "ledger_order": "fixture order", "hit_positions": "legacy fallback", "index": "corrupt",
+      "expected_probes": 0, "expected_route_probes": {"file": 0, "ranked": 0, "topic": 0, "other": 0}
+    },
+    {
+      "name": "corrupt_index_irrelevant", "query": "legacy_irrelevant", "query_sha256": "517a827686aab4d1e183f4c7576036b57806c44338a82f015dc7b62d4db737bf",
+      "ledger": "full", "ledger_size": 500, "ledger_order": "fixture order", "hit_positions": "silent legacy fallback", "index": "corrupt",
+      "expected_probes": 0, "expected_route_probes": {"file": 0, "ranked": 0, "topic": 0, "other": 0}
+    }
+  ]
+}
