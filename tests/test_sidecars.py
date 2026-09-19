@@ -51,6 +51,8 @@ class TestClassification:
         ".team_x.json", ".team_seen_x_claude.json", ".insight_x", ".anchor_verify_x",
         ".miner_verify_x", ".memory_synced_x", ".guard_advised_x.json", ".spool_maintained_x",
         ".retrieval_index_x.json",        # rebuildable; the card called it so
+        ".delivered_x.json",              # NOT session-lived: a week off-repo must not erase it
+        ".delivery_gaps_x",               # lock-free counter alongside the tally; same lifetime
     ])
     def test_cold_repo_caches_expire_later(self, name):
         assert sidecars.lifetime_for(name) == sidecars.COLD_REPO
@@ -149,6 +151,8 @@ class TestClassification:
         "spool_maintained": ("spool._maintenance_stamp", {"slug": None}),
         "guard_advised":    ("guard_engine._guard_advised_path", {"slug": None}),
         "retrieval_index":  ("store._index_path", {"slug": None}),
+        "delivery_tally":   ("working_set.delivery_path", {"slug": None}),
+        "delivery_gaps":    ("working_set._gap_path", {"slug": None}),
     }
 
     def test_every_declared_kind_is_listed_here(self):
@@ -169,10 +173,11 @@ class TestClassification:
         """Direction two: for every kind with a builder, the builder's name equals the
         template's. This is what catches a declaration that has drifted from the code."""
         from contexer import (anchors, auth, guard_engine, share, share_policy, spool,
-                              team_context, updates)
+                              team_context, updates, working_set)
         mods = {"store": store, "share": share, "auth": auth, "anchors": anchors,
                 "guard_engine": guard_engine, "team_context": team_context,
-                "share_policy": share_policy, "updates": updates, "spool": spool}
+                "share_policy": share_policy, "updates": updates, "spool": spool,
+                "working_set": working_set}
         slug = store.repo_slug(tmp_repo)
         checked = 0
         for kind, (producer, fields) in self.PRODUCERS.items():

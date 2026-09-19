@@ -158,6 +158,18 @@ KINDS: tuple[Kind, ...] = (
     Kind("spool_maintained", ".spool_maintained_{slug}",   COLD_REPO, "spool retention/orphan-sweep TTL "
                                                                       "stamp; same shape as the two above"),
     Kind("guard_advised",    ".guard_advised_{slug}.json", COLD_REPO, "guard throttle stamps, content-keyed"),
+    # COLD_REPO, not SESSION: this answers "has this decision done any work lately", which a
+    # 7-day sweep would erase the moment the developer spends a week on another repo. Keyed by
+    # decision, not by event, so it is bounded by the store's own entry cap and never truncates
+    # on prompt volume the way the tail-capped retrieval_log does.
+    Kind("delivery_tally",   ".delivered_{slug}.json",     COLD_REPO, "per-repo durable count of which "
+                                                                      "decisions were actually rendered"),
+    # Lock-free counter (append-only, O_APPEND), not part of delivery_tally: the tally write
+    # is best-effort and NON-blocking, so contention or a publish failure can drop an increment
+    # rather than stalling a prompt. Without the lock, even a same-session repeat is uncertain.
+    # This best-effort marker warns of incomplete measurement, not an exact lost-render count.
+    Kind("delivery_gaps",    ".delivery_gaps_{slug}",      COLD_REPO, "capped uncertainty count for "
+                                                                      "unconfirmed tally updates"),
     Kind("retrieval_index",  ".retrieval_index_{slug}.json", COLD_REPO, "BM25 index; disposable by design and "
                                                                       "rebuilt by ensure_retrieval_index at the "
                                                                       "next session start that needs it"),
