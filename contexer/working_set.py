@@ -179,14 +179,13 @@ def _delivery_lock_slug(repo_path: str) -> str:
 # that optional bookkeeping can never stop a hook rendering context. A blocking flock has no
 # timeout, so one stalled holder would hang the prompt for a counter nothing reads
 # synchronously. Three quick tries absorb ordinary brief contention; past that the increment is
-# dropped, which costs at most one render event and never costs the developer their output.
+# unconfirmed, so record uncertainty without withholding the developer's output.
 _TALLY_LOCK_TRIES = 3
 _TALLY_LOCK_BACKOFF = 0.005
 
-# One byte per dropped event ("x"), so this caps the readable gap counter at roughly 64K
-# recorded drops - far past anything ordinary contention produces, while still being a
-# real bound rather than none. Public (not underscored): the report reading
-# delivery_gap_count needs to know whether a returned count is exact or has saturated.
+# One byte per uncertain scoped-decision attempt ("x"), capping the readable marker count
+# at 64K. Public (not underscored): consumers can detect saturation, but even below this
+# ceiling the marker count is not an exact number of missing renders.
 GAP_FILE_MAX_BYTES = 64 * 1024
 _MAX_VALID_TIMESTAMP = 253_402_300_799  # 9999-12-31T23:59:59Z
 
@@ -260,23 +259,25 @@ def _gap_path(repo_path: str) -> Path:
 
 
 def record_delivery_gap(repo_path: str, count: int) -> None:
-    """Durably note `count` render events that could not be published to the tally because
-    its lock stayed contended or its mutation/write failed. Never raises; never lock-waits.
+    """Best-effort record of `count` uncertain delivery attempts after tally contention
+    or mutation/write failure. Never raises; never lock-waits.
 
     Deliberately lock-free: one unbuffered binary append is one write(2) syscall for a payload
     this small, and O_APPEND keeps concurrent droppers from overwriting each other. No flock
     is needed for an uncertainty marker nobody reads synchronously.
 
-    A gap is recorded per DROPPED EVENT, not attributed to any one decision: the tally
-    cannot know, after losing the race, which specific rows would have been new. Reporting
-    it as a total is honest about that limit rather than guessing which decision to blame.
+    A gap is recorded per scoped decision in an uncertain attempt, not as an exact lost
+    render count: without the lock we cannot prove whether a same-session repeat was a
+    no-op. The aggregate warns consumers that measurement may be incomplete; it cannot
+    attribute a missing increment to a particular decision.
 
     Bounded toward GAP_FILE_MAX_BYTES: every append refreshes the sidecar's mtime, so under
     SUSTAINED contention the file would both grow without limit and never age out under
     COLD_REPO's mtime-based sweep. Each writer appends only the remaining capacity it
     observed. Simultaneous appenders can overshoot that advisory disk ceiling by their small
     in-flight payloads, but reads are hard-capped; once saturated the returned count is a
-    floor rather than exact.
+    floor on recorded uncertainty rather than exact. It is never a lower bound on lost
+    renders, since even an attempt that would have been a no-op can be uncertain.
     """
     if count <= 0:
         return
@@ -297,14 +298,14 @@ def record_delivery_gap(repo_path: str, count: int) -> None:
 
 
 def delivery_gap_count(repo_path: str) -> int:
-    """Total render events that could not be persisted in the tally.
+    """Capped recorded uncertainty from delivery attempts, not an exact lost-render count.
 
     A caller drawing on `read_delivery_tally` for "was this decision ever delivered" should
-    read this alongside it: a nonzero count means some render events during the measurement
-    window are simply missing, not necessarily concentrated on any one row, so absence for
-    a specific decision is reliable only to within this many total lost observations. Once
-    the file has hit GAP_FILE_MAX_BYTES the true count may be higher than what is returned -
-    `record_delivery_gap` stops counting further drops past that ceiling.
+    read this alongside it: a nonzero count means render events may be missing, so an absent
+    row cannot establish "never delivered". Contended attempts may have been no-ops, and
+    saturation stops further counting; this is not a correction factor for `renders`.
+    Zero is not proof of completeness either: the gap append itself is best-effort and the
+    sidecar can expire independently of the tally.
 
     Bounded read: never trusts the file's own size, mirroring read_delivery_tally's
     MAX_BYTES pattern, so external tampering cannot force an unbounded read off this path.
@@ -345,8 +346,9 @@ def record_delivery_tally(repo_path: str, session_id: str, delivered: list[dict]
 
     Exhausting the retry budget on a decision's FIRST delivery would otherwise be
     indistinguishable from "never delivered" - the exact case the measurement exists to
-    detect. `record_delivery_gap` makes that loss visible instead of silent; see
-    `delivery_gap_count`.
+    detect. `record_delivery_gap` records that uncertainty; see `delivery_gap_count`.
+    Duplicate suppression requires the lock: a matching session in an unlocked snapshot
+    may precede another session's in-flight publication and cannot prove a no-op.
     """
     # One event per scoped decision. Deduplicating here also bounds a gap append by the same
     # store cap as the tally instead of trusting a caller-controlled list length.
@@ -407,18 +409,8 @@ def record_delivery_tally(repo_path: str, session_id: str, delivered: list[dict]
             # whatever the next shape of corruption turns out to be.
             record_delivery_gap(repo_path, gap_count)
             return False
-    # The lock was never acquired. An atomic unlocked read is safe here and prevents a known
-    # same-session compaction/retry from being mislabeled as lost merely because another
-    # writer held the lock. A concurrent holder may still publish after this snapshot; in
-    # that irreducible race the conservative uncertainty marker is the honest outcome.
-    try:
-        rows = read_delivery_tally(repo_path)
-        gap_count = sum(
-            (rows.get(f"{row['scope']}:{row['id']}") or {}).get("session") != fingerprint
-            for row in valid
-        )
-    except Exception:
-        pass
+    # Without the lock, no snapshot can prove these attempts were consecutive repeats:
+    # another session may own the lock while its replacement is still unpublished.
     record_delivery_gap(repo_path, gap_count)
     return False
 

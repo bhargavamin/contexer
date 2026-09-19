@@ -413,7 +413,14 @@ class TestDroppedDeliveriesAreNotSilent:
         assert working_set.read_delivery_tally(tmp_repo) == {}
         assert working_set.delivery_gap_count(tmp_repo) == 1
 
-    def test_contended_same_session_noop_does_not_create_a_gap(self, tmp_repo):
+    def test_uncontended_same_session_noop_does_not_create_a_gap(self, tmp_repo):
+        delivered = [{"scope": "personal", "id": "d", "fingerprint": "fp"}]
+        assert working_set.record_delivery_tally(tmp_repo, "same-session", delivered)
+        assert working_set.record_delivery_tally(tmp_repo, "same-session", delivered) is False
+        assert working_set.read_delivery_tally(tmp_repo)["personal:d"]["renders"] == 1
+        assert working_set.delivery_gap_count(tmp_repo) == 0
+
+    def test_contended_same_session_repeat_records_uncertainty(self, tmp_repo):
         import threading
 
         delivered = [{"scope": "personal", "id": "d", "fingerprint": "fp"}]
@@ -437,7 +444,46 @@ class TestDroppedDeliveriesAreNotSilent:
             holder.join(timeout=5)
 
         assert working_set.read_delivery_tally(tmp_repo)["personal:d"]["renders"] == 1
-        assert working_set.delivery_gap_count(tmp_repo) == 0
+        # Without the lock, a matching session cannot prove this attempt was a no-op.
+        assert working_set.delivery_gap_count(tmp_repo) == 1
+
+    def test_interleaved_repeat_cannot_use_a_pre_publish_snapshot(self, tmp_repo, monkeypatch):
+        """A renders again while B owns the lock but has not published its update yet."""
+        import threading
+
+        delivered = [{"scope": "personal", "id": "d", "fingerprint": "fp"}]
+        assert working_set.record_delivery_tally(tmp_repo, "A", delivered)
+        original = store.atomic_write
+        tally_path = working_set.delivery_path(tmp_repo)
+        ready = threading.Event()
+        release = threading.Event()
+        results = []
+
+        def pause_publication(path, text):
+            if Path(path) == tally_path:
+                ready.set()
+                if not release.wait(timeout=5):
+                    raise TimeoutError("test did not release the tally writer")
+            return original(path, text)
+
+        monkeypatch.setattr(store, "atomic_write", pause_publication)
+        writer = threading.Thread(target=lambda: results.append(
+            working_set.record_delivery_tally(tmp_repo, "B", delivered)))
+        writer.start()
+        try:
+            assert ready.wait(timeout=5)
+            assert working_set.record_delivery_tally(tmp_repo, "A", delivered) is False
+            # This is the stale snapshot the old unlocked shortcut trusted.
+            assert working_set.read_delivery_tally(tmp_repo)["personal:d"]["renders"] == 1
+            assert working_set.delivery_gap_count(tmp_repo) == 1
+        finally:
+            release.set()
+            writer.join(timeout=5)
+
+        assert not writer.is_alive()
+        assert results == [True]
+        assert working_set.read_delivery_tally(tmp_repo)["personal:d"]["renders"] == 2
+        assert working_set.delivery_gap_count(tmp_repo) == 1
 
 
 class TestLongSessionIdsStillSuppress:

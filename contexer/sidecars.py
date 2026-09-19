@@ -166,10 +166,10 @@ KINDS: tuple[Kind, ...] = (
                                                                       "decisions were actually rendered"),
     # Lock-free counter (append-only, O_APPEND), not part of delivery_tally: the tally write
     # is best-effort and NON-blocking, so contention or a publish failure can drop an increment
-    # rather than stalling a prompt. That drop must not be invisible - "absence means never
-    # delivered" only holds if a lost observation is recorded SOMEWHERE. This is that record.
-    Kind("delivery_gaps",    ".delivery_gaps_{slug}",      COLD_REPO, "count of delivery events "
-                                                                      "that could not reach the tally"),
+    # rather than stalling a prompt. Without the lock, even a same-session repeat is uncertain.
+    # This best-effort marker warns of incomplete measurement, not an exact lost-render count.
+    Kind("delivery_gaps",    ".delivery_gaps_{slug}",      COLD_REPO, "capped uncertainty count for "
+                                                                      "unconfirmed tally updates"),
     Kind("retrieval_index",  ".retrieval_index_{slug}.json", COLD_REPO, "BM25 index; disposable by design and "
                                                                       "rebuilt by ensure_retrieval_index at the "
                                                                       "next session start that needs it"),
