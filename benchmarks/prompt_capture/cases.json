@@ -23,6 +23,8 @@
     {"case_id":"P02-explicit-custom","family":"P02","kind":"scope","prompt":"the uploader is only used in checkout environment and is not required in settings environment","expected":{"captured":true}},
     {"case_id":"P02-contraction","family":"P02","kind":"scope","prompt":"n8n is only deployed in production and isn't needed in the test environment","expected":{"captured":true}},
     {"case_id":"P02-production-not-staging","family":"P02","kind":"scope","prompt":"Airflow runs only in production, not in staging","expected":{"captured":true}},
+    {"case_id":"P02-versioned-service","family":"P02","kind":"capture","prompt":"Temporal v2.1 runs only in mercury and is not needed in venus","expected":{"result_status":"confirmation_required","result_content":"Temporal v2.1 runs only in mercury and is not needed in venus","entry_count":1,"live_status":"pending_approval"}},
+    {"case_id":"P02-dotted-environments","family":"P02","kind":"capture","prompt":"Temporal runs only in mercury.v2 and is not needed in venus.v1","expected":{"result_status":"confirmation_required","result_content":"Temporal runs only in mercury.v2 and is not needed in venus.v1","entry_count":1,"live_status":"pending_approval"}},
 
     {"case_id":"P03-weak-pages","family":"P03","kind":"scope","prompt":"the uploader is only used in checkout and is not required in settings","expected":{"captured":false}},
     {"case_id":"P03-one-half-placement","family":"P03","kind":"scope","prompt":"n8n is only running in the live environment","expected":{"captured":false}},

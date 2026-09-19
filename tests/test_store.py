@@ -1046,6 +1046,13 @@ class TestEnvironmentScopeDeclaration:
         )
 
     @pytest.mark.parametrize("text", [
+        "Temporal v2.1 runs only in mercury and is not needed in venus",
+        "Temporal runs only in mercury.v2 and is not needed in venus.v1",
+    ])
+    def test_dots_inside_identifiers_do_not_split_scope_fact(self, text):
+        assert prompt_capture.environment_scope_candidate(text) == text
+
+    @pytest.mark.parametrize("text", [
         "I thought n8n is only running in live env and it is not required in staging env, "
         "but that is wrong",
         "Could it be that n8n is only running in live env and it is not required in "

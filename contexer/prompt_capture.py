@@ -21,7 +21,7 @@ _SYSTEM_TEXT_PREFIXES = (
 _ENV_OPERATION = r"(?:run(?:s|ning)?|enabled|deployed|hosted|available|used|required|needed)"
 _ENVIRONMENT_TOKEN = (
     r"(?!(?:and|but|or|it|this|that|is|are|was|were|does)\b)"
-    r"[A-Za-z0-9][A-Za-z0-9_-]*"
+    r"[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9_])?"
 )
 _ENVIRONMENT_REF = (
     rf"(?:the\s+)?(?:"
@@ -156,7 +156,9 @@ def environment_scope_candidate(text: str) -> str | None:
     if candidate.lower().startswith(_SYSTEM_TEXT_PREFIXES) or "```" in candidate:
         return None
     start = 0
-    boundaries = [*re.finditer(r"[.?!\n]", candidate), None]
+    # A period is a boundary only when it ends a whitespace-delimited sentence. Dots inside
+    # versioned service/environment identifiers (Temporal v2.1, qa.v2) stay part of the fact.
+    boundaries = [*re.finditer(r"[?!\n]|\.(?=\s|$)", candidate), None]
     for boundary in boundaries:
         end = boundary.start() if boundary is not None else len(candidate)
         terminator = boundary.group(0) if boundary is not None else ""
