@@ -142,6 +142,36 @@ def _nested_repo_root(path: Path) -> bool:
         return False
 
 
+def _citation_under_nested_checkout(root: Path, path: Path) -> bool:
+    """Whether an EXISTING citation's file lies inside a directory `_paths` would now refuse
+    to descend into - a linked worktree, submodule, or vendored clone added under `_paths`'
+    `_nested_repo_root` exclusion.
+
+    `_refresh_entries` re-validates a citation it cannot find in the fresh scan's `files` by
+    reading the source directly off disk (the `else` branch below `elif file in
+    scan["files"]`). That fallback exists for a legitimate reason - a file outside the
+    budgeted walk that a focused re-scan still wants to check - but it does not distinguish
+    "outside the walk's budget" from "mechanically excluded because it is a nested checkout".
+    An entry captured BEFORE that exclusion existed, citing an unchanged file under
+    `.claude/worktrees/...`, would otherwise pass this fallback as "current" forever: the
+    scan says nothing about the path, and the file on disk has not changed.
+
+    Only ancestor DIRECTORIES are checked, not `path` itself - `_nested_repo_root` asks
+    "is this directory itself a checkout", and the file being cited is never a directory.
+    """
+    try:
+        rel_parts = path.relative_to(root).parts
+    except ValueError:
+        return False  # outside root entirely; the authorized/external_paths check owns this
+    current = root
+    for part in rel_parts[:-1]:
+        current = current / part
+        if _nested_repo_root(current):
+            return True
+    return False
+
+
+
 def _paths(root: Path, *, external: bool = False):
     if root.is_file():
         if root.suffix.lower() == ".md":
@@ -1256,6 +1286,11 @@ def _refresh_entries(entries: list[dict], scan: dict, *, unavailable: bool = Fal
                     state = "unavailable"
                 elif file in scan["files"]:
                     digest, state = scan["files"][file]["sha256"], "checked"
+                elif _citation_under_nested_checkout(root, path):
+                    # Revoked, not merely unchecked: a live re-scan would never cite this
+                    # path again, so an unchanged file on disk must not keep the citation
+                    # "current" by falling through to the direct-read fallback below.
+                    state = "stale"
                 else:
                     try:
                         if any(p.is_symlink() for p in (path, *path.parents)):

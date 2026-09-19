@@ -339,3 +339,190 @@ class TestTallyNeverBlocksTheHook:
         assert working_set.record_delivery_tally(
             tmp_repo, "s1", [{"scope": "personal", "id": "d", "fingerprint": "f"}])
         assert working_set.read_delivery_tally(tmp_repo)["personal:d"]["renders"] == 1
+
+
+class TestDroppedDeliveriesAreNotSilent:
+    """Human review of 8c78ab9 (finding 1): exhausting the lock-retry budget on a decision's
+    FIRST delivery is indistinguishable from 'never delivered' unless the drop is recorded
+    somewhere - which is exactly the case the two-week measurement exists to detect."""
+
+    def test_a_dropped_first_delivery_is_recorded_as_a_gap(self, tmp_repo):
+        import threading
+
+        held = threading.Event()
+        release = threading.Event()
+
+        def hold_the_lock():
+            with store.store_lock(working_set._delivery_lock_slug(tmp_repo)):
+                held.set()
+                release.wait(timeout=5)
+
+        holder = threading.Thread(target=hold_the_lock)
+        holder.start()
+        assert held.wait(timeout=5)
+        try:
+            result = working_set.record_delivery_tally(
+                tmp_repo, "first-ever-session",
+                [{"scope": "personal", "id": "never-seen-before", "fingerprint": "f"}])
+        finally:
+            release.set()
+            holder.join(timeout=5)
+
+        assert result is False
+        assert working_set.read_delivery_tally(tmp_repo) == {}, (
+            "the row must not appear silently - if it did, the gap counter would be lying")
+        assert working_set.delivery_gap_count(tmp_repo) == 1
+
+    def test_gap_count_accumulates_across_drops_and_repos_stay_separate(self, tmp_repo, tmp_path):
+        working_set.record_delivery_gap(tmp_repo, 3)
+        working_set.record_delivery_gap(tmp_repo, 2)
+        assert working_set.delivery_gap_count(tmp_repo) == 5
+
+        other_repo = str(tmp_path / "other")
+        assert working_set.delivery_gap_count(other_repo) == 0
+
+    def test_zero_or_negative_gaps_are_not_recorded(self, tmp_repo):
+        working_set.record_delivery_gap(tmp_repo, 0)
+        working_set.record_delivery_gap(tmp_repo, -3)
+        assert working_set.delivery_gap_count(tmp_repo) == 0
+
+    def test_missing_gap_file_reads_as_zero_not_an_error(self, tmp_repo):
+        assert working_set.delivery_gap_count(tmp_repo) == 0
+
+    def test_a_successful_delivery_records_no_gap(self, tmp_repo):
+        working_set.record_delivery_tally(
+            tmp_repo, "s1", [{"scope": "personal", "id": "d", "fingerprint": "f"}])
+        assert working_set.delivery_gap_count(tmp_repo) == 0
+
+
+class TestLongSessionIdsStillSuppress:
+    """Human review of 8c78ab9 (finding 3): the writer stored `session_id` verbatim while the
+    reader normalized anything over FIELD_MAX back to "" - so a long id compared unequal to
+    itself on the very next call, and one session rendering twice was counted as two."""
+
+    def test_a_257_char_session_id_still_suppresses_a_repeat(self, tmp_repo):
+        long_session = "s" * 257
+        for _ in range(2):
+            working_set.record_delivery_tally(
+                tmp_repo, long_session,
+                [{"scope": "personal", "id": "d", "fingerprint": "f"}])
+
+        assert working_set.read_delivery_tally(tmp_repo)["personal:d"]["renders"] == 1
+
+    def test_the_stored_session_field_never_exceeds_field_max(self, tmp_repo):
+        working_set.record_delivery_tally(
+            tmp_repo, "s" * 5000, [{"scope": "personal", "id": "d", "fingerprint": "f"}])
+
+        row = working_set.read_delivery_tally(tmp_repo)["personal:d"]
+        assert len(row["session"]) <= working_set.FIELD_MAX
+
+
+class TestNonFiniteTimestampsAreRejected:
+    """Human review of 8c78ab9 (finding 4): `_valid_stamp` rejected NaN but accepted
+    +/-Infinity, which JSON also accepts as a bare token. An infinite `last` sorts newest
+    forever and would evict every genuinely recent row once the tally hit capacity."""
+
+    def test_positive_infinity_is_rejected(self, tmp_repo):
+        store.ensure_store_dir()
+        working_set.delivery_path(tmp_repo).write_text(
+            '{"v":2,"rows":{"personal:x":{"renders":1,"first":1.0,"last":Infinity,'
+            '"session":""}}}', encoding="utf-8")
+        assert working_set.read_delivery_tally(tmp_repo) == {}
+
+    def test_negative_infinity_is_rejected(self, tmp_repo):
+        store.ensure_store_dir()
+        working_set.delivery_path(tmp_repo).write_text(
+            '{"v":2,"rows":{"personal:x":{"renders":1,"first":-Infinity,"last":2.0,'
+            '"session":""}}}', encoding="utf-8")
+        assert working_set.read_delivery_tally(tmp_repo) == {}
+
+    def test_negative_timestamp_is_rejected(self, tmp_repo):
+        store.ensure_store_dir()
+        working_set.delivery_path(tmp_repo).write_text(
+            '{"v":2,"rows":{"personal:x":{"renders":1,"first":-5.0,"last":2.0,'
+            '"session":""}}}', encoding="utf-8")
+        assert working_set.read_delivery_tally(tmp_repo) == {}
+
+    def test_ordinary_timestamps_still_pass(self, tmp_repo):
+        working_set.record_delivery_tally(
+            tmp_repo, "s1", [{"scope": "personal", "id": "d", "fingerprint": "f"}])
+        assert "personal:d" in working_set.read_delivery_tally(tmp_repo)
+
+
+class TestExistingNestedCitationsAreWithheld:
+    """Human review of 8c78ab9 (finding 2): `_paths` stops a FRESH scan from descending into
+    a nested checkout, but an entry already captured from one - before the exclusion existed
+    - kept citing that path. `_refresh_entries` falls back to reading a citation directly off
+    disk when the file is absent from `scan["files"]`, which every excluded path now is; if
+    the file is unchanged, that fallback reported "current" forever. Prevention alone leaves
+    the two-week measurement's STARTING denominator corrupt with the three duplicate pairs
+    the PR body names - this closes the gap for entries that already exist."""
+
+    RULE = "# Contributing\n\n- **No premature abstractions.**\n"
+
+    def _seed_nested_citation(self, tmp_repo, nested_rel: str) -> dict:
+        entry = store.build_inferred_entry(
+            "No premature abstractions.", "s0", "convention", "suggested")
+        entry["bootstrap"] = {
+            "key": "doc:legacy-nested", "kind": "inferred", "assessment": "supported",
+            "scope": "project", "sample": "repo",
+            "sources": [{"file": nested_rel, "sha256": bootstrap._digest(self.RULE),
+                        "line": 3, "end_line": 3, "quote": "No premature abstractions."}],
+        }
+        data = store.load(tmp_repo)
+        data["entries"].append(entry)
+        store.save(tmp_repo, data)
+        return entry
+
+    def test_an_unchanged_nested_citation_is_withheld_on_refresh(self, tmp_repo):
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        Path(tmp_repo, "CONTRIBUTING.md").write_text(self.RULE)
+        wt = Path(tmp_repo, ".claude", "worktrees", "agent-x")
+        wt.mkdir(parents=True)
+        (wt / "CONTRIBUTING.md").write_text(self.RULE)
+        (wt / ".git").write_text("gitdir: /elsewhere/.git/worktrees/agent\n")
+
+        nested_rel = ".claude/worktrees/agent-x/CONTRIBUTING.md"
+        scan1 = bootstrap.run(tmp_repo, "test")
+        assert nested_rel not in scan1["files"], "sanity: a FRESH scan must exclude it"
+
+        entry = self._seed_nested_citation(tmp_repo, nested_rel)
+        scan2 = bootstrap.run(tmp_repo, "test2")
+        bootstrap._refresh_entries(store.load(tmp_repo)["entries"], scan2)
+        refreshed = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == entry["id"])
+
+        assert refreshed.get("bootstrap_withheld"), "must not stay 'current' forever"
+        assert store.entry_status(refreshed) == "ignored", (
+            "withheld AI guidance must exit every active filter, not just carry a flag")
+
+    def test_an_ordinary_citation_is_unaffected(self, tmp_repo):
+        """The fix must not withhold something that was never nested."""
+        Path(tmp_repo).mkdir(parents=True, exist_ok=True)
+        Path(tmp_repo, "CONTRIBUTING.md").write_text(self.RULE)
+        entry = self._seed_nested_citation(tmp_repo, "CONTRIBUTING.md")
+
+        scan = bootstrap.run(tmp_repo, "test")
+        bootstrap._refresh_entries(store.load(tmp_repo)["entries"], scan)
+        refreshed = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == entry["id"])
+
+        assert not refreshed.get("bootstrap_withheld")
+        assert store.entry_status(refreshed) == "suggested"
+
+    def test_citation_predicate_only_checks_ancestor_directories(self, tmp_repo):
+        root = Path(tmp_repo)
+        plain = root / "docs" / "guide.md"
+        plain.parent.mkdir(parents=True, exist_ok=True)
+        plain.write_text("# Guide\n")
+        assert bootstrap._citation_under_nested_checkout(root, plain) is False
+
+        nested = root / ".claude" / "worktrees" / "x" / "README.md"
+        nested.parent.mkdir(parents=True, exist_ok=True)
+        nested.write_text("# X\n")
+        (nested.parent / ".git").write_text("gitdir: elsewhere\n")
+        assert bootstrap._citation_under_nested_checkout(root, nested) is True
+
+    def test_citation_outside_root_entirely_is_not_flagged(self, tmp_repo, tmp_path):
+        outside = tmp_path / "elsewhere" / "file.md"
+        outside.parent.mkdir(parents=True, exist_ok=True)
+        outside.write_text("# Elsewhere\n")
+        assert bootstrap._citation_under_nested_checkout(Path(tmp_repo), outside) is False

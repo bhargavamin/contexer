@@ -164,6 +164,12 @@ KINDS: tuple[Kind, ...] = (
     # on prompt volume the way the tail-capped retrieval_log does.
     Kind("delivery_tally",   ".delivered_{slug}.json",     COLD_REPO, "per-repo durable count of which "
                                                                       "decisions were actually rendered"),
+    # Lock-free counter (append-only, O_APPEND), not part of delivery_tally: the tally write
+    # is bounded and NON-blocking, so under lock contention it drops the increment silently
+    # rather than stalling a prompt. That drop must not be invisible - "absence means never
+    # delivered" only holds if a lost observation is recorded SOMEWHERE. This is that record.
+    Kind("delivery_gaps",    ".delivery_gaps_{slug}",      COLD_REPO, "count of delivery events "
+                                                                      "dropped to lock contention"),
     Kind("retrieval_index",  ".retrieval_index_{slug}.json", COLD_REPO, "BM25 index; disposable by design and "
                                                                       "rebuilt by ensure_retrieval_index at the "
                                                                       "next session start that needs it"),

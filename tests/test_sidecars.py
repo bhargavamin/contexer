@@ -52,6 +52,7 @@ class TestClassification:
         ".miner_verify_x", ".memory_synced_x", ".guard_advised_x.json", ".spool_maintained_x",
         ".retrieval_index_x.json",        # rebuildable; the card called it so
         ".delivered_x.json",              # NOT session-lived: a week off-repo must not erase it
+        ".delivery_gaps_x",               # lock-free counter alongside the tally; same lifetime
     ])
     def test_cold_repo_caches_expire_later(self, name):
         assert sidecars.lifetime_for(name) == sidecars.COLD_REPO
@@ -151,6 +152,7 @@ class TestClassification:
         "guard_advised":    ("guard_engine._guard_advised_path", {"slug": None}),
         "retrieval_index":  ("store._index_path", {"slug": None}),
         "delivery_tally":   ("working_set.delivery_path", {"slug": None}),
+        "delivery_gaps":    ("working_set._gap_path", {"slug": None}),
     }
 
     def test_every_declared_kind_is_listed_here(self):

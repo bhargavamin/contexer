@@ -18,6 +18,7 @@ this owner only inside the functions that need it, avoiding an import-order cycl
 from __future__ import annotations
 
 import hashlib
+import math
 import json
 import time
 from pathlib import Path
@@ -184,7 +185,13 @@ _TALLY_LOCK_BACKOFF = 0.005
 
 
 def _valid_stamp(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and value == value
+    """A finite, non-negative Unix timestamp. Rejects NaN (value != value) AND +/-Infinity
+    (math.isfinite) - JSON accepts the bare `Infinity`/`NaN` tokens Python's own json.dumps
+    emits for them, so a persisted row can carry either without the file being malformed.
+    An infinite `last` would sort newest-forever and evict every genuinely recent row once
+    the tally reaches capacity."""
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and value >= 0)
 
 
 def read_delivery_tally(repo_path: str) -> dict:
@@ -222,16 +229,70 @@ def read_delivery_tally(repo_path: str) -> dict:
     return clean
 
 
+def _session_fingerprint(session_id: str) -> str:
+    """Bounded stand-in for a raw session id, same construction as `path()` above.
+
+    The row's `session` field is compared for equality to suppress a consecutive repeat.
+    A raw id can exceed FIELD_MAX (256), and the READER's `_valid_string` then discards it
+    back to "" - so a long id would compare unequal to itself on the very next call and
+    defeat suppression entirely (same session, same decision, renders += 1 forever). Fixed
+    at 16 hex chars, always well under FIELD_MAX, so the round trip through the reader is
+    lossless."""
+    return hashlib.sha1(session_id.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _gap_path(repo_path: str) -> Path:
+    return store.sidecar_path("delivery_gaps", slug=store.repo_slug(repo_path))
+
+
+def record_delivery_gap(repo_path: str, count: int) -> None:
+    """Durably note `count` render events that were NOT recorded, because the tally's lock
+    was contended past its retry budget. Never raises; never blocks.
+
+    Deliberately lock-free: a single `open(..., "a")` write is a single write(2) syscall for
+    a payload this small, and POSIX guarantees that call atomic under O_APPEND (the mode
+    Python's text "a" sets), so two concurrent droppers cannot corrupt each other's line -
+    no flock needed for an append-only counter nobody reads synchronously.
+
+    A gap is recorded per DROPPED EVENT, not attributed to any one decision: the tally
+    cannot know, after losing the race, which specific rows would have been new. Reporting
+    it as a total is honest about that limit rather than guessing which decision to blame.
+    """
+    if count <= 0:
+        return
+    try:
+        store.ensure_store_dir()
+        with open(_gap_path(repo_path), "a", encoding="utf-8") as f:
+            f.write("x" * count + "\n")
+    except OSError:
+        pass
+
+
+def delivery_gap_count(repo_path: str) -> int:
+    """Total render events lost to lock contention and never reflected in the tally.
+
+    A caller drawing on `read_delivery_tally` for "was this decision ever delivered" should
+    read this alongside it: a nonzero count means some render events during the measurement
+    window are simply missing, not necessarily concentrated on any one row, so absence for
+    a specific decision is reliable only to within this many total lost observations.
+    """
+    try:
+        return _gap_path(repo_path).read_text(encoding="utf-8").count("x")
+    except OSError:
+        return 0
+
+
 def record_delivery_tally(repo_path: str, session_id: str, delivered: list[dict]) -> bool:
     """Bump the durable per-decision render count. Never raises; never blocks output.
 
     `renders` counts RENDER EVENTS, deliberately not distinct sessions. Counting sessions
     needs unbounded session identity persisted per decision, and the question this exists to
     answer - "was this decision ever delivered at all" - is a boolean that no counting
-    convention changes. `session` holds the most recent session id and suppresses a
-    consecutive repeat, which removes the two ways one session inflated the figure (a
-    compaction re-render, and a retry after the session ledger failed to persist credit).
-    Interleaved sessions still produce separate renders; that is why this is not `sessions`.
+    convention changes. `session` holds a bounded fingerprint of the most recent session id
+    (see `_session_fingerprint`) and suppresses a consecutive repeat, which removes the two
+    ways one session inflated the figure (a compaction re-render, and a retry after the
+    session ledger failed to persist credit). Interleaved sessions still produce separate
+    renders; that is why this is not `sessions`.
 
     Keyed by (scope, decision id) rather than appended per event, so the file is bounded by
     the store's entry cap instead of by prompt volume - the tail-capped retrieval_log would
@@ -243,28 +304,35 @@ def record_delivery_tally(repo_path: str, session_id: str, delivered: list[dict]
     The lock is NON-BLOCKING with a bounded retry - a blocking flock has no timeout, so one
     stalled holder would hang the prompt for a counter nothing reads synchronously, and the
     standing invariant is that optional bookkeeping never stops a hook rendering context.
+
+    Exhausting the retry budget on a decision's FIRST delivery would otherwise be
+    indistinguishable from "never delivered" - the exact case the measurement exists to
+    detect. `record_delivery_gap` makes that loss visible instead of silent; see
+    `delivery_gap_count`.
     """
+    valid = [row for row in delivered
+             if isinstance(row.get("scope"), str) and row["scope"] in SCOPES
+             and _valid_string(row.get("id"))]
+    if not valid:
+        return False
+    fingerprint = _session_fingerprint(session_id or "")
     for attempt in range(_TALLY_LOCK_TRIES):
         try:
             with store.store_lock(_delivery_lock_slug(repo_path), blocking=False):
                 rows = read_delivery_tally(repo_path)
                 now = time.time()
                 changed = False
-                for row in delivered:
-                    scope, decision_id = row.get("scope"), row.get("id")
-                    if (not isinstance(scope, str) or scope not in SCOPES
-                            or not _valid_string(decision_id)):
-                        continue
-                    existing = rows.get(f"{scope}:{decision_id}")
+                for row in valid:
+                    key = f"{row['scope']}:{row['id']}"
+                    existing = rows.get(key)
                     if existing is None:
-                        rows[f"{scope}:{decision_id}"] = {
-                            "renders": 1, "first": now, "last": now,
-                            "session": session_id or ""}
+                        rows[key] = {"renders": 1, "first": now, "last": now,
+                                     "session": fingerprint}
                         changed = True
-                    elif existing["session"] != (session_id or ""):
+                    elif existing["session"] != fingerprint:
                         existing["renders"] += 1
                         existing["last"] = now
-                        existing["session"] = session_id or ""
+                        existing["session"] = fingerprint
                         changed = True
                 if not changed:
                     return False
@@ -288,6 +356,7 @@ def record_delivery_tally(repo_path: str, session_id: str, delivered: list[dict]
             # persisted row is filtered by the reader above, but the boundary must hold for
             # whatever the next shape of corruption turns out to be.
             return False
+    record_delivery_gap(repo_path, len(valid))
     return False
 
 
