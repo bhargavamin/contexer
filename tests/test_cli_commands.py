@@ -1501,6 +1501,27 @@ class TestGuardAnchors:
                       if e["id"] == entry["id"])
         assert not loaded.get("source_files")
 
+    def test_directory_prefix_candidate_is_labelled_not_shown_as_a_bare_path(
+            self, guard_repo, capsys):
+        """A collapsed prefix governs every file below it, and [Y] is one keystroke - the
+        trailing slash alone must not be the only thing carrying that."""
+        for name in ("store.py", "server.py", "cli.py"):
+            _gwrite(guard_repo, f"contexer/{name}", "x = 0\n")
+        _gseed(guard_repo, "See contexer/store.py, contexer/server.py and contexer/cli.py "
+                           "for the module split")
+        _run_main("guard", "anchors", "--list")
+        out = capsys.readouterr().out
+        assert "contexer/" in out
+        assert "(directory - governs every file below)" in out
+
+    def test_file_candidate_carries_no_directory_label(self, guard_repo, capsys):
+        _gwrite(guard_repo, "auth/jwt.py", "token = 0\n")
+        _gseed(guard_repo, "See auth/jwt.py for the JWT auth decision")
+        _run_main("guard", "anchors", "--list")
+        out = capsys.readouterr().out
+        assert "auth/jwt.py" in out
+        assert "governs every file below" not in out
+
     def test_list_empty_when_no_candidates(self, guard_repo, capsys):
         _run_main("guard", "anchors", "--list")
         out = capsys.readouterr().out

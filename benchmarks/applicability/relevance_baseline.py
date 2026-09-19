@@ -101,8 +101,13 @@ def validate_fixture(data: dict[str, Any]) -> None:
             raise FixtureError(f"{case['case_id']}: actions must be non-empty")
         if not isinstance(case.get("applicable"), list):
             raise FixtureError(f"{case['case_id']}: applicable must be a list")
-        if not isinstance(case.get("desired_assertions"), list):
-            raise FixtureError(f"{case['case_id']}: desired_assertions must be a list")
+        # Non-EMPTY, not merely a list: a case with zero assertions is measured as a pass,
+        # so a fixture stripped of its assertions renders a CLEANER report than the real one
+        # (0 unexpected failures, 0 known gaps). The floor makes a hollowed corpus fail here
+        # rather than pass the gate - see validate_fixture's "exactly R01-R18" family check,
+        # which is the same idea one level up.
+        if not isinstance(case.get("desired_assertions"), list) or not case["desired_assertions"]:
+            raise FixtureError(f"{case['case_id']}: desired_assertions must be non-empty")
         for item in case.get("decisions", []) + case.get("global_decisions", []):
             for field in ("decision_id", "revision_id", "content", "title", "status", "subtype", "timestamp"):
                 if not isinstance(item.get(field), str) or not item[field]:
