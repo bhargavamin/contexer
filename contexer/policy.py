@@ -99,6 +99,11 @@ _MAX_PATH_CHARS = 300
 # in memory, so it cannot wait for validation here to tell it. It reads this constant rather
 # than restating the number - two spellings of one bound drift, and the drift is silent.
 MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
+BOUNDED_FILE_PROFILE = "bounded_file_v1"
+MAX_BOUNDED_FILE_BYTES = 64 * 1024
+MAX_BOUNDED_FILE_LINE_CHARS = 8192
+MAX_BOUNDED_FILE_RULES = 16
+MAX_BOUNDED_LITERAL_CHARS = 128
 
 _KEYS = frozenset({"intent", "operation", "files", "artifact", "repo_key"})
 _ARTIFACT_KEYS = frozenset({"kind", "content"})
@@ -269,6 +274,8 @@ def rule_selects(rule: Mapping, path: str) -> bool:
     isn't already unpacked.
     """
     paths_glob = rule.get("paths") or ""
+    if not isinstance(paths_glob, str):
+        return False
     return not paths_glob or fnmatch.fnmatch(path, paths_glob)
 
 
@@ -294,11 +301,12 @@ def _applicable(entry: Mapping, kind: str, rule, matched_files: list[str]) -> di
             "revision_id": str(rev.get("revision_id") or ""),
             "kind": kind,
             "title": entry.get("title") or "",
-            "rule": dict(rule) if rule else None,
+            "rule": dict(rule) if isinstance(rule, Mapping) else rule,
             "matched_files": matched_files}
 
 
-def select_policies(decisions: list, request: Mapping) -> list[dict]:
+def select_policies(decisions: list, request: Mapping, *,
+                    include_malformed_armed: bool = False) -> list[dict]:
     """The policies that apply to one request, in `decision_id` order.
 
     Three gates, in this order. **Status**: only `approved` selects - a `suggested`,
@@ -332,6 +340,15 @@ def select_policies(decisions: list, request: Mapping) -> list[dict]:
             continue
 
         rule = entry.get("guard_check")
+        if rule and (not isinstance(rule, Mapping)
+                     or not isinstance(rule.get("paths") or "", str)):
+            # The bounded file profile must report a corrupt armed rule as unchecked, not
+            # crash in fnmatch or silently reinterpret it as advisory prose. Legacy callers
+            # keep their existing selection behavior, with rule_selects defensively returning
+            # False for malformed path metadata.
+            if include_malformed_armed:
+                selected.append(_applicable(entry, "armed", rule, list(files)))
+                continue
         if isinstance(rule, Mapping) and rule:
             matched = [f for f in files if rule_selects(rule, f)]
             if not files or matched:
@@ -397,6 +414,64 @@ def validate_check(check_type: str, pattern: str, flags: str) -> None:
         re.compile(pattern, re.IGNORECASE if "i" in flags else 0)
     except re.error:
         raise ValueError(MACHINE_CHECKABLE_MSG)
+
+
+def bounded_file_rule_supported(rule: Mapping) -> bool:
+    """Whether one rule belongs to the deliberately tiny ``bounded_file_v1`` grammar.
+
+    The admitted regex denotes one ASCII literal, optionally line-anchored. Escapes exist
+    only to quote regex punctuation; the existing matcher still performs the actual search.
+    This scanner decides admission, not meaning, so an unsupported construct can never enter
+    Python's backtracking engine on the new server-read path.
+    """
+    if not isinstance(rule, Mapping) or rule.get("type") != "regex":
+        return False
+    allowed = {"type", "pattern", "flags", "paths", "message", "armed_at"}
+    if set(rule) - allowed:
+        return False
+    flags = rule.get("flags", "")
+    paths = rule.get("paths", "")
+    message = rule.get("message", "")
+    armed_at = rule.get("armed_at", "")
+    if not isinstance(flags, str) or flags != "":
+        return False
+    if not isinstance(paths, str) or len(paths) > _MAX_PATH_CHARS:
+        return False
+    if not isinstance(message, str) or len(message) > 512:
+        return False
+    if not isinstance(armed_at, str) or len(armed_at) > 128:
+        return False
+    pattern = rule.get("pattern")
+    if not isinstance(pattern, str) or not pattern or not pattern.isascii():
+        return False
+    body = pattern[1:] if pattern.startswith("^") else pattern
+    if body.endswith("$") and not body.endswith("\\$"):
+        body = body[:-1]
+    if not body:
+        return False
+    punctuation = frozenset(".^$*+?{}[]\\|()")
+    decoded: list[str] = []
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if char == "\\":
+            index += 1
+            if index >= len(body) or body[index] not in punctuation:
+                return False
+            decoded.append(body[index])
+        elif char in punctuation or ord(char) < 32 or ord(char) > 126:
+            return False
+        else:
+            decoded.append(char)
+        if len(decoded) > MAX_BOUNDED_LITERAL_CHARS:
+            return False
+        index += 1
+    return bool(decoded)
+
+
+def rule_digest(rule: object) -> str:
+    raw = json.dumps(rule, sort_keys=True, separators=(",", ":"), default=str)
+    return "sha256:" + hashlib.sha256(raw.encode()).hexdigest()
 
 
 def rule_matches(rule: Mapping, content: str) -> tuple[list[int], str | None]:
@@ -661,7 +736,14 @@ def _decision_id(applicable) -> str:
     return str(applicable.get("decision_id") or "") if isinstance(applicable, Mapping) else ""
 
 
-def evaluate_policies(policies: list, request: Mapping, unchecked: list | None = None) -> dict:
+def _observed_rule_type(rule: object) -> str:
+    """Keep malformed rules visible without copying arbitrary content into diagnostics."""
+    value = rule.get("type") if isinstance(rule, Mapping) else None
+    return value if isinstance(value, str) and value in ("regex", "secret") else "unknown"
+
+
+def evaluate_policies(policies: list, request: Mapping, unchecked: list | None = None, *,
+                      profile: str = "", observer=None, budget_exhausted=None) -> dict:
     """Judge every selected policy against one request's artifact. Pure: no filesystem, no
     subprocess, no store, no git, no clock.
 
@@ -708,8 +790,19 @@ def evaluate_policies(policies: list, request: Mapping, unchecked: list | None =
     pending: list = []
     reached = 0
 
+    def observe(row: dict) -> None:
+        if observer is None:
+            return
+        try:
+            observer(dict(row))
+        except Exception:
+            pass
+
     try:
         pending = list(policies or [])
+        armed_count = sum(1 for item in pending
+                          if isinstance(item, Mapping) and item.get("kind") == "armed")
+        over_rule_budget = profile == BOUNDED_FILE_PROFILE and armed_count > MAX_BOUNDED_FILE_RULES
         for reached, applicable in enumerate(pending):
             if not isinstance(applicable, Mapping):
                 continue
@@ -717,10 +810,43 @@ def evaluate_policies(policies: list, request: Mapping, unchecked: list | None =
                 matches.append(_match(applicable, "warn", None))
                 continue
             decision_id = str(applicable.get("decision_id") or "")
+            observed_rule = applicable.get("rule")
+            base_observation = {
+                "decision_id": decision_id,
+                "revision_id": str(applicable.get("revision_id") or ""),
+                "scope": str(applicable.get("scope") or "personal"),
+                "authority": str(applicable.get("authority") or "trusted_approved"),
+                "rule_digest": rule_digest(observed_rule or {}),
+                "rule_type": _observed_rule_type(observed_rule),
+                "profile": profile or "legacy",
+                "files": list(applicable.get("matched_files") or files)[:32],
+                "identity_complete": bool(
+                    applicable.get("revision_persisted")
+                    and applicable.get("revision_id")
+                    and not applicable.get("identity_ambiguous")),
+            }
+            if over_rule_budget or (profile == BOUNDED_FILE_PROFILE
+                                    and budget_exhausted is not None
+                                    and budget_exhausted()):
+                skipped.append(_unchecked("budget", decision_id=decision_id))
+                observe({**base_observation, "result": "unchecked", "gap": "budget",
+                         "applicable_units": 0, "evaluated_units": 0, "complete": False,
+                         "verified": False})
+                continue
             if content is None:
                 skipped.append(_unchecked("omitted", decision_id=decision_id))
+                observe({**base_observation, "result": "unchecked", "gap": "omitted",
+                         "applicable_units": 0, "evaluated_units": 0, "complete": False,
+                         "verified": False})
                 continue
             rule = applicable.get("rule") or {}
+            if profile == BOUNDED_FILE_PROFILE and not bounded_file_rule_supported(rule):
+                skipped.append(_unchecked(
+                    "unsupported-check", decision_id=decision_id, profile=BOUNDED_FILE_PROFILE))
+                observe({**base_observation, "result": "unchecked",
+                         "gap": "unsupported-check", "applicable_units": 0,
+                         "evaluated_units": 0, "complete": False, "verified": False})
+                continue
             chunks, reason = _scoped_chunks(rule, kind, files, content)
             hits: list[int] = []
             for offset, text in chunks:
@@ -730,14 +856,39 @@ def evaluate_policies(policies: list, request: Mapping, unchecked: list | None =
                 hits.extend(n + offset for n in lines)
             if reason is not None:
                 skipped.append(_unchecked(reason, decision_id=decision_id))
+                observe({**base_observation, "result": "unchecked", "gap": reason,
+                         "applicable_units": len(chunks), "evaluated_units": 0,
+                         "complete": False, "verified": False})
                 continue
             matches.extend(_match(applicable, "block", n) for n in hits)
+            observe({**base_observation, "result": "violated" if hits else "satisfied",
+                     "gap": "", "applicable_units": len(chunks),
+                     "evaluated_units": len(chunks), "complete": True,
+                     "match_count": len(hits),
+                     "verified": base_observation["identity_complete"]})
     except Exception:
         status = "error"
         # `reached` is the policy that raised, so the slice starts AT it: it was not judged
         # either, and a report that skipped it would be the same silent gap one line smaller.
         skipped.extend(_unchecked("evaluator-error", decision_id=_decision_id(p))
                        for p in pending[reached:])
+        for item in pending[reached:]:
+            if isinstance(item, Mapping) and item.get("kind") == "armed":
+                observe({
+                    "decision_id": _decision_id(item),
+                    "revision_id": str(item.get("revision_id") or ""),
+                    "scope": str(item.get("scope") or "personal"),
+                    "authority": str(item.get("authority") or "trusted_approved"),
+                    "rule_digest": rule_digest(item.get("rule") or {}),
+                    "rule_type": _observed_rule_type(item.get("rule")),
+                    "profile": profile or "legacy", "result": "error",
+                    "gap": "evaluator-error", "applicable_units": 0,
+                    "evaluated_units": 0, "complete": False, "verified": False,
+                    "identity_complete": bool(
+                        item.get("revision_persisted") and item.get("revision_id")
+                        and not item.get("identity_ambiguous")),
+                    "files": list(item.get("matched_files") or files)[:32],
+                })
     else:
         status = "partial" if skipped else "complete"
 

@@ -213,7 +213,7 @@ class TestGuidanceFingerprint:
         with pytest.raises(OSError, match="denied"):
             store.save(tmp_repo, data)
         assert store._guidance_fingerprint(entry, data) == before
-        assert store._revision_identity_is_persisted(data, entry) is False
+        assert store.revision_identity_is_persisted(data, entry) is False
 
 
 class TestVersionAwarePromptDelivery:

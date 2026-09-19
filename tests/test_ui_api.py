@@ -148,6 +148,7 @@ def _contract(slug: str, entry_id: str) -> dict:
             "approved_at", "approved_by", "rationale", "confidence", "revisions",
             "proposed_revision", "share", "source_files"},
         f"/api/store/{slug}/deleted": {"ok", "error", "tombstones"},
+        f"/api/store/{slug}/impact": {"status", "records", "next_cursor", "coverage"},
         "/api/global": {"ok", "error", "rules"},
         f"/api/team/{slug}": {"slug", "repo_key", "mode", "enabled", "counts", "staleness",
                               "last_sync", "decisions", "shareable"},

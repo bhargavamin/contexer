@@ -640,6 +640,26 @@ def _run_js(script_text: str, snippet: str):
 
 
 @needs_node
+def test_impact_card_counts_only_verified_conditions(script):
+    # Execute the shipped card renderer, including its count logic and displayed summary.
+    card = script[script.index("const impactRows ="):script.index("const teamNote =")]
+    out = _run_js(script, """
+const asList = (rows) => rows || [];
+const shortId = (id) => id;
+const impact = { records: [{ kind: "evaluation", artifact: {path: "app.py"}, conditions: [
+  {result: "satisfied", verified: true},
+  {result: "violated", verified: true},
+  {result: "satisfied", verified: false},
+  {result: "violated", verified: false},
+  {result: "satisfied"},
+  {result: "unchecked", verified: false},
+  {result: "error", verified: false}
+]}]};
+""" + card + "\nconsole.log(JSON.stringify(impactCard.textContent));")
+    assert "1 satisfied, 1 violated, 5 unverified" in out
+
+
+@needs_node
 def test_both_columns_carry_the_whole_stored_text(script):
     """A developer clicking Approve must have been shown every word of what they are approving —
     marked or unmarked, small edit or total rewrite, and whether or not the pair fits the LCS
