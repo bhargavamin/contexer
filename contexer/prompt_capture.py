@@ -20,13 +20,10 @@ _SYSTEM_TEXT_PREFIXES = (
 
 _ENV_OPERATION = r"(?:run(?:s|ning)?|enabled|deployed|hosted|available|used|required|needed)"
 _ENVIRONMENT_TOKEN = r"[A-Za-z0-9][A-Za-z0-9_-]*"
-_CUSTOM_ENVIRONMENT_SLUG = r"[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)+"
-_COMMON_ENVIRONMENT_NAME = r"(?:live|prod(?:uction)?|stag(?:e|ing)|test(?:ing)?|dev(?:elopment)?|qa|sandbox|preview|demo)"
 _ENVIRONMENT_REF = (
     rf"(?:the\s+)?(?:"
     rf"(?:{_ENVIRONMENT_TOKEN}\s+){{0,2}}{_ENVIRONMENT_TOKEN}\s+env(?:ironment)?"
-    rf"|{_CUSTOM_ENVIRONMENT_SLUG}"
-    rf"|{_COMMON_ENVIRONMENT_NAME}"
+    rf"|{_ENVIRONMENT_TOKEN}"
     rf")"
 )
 _SINGLE_ENV_DECLARATION = re.compile(

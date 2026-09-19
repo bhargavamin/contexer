@@ -997,6 +997,7 @@ class TestEnvironmentScopeDeclaration:
         "n8n is required only in production, not in staging",
         "n8n runs only in live, not in staging",
         "Temporal runs only in eu-primary and is not needed in qa-green",
+        "Temporal runs only in mercury and is not needed in venus",
         "Temporal is deployed only in the customer live environment and is not required "
         "in the partner sandbox environment",
     ])
@@ -1013,10 +1014,6 @@ class TestEnvironmentScopeDeclaration:
 
     def test_question_is_not_captured_as_a_declaration(self):
         text = "is n8n only running in live and not required in staging?"
-        assert prompt_capture.environment_scope_declaration(text) is False
-
-    def test_generic_non_environment_scopes_are_not_captured(self):
-        text = "The cache is only used in authentication and is not required in reporting"
         assert prompt_capture.environment_scope_declaration(text) is False
 
     @pytest.mark.parametrize("text", [

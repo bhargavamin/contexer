@@ -32,7 +32,7 @@ The first time Cursor calls a Contexer tool it asks you to approve it. Contexer 
 
 Across hosts, a sentence such as "the staging environment was retired but is now recreated" versions a matching retired-environment decision forward while preserving its prior revision. This also works when the sentence follows an unrelated task request; only the lifecycle clause is stored. If no matching retired decision exists, Contexer asks before keeping the new factual context.
 
-Environment labels are not limited to production/staging conventions. Explicit names such as `preprod-blue`, `qa-east`, or `customer-demo env` are classified by their relationship in the sentence: one named environment is the exclusive placement and another is explicitly excluded.
+Environment labels are not limited to production/staging conventions. Names such as `mercury`, `venus`, `preprod-blue`, `qa-east`, or `customer-demo env` are classified by their relationship in the sentence: one named environment is the exclusive placement and another is explicitly excluded. Because this broad relationship can describe a non-environment scope too, it remains a confirmation candidate rather than becoming active automatically.
 
 ## Codex
 
