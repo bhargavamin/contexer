@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.48.1](https://github.com/bhargavamin/contexer/compare/v0.48.0...v0.48.1) (2026-09-19)
+
+
+### Bug Fixes
+
+* floor the relevance fixture and label directory anchor candidates ([#308](https://github.com/bhargavamin/contexer/issues/308)) ([7289a7e](https://github.com/bhargavamin/contexer/commit/7289a7e1b0f11aba31fbde47f808182eb0eb1632))
+* safely capture factual constraints and lifecycle revisions ([#304](https://github.com/bhargavamin/contexer/issues/304)) ([7b0dbf5](https://github.com/bhargavamin/contexer/commit/7b0dbf567f3b72ae1bf13c44cfec41d4852445dd))
+
 ## [0.48.0](https://github.com/bhargavamin/contexer/compare/v0.47.0...v0.48.0) (2026-09-18)
 
 
