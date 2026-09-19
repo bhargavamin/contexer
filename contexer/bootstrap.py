@@ -121,6 +121,57 @@ def _text(path: Path, limit: int = MAX_FOCUSED_BYTES) -> str:
     return raw.decode("utf-8")
 
 
+def _nested_repo_root(path: Path) -> bool:
+    """Whether `path` is itself a checkout: a git worktree, submodule, or vendored clone.
+
+    `.claude` is deliberately walked (it holds real project config), and `.claude/worktrees/`
+    holds FULL REPO COPIES. Candidate identity digests the source path
+    (`c["candidate_id"] = _digest([source_file, source_heading, content])`), so the same
+    sentence in `CONTRIBUTING.md` and in `.claude/worktrees/<x>/CONTRIBUTING.md` yields two
+    different keys, the `old` lookup misses, and bootstrap stores the convention once per copy
+    present at scan time.
+
+    Checking for `.git` rather than naming `worktrees` covers linked worktrees, submodules and
+    vendored clones in one rule, and matches how the store already canonicalizes linked
+    worktrees onto the main worktree's slug. `.git` is a DIRECTORY in an ordinary clone and a
+    FILE in a linked worktree or submodule, so existence is the right test, not is_dir.
+    """
+    try:
+        return (path / ".git").exists()
+    except OSError:
+        return False
+
+
+def _citation_under_nested_checkout(root: Path, path: Path) -> bool:
+    """Whether an EXISTING citation's file lies inside a directory `_paths` would now refuse
+    to descend into - a linked worktree, submodule, or vendored clone added under `_paths`'
+    `_nested_repo_root` exclusion.
+
+    `_refresh_entries` re-validates a citation it cannot find in the fresh scan's `files` by
+    reading the source directly off disk (the `else` branch below `elif file in
+    scan["files"]`). That fallback exists for a legitimate reason - a file outside the
+    budgeted walk that a focused re-scan still wants to check - but it does not distinguish
+    "outside the walk's budget" from "mechanically excluded because it is a nested checkout".
+    An entry captured BEFORE that exclusion existed, citing an unchanged file under
+    `.claude/worktrees/...`, would otherwise pass this fallback as "current" forever: the
+    scan says nothing about the path, and the file on disk has not changed.
+
+    Only ancestor DIRECTORIES are checked, not `path` itself - `_nested_repo_root` asks
+    "is this directory itself a checkout", and the file being cited is never a directory.
+    """
+    try:
+        rel_parts = path.relative_to(root).parts
+    except ValueError:
+        return False  # outside root entirely; the authorized/external_paths check owns this
+    current = root
+    for part in rel_parts[:-1]:
+        current = current / part
+        if _nested_repo_root(current):
+            return True
+    return False
+
+
+
 def _paths(root: Path, *, external: bool = False):
     if root.is_file():
         if root.suffix.lower() == ".md":
@@ -133,7 +184,8 @@ def _paths(root: Path, *, external: bool = False):
             return
         dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS
                          and (not d.startswith(".") or d in {".github", ".claude", ".cursor"})
-                         and not (Path(parent) / d).is_symlink())
+                         and not (Path(parent) / d).is_symlink()
+                         and not _nested_repo_root(Path(parent) / d))
         # Documentation/config first in each directory; never let lockfiles consume budget.
         for name in sorted(files, key=lambda n: (Path(n).suffix != ".md", n)):
             path = Path(parent) / name
@@ -294,7 +346,17 @@ def _source_paths(paths: list[str]) -> list[str]:
 def snapshot(repo_path: str, external_paths: list[str], source_paths: list[str] | None = None) -> dict:
     root = Path(os.path.abspath(repo_path))
     files, texts, omitted, total = {}, {}, [], 0
-    focus = _source_paths(source_paths or [])
+    requested_focus = _source_paths(source_paths or [])
+    # Focus changes the byte budget, never the trust boundary. Feeding these paths directly
+    # used to bypass `_paths` entirely, which let an agent explicitly re-add a file under a
+    # nested worktree and even revive a legacy duplicate that refresh had just withheld.
+    focus = []
+    for relative in requested_focus:
+        path = root / relative
+        if _citation_under_nested_checkout(root, path):
+            omitted.append(relative + ": nested checkout excluded")
+        else:
+            focus.append(relative)
     roots = [(root, False)] + [(Path(p), True) for p in external_paths]
     inventories = [((root / p for p in focus), False)]
     inventories += [(_paths(p, external=external), external) for p, external in roots]
@@ -1234,6 +1296,11 @@ def _refresh_entries(entries: list[dict], scan: dict, *, unavailable: bool = Fal
                     state = "unavailable"
                 elif file in scan["files"]:
                     digest, state = scan["files"][file]["sha256"], "checked"
+                elif _citation_under_nested_checkout(root, path):
+                    # Revoked, not merely unchecked: a live re-scan would never cite this
+                    # path again, so an unchanged file on disk must not keep the citation
+                    # "current" by falling through to the direct-read fallback below.
+                    state = "stale"
                 else:
                     try:
                         if any(p.is_symlink() for p in (path, *path.parents)):
