@@ -2421,15 +2421,24 @@ def _guard_list() -> None:
         print(f"      pattern={detail!r}  paths={paths}")
 
 
+def _anchor_candidate_line(path: str) -> str:
+    """One candidate anchor as the developer sees it, in both the --list preview and the
+    interactive card. A directory prefix is spelled out rather than left as a bare path:
+    the trailing slash is the only thing separating "this one file" from "every file below
+    here", and _candidate_paths_for_entry collapses three or more siblings onto their parent,
+    so a decision that named three files can arrive here proposing a whole package."""
+    return f"{path}   (directory - governs every file below)" if path.endswith("/") else path
+
+
 def _print_candidate_card(index: int, total: int, item: dict) -> None:
     """Render one anchor-backfill review card: the decision, its candidate
-    paths, and the Y/E/S/Q prompt legend."""
+    paths (see _anchor_candidate_line), and the Y/E/S/Q prompt legend."""
     print("─" * 60)
     print(f"Decision {index} of {total}\n")
     print(f"[{item['decision_id'][:8]}] {item['title']}")
     print("Candidate anchors:")
     for path in item["candidates"]:
-        print(f"  {path}")
+        print(f"  {_anchor_candidate_line(path)}")
     print()
     print("[Y] anchor all shown  [E] edit list (comma-separated)  [S] skip  [Q] quit")
 
@@ -2492,7 +2501,7 @@ def _guard_anchors(rest: list) -> None:
         for decision in candidates:
             print(f"  [{decision['decision_id'][:8]}] {decision['title']}")
             for path in decision["candidates"]:
-                print(f"      {path}")
+                print(f"      {_anchor_candidate_line(path)}")
         return
 
     if not candidates:

@@ -113,6 +113,24 @@ def test_invalid_case_ids_are_rejected(fixture_data, invalid_id):
         baseline.validate_fixture(invalid)
 
 
+def test_assertionless_case_is_rejected(fixture_data):
+    invalid = copy.deepcopy(fixture_data)
+    invalid["cases"][0]["desired_assertions"] = []
+    with pytest.raises(baseline.FixtureError, match="desired_assertions must be non-empty"):
+        baseline.validate_fixture(invalid)
+
+
+def test_a_fixture_stripped_of_assertions_cannot_report_a_clean_run(fixture_data):
+    """The strip mutation: without the floor, blanking every assertion produces a report
+    CLEANER than the real one (0 unexpected failures, 0 known gaps, strict exit 0), so the
+    gate's best-looking output would be indistinguishable from measuring nothing."""
+    hollowed = copy.deepcopy(fixture_data)
+    for case in hollowed["cases"]:
+        case["desired_assertions"] = []
+    with pytest.raises(baseline.FixtureError, match="desired_assertions must be non-empty"):
+        baseline.validate_fixture(hollowed)
+
+
 def test_strict_mode_fails_while_known_gaps_remain(report):
     assert baseline.exit_code(report) == 0
     assert baseline.exit_code(report, strict=True) == 1
