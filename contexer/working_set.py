@@ -17,6 +17,7 @@ this owner only inside the functions that need it, avoiding an import-order cycl
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import hashlib
 import math
 import json
@@ -149,14 +150,44 @@ def records(repo_path: str, session_id: str) -> list[dict]:
     return read(repo_path, session_id)["records"]
 
 
-def has_credit(rows: list[dict], scope: str, decision_id: str,
-               fingerprint: str | None) -> bool:
+CreditLookup = frozenset[tuple[str, str, str]]
+CreditCheck = Callable[[object, object, object], bool]
+
+
+def credit_lookup(rows: list[dict]) -> CreditLookup:
+    """Derive exact suppression identities from ``read``'s validated snapshot."""
+    credited = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        scope, decision_id, fingerprint = (
+            row.get("scope"), row.get("id"), row.get("fingerprint"))
+        if (isinstance(scope, str) and isinstance(decision_id, str)
+                and isinstance(fingerprint, str) and fingerprint):
+            credited.add((scope, decision_id, fingerprint))
+    return frozenset(credited)
+
+
+def has_credit(lookup: CreditLookup, scope: object, decision_id: object,
+               fingerprint: object) -> bool:
     """Whether the exact scoped guidance identity was delivered in this context window."""
-    return bool(fingerprint) and any(
-        row["scope"] == scope and row["id"] == decision_id
-        and row.get("fingerprint") == fingerprint
-        for row in rows
-    )
+    if (not isinstance(scope, str) or not isinstance(decision_id, str)
+            or not isinstance(fingerprint, str) or not fingerprint):
+        return False
+    return (scope, decision_id, fingerprint) in lookup
+
+
+def credit_checker(rows: list[dict]) -> CreditCheck:
+    """Return a snapshot-local membership probe that builds its lookup at most once."""
+    lookup: CreditLookup | None = None
+
+    def credited(scope: object, decision_id: object, fingerprint: object) -> bool:
+        nonlocal lookup
+        if lookup is None:
+            lookup = credit_lookup(rows)
+        return has_credit(lookup, scope, decision_id, fingerprint)
+
+    return credited
 
 
 DELIVERY_VERSION = 2

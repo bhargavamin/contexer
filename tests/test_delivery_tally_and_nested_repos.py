@@ -163,7 +163,8 @@ class TestDurableDeliveryTally:
             pass
 
         assert working_set.has_credit(
-            working_set.records(tmp_repo, "s1"), "personal", "dec-a", "fp1")
+            working_set.credit_lookup(working_set.records(tmp_repo, "s1")),
+            "personal", "dec-a", "fp1")
 
     def test_tally_survives_the_session_sweep(self, tmp_repo):
         """SESSION (7d) would erase a two-week measurement the moment the developer spends a
@@ -409,7 +410,8 @@ class TestDroppedDeliveriesAreNotSilent:
 
         assert working_set.record_deliveries(tmp_repo, "s1", delivered) is True
         assert working_set.has_credit(
-            working_set.records(tmp_repo, "s1"), "personal", "first", "fp")
+            working_set.credit_lookup(working_set.records(tmp_repo, "s1")),
+            "personal", "first", "fp")
         assert working_set.read_delivery_tally(tmp_repo) == {}
         assert working_set.delivery_gap_count(tmp_repo) == 1
 

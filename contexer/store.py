@@ -1,4 +1,5 @@
 import contextlib
+from collections.abc import Callable
 import hashlib
 import json
 import os
@@ -6225,8 +6226,14 @@ def _index_file_lookup(repo_path: str, index: dict, file_artifacts: list[str]) -
     return hits
 
 
-def _prompt_file_hits(repo_path: str, prompt: str, ws: set[str] | list[dict],
-                       index: dict | None) -> tuple[list[str | dict], list[tuple[str, str]], list[str]]:
+def _prompt_file_hits(
+    repo_path: str,
+    prompt: str,
+    ws: set[str] | list[dict],
+    index: dict | None,
+    *,
+    credit_check: Callable[[object, object, object], bool] | None = None,
+) -> tuple[list[str | dict], list[tuple[str, str]], list[str]]:
     """Path/module-shaped files named IN THE PROMPT itself (issue #187 - "fix the pairing bug
     in contexer/guard_engine.py"), routed deterministically through the same anchor/content-
     reference matching the commit-time guard uses, no voluntary `get_context(files=...)` call
@@ -6262,9 +6269,12 @@ def _prompt_file_hits(repo_path: str, prompt: str, ws: set[str] | list[dict],
     `decisions_for_files`' own per-decision reason resolution). Fail-soft throughout: any
     exception here (corrupt store, unreadable index, ...) degrades to ([], [], []) so the rest
     of the ladder runs exactly as if no file signal existed - never raises into the per-prompt
-    hook path."""
+    hook path. The production prompt route supplies one lookup derived from its validated
+    working-set snapshot; legacy direct callers may still pass ID sets or record lists."""
     try:
         from contexer import guard_engine, working_set
+        if credit_check is None and not isinstance(ws, set):
+            credit_check = working_set.credit_checker(ws)
         # _guard_content_artifacts doesn't dedupe (a path can satisfy both the raw path regex
         # and the trailing dotted-component regex, e.g. "contexer/guard_engine.py" also
         # yields "guard_engine.py") - dedupe here, order-preserving, so canon/canon_by_base
@@ -6292,11 +6302,14 @@ def _prompt_file_hits(repo_path: str, prompt: str, ws: set[str] | list[dict],
         seen: set[str] = set()
         for hit in raw_hits:
             did = hit.get("decision_id")
-            suppressed = (did in ws if isinstance(ws, set) else
-                          working_set.has_credit(
-                              ws, hit.get("scope", "personal"), did,
-                              hit.get("guidance_fingerprint")))
-            if not did or suppressed or did in seen:
+            if not isinstance(did, str) or not did or did in seen:
+                continue
+            suppressed = (
+                credit_check(hit.get("scope", "personal"), did,
+                             hit.get("guidance_fingerprint"))
+                if credit_check is not None else did in ws
+            )
+            if suppressed:
                 continue
             seen.add(did)
             if hit.get("reason") == "source_files match":
@@ -6359,6 +6372,7 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
     # stay double-weighted. The legacy `keywords`/`ordered_kws` are kept for gating and the
     # overview/global fallbacks below - only this vector changes.
     ws = working_set.records(repo_path, session_id)
+    has_credit = working_set.credit_checker(ws)
 
     # File route (#187): a prompt naming a path/module-shaped file ("fix the pairing bug in
     # contexer/guard_engine.py") consults the anchor/content-reference lookup deterministically
@@ -6370,7 +6384,7 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
     # lane below - a wrong pointer costs one line, a wrong STRONG injection plants false
     # context as if human-approved.
     anchor_requests, mention_hits, file_artifacts_prompt = _prompt_file_hits(
-        repo_path, prompt, ws, index)
+        repo_path, prompt, ws, index, credit_check=has_credit)
 
     # NOTE (fix round 1): mention-tier ids are deliberately NOT excluded from BM25's own
     # candidate pool here. The file route's tiering governs what the FILE SIGNAL itself
@@ -6390,8 +6404,8 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
     # an incidental rare word in another decision cannot borrow that title's relevance.
     ranked = retrieval.prompt_rank(query_terms, index)
     ranked = [r for r in ranked
-              if not working_set.has_credit(
-                  ws, "personal", r[0],
+              if not has_credit(
+                  "personal", r[0],
                   (index.get("docs", {}).get(r[0]) or {}).get("guidance_fingerprint"))]
 
     strong: list[str | dict] = list(anchor_requests)
@@ -6475,7 +6489,7 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
     if prompt_topics:
         counts: dict[str, int] = {}
         for did, doc in index.get("docs", {}).items():
-            if working_set.has_credit(ws, "personal", did, doc.get("guidance_fingerprint")):
+            if has_credit("personal", did, doc.get("guidance_fingerprint")):
                 continue
             for t in set(doc.get("topics", [])) & prompt_topics:
                 counts[t] = counts.get(t, 0) + 1

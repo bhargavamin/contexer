@@ -60,6 +60,15 @@ def _prompt(repo: str, sid: str = "same-session") -> str:
         repo, "Why use checkout reservation leases for inventory?", sid)
 
 
+def _linear_credit_reference(rows, scope, decision_id, fingerprint):
+    """Pre-Contract-05 predicate, retained only as the differential test oracle."""
+    return bool(fingerprint) and any(
+        row["scope"] == scope and row["id"] == decision_id
+        and row.get("fingerprint") == fingerprint
+        for row in rows
+    )
+
+
 class TestGuidanceFingerprint:
     def test_semantic_identity_table(self, tmp_repo):
         did = _approved(
@@ -425,6 +434,171 @@ class TestVersionAwarePromptDelivery:
 
 
 class TestWorkingSetV2:
+    @pytest.mark.parametrize("size", [0, 3, store.MAX_ENTRIES])
+    def test_credit_lookup_matches_linear_reference_on_validated_snapshots(
+        self, tmp_repo, size
+    ):
+        sid = f"lookup-differential-{size}"
+        rows = [{
+            "scope": "global" if i % 2 else "personal",
+            "id": f"decision-{i:04d}",
+            "fingerprint": f"guidance-v1:{i:064x}",
+        } for i in range(size)]
+        if rows:
+            assert working_set.write(tmp_repo, sid, rows)
+        validated = working_set.records(tmp_repo, sid)
+        lookup = working_set.credit_lookup(validated)
+        probes = [
+            ("personal", "never-seen", "guidance-v1:missing"),
+            ("global", "never-seen", "guidance-v1:missing"),
+        ]
+        for index in {0, size // 2, size - 1}:
+            if 0 <= index < size:
+                row = rows[index]
+                probes.extend([
+                    (row["scope"], row["id"], row["fingerprint"]),
+                    (row["scope"], row["id"], row["fingerprint"] + "-changed"),
+                    ("global" if row["scope"] == "personal" else "personal",
+                     row["id"], row["fingerprint"]),
+                ])
+        for probe in probes:
+            assert working_set.has_credit(lookup, *probe) == \
+                _linear_credit_reference(validated, *probe)
+
+    def test_lookup_uses_reader_dedup_and_newest_null_removes_old_credit(self, tmp_repo):
+        sid = "lookup-newest-null"
+        ledger = working_set.path(tmp_repo, sid)
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text(json.dumps({
+            "v": working_set.VERSION,
+            "injected": ["shared"],
+            "records": [
+                {"scope": "personal", "id": "shared", "fingerprint": "old"},
+                {"scope": "global", "id": "shared", "fingerprint": "global"},
+                {"scope": "personal", "id": "shared", "fingerprint": None},
+                {"scope": [], "id": "bad", "fingerprint": "bad"},
+                {"scope": "personal", "id": "x" * (working_set.FIELD_MAX + 1),
+                 "fingerprint": "bad"},
+            ],
+        }), encoding="utf-8")
+
+        validated = working_set.records(tmp_repo, sid)
+        lookup = working_set.credit_lookup(validated)
+        assert validated == [
+            {"scope": "global", "id": "shared", "fingerprint": "global"},
+            {"scope": "personal", "id": "shared", "fingerprint": None},
+        ]
+        assert working_set.has_credit(lookup, "global", "shared", "global")
+        assert not working_set.has_credit(lookup, "personal", "shared", "old")
+        assert not working_set.has_credit(lookup, "personal", "shared", None)
+
+    def test_lookup_ignores_legacy_and_malformed_rows_without_raising(self):
+        rows = [
+            {"scope": "personal", "id": "missing-fingerprint"},
+            {"scope": "personal", "id": "null-fingerprint", "fingerprint": None},
+            {"scope": "personal", "id": "empty-fingerprint", "fingerprint": ""},
+            {"scope": "personal", "id": "unhashable-fingerprint", "fingerprint": []},
+            {"scope": [], "id": "unhashable-scope", "fingerprint": "fingerprint"},
+            {"scope": "personal", "id": [], "fingerprint": "fingerprint"},
+            {"scope": "personal", "id": "credited", "fingerprint": "fingerprint"},
+        ]
+
+        assert working_set.credit_lookup(rows) == frozenset({
+            ("personal", "credited", "fingerprint"),
+        })
+
+    @pytest.mark.parametrize(("scope", "decision_id", "fingerprint"), [
+        ([], "decision", "fingerprint"),
+        ({}, "decision", "fingerprint"),
+        ("personal", [], "fingerprint"),
+        ("personal", {}, "fingerprint"),
+        ("personal", "decision", []),
+        ("personal", "decision", {}),
+        ("personal", "decision", ""),
+        ("personal", "decision", None),
+    ])
+    def test_lookup_malformed_candidate_fields_fail_open_to_delivery(
+        self, scope, decision_id, fingerprint
+    ):
+        lookup = frozenset({("personal", "decision", "fingerprint")})
+        assert not working_set.has_credit(lookup, scope, decision_id, fingerprint)
+
+    def test_prompt_builds_one_lookup_and_reuses_it_across_all_routes(
+        self, tmp_repo, monkeypatch
+    ):
+        _approved(
+            tmp_repo,
+            "Database policy for contexer/ledger.py requires durable checkout storage",
+            title="Database ledger policy",
+            source_files=["contexer/ledger.py"],
+        )
+        _approved_direct(
+            tmp_repo,
+            "Database policy requires durable checkout transaction boundaries",
+            title="Database transaction policy",
+        )
+        _approved_direct(
+            tmp_repo,
+            "Database policy requires durable checkout recovery markers",
+            title="Database recovery policy",
+        )
+        data = store.load(tmp_repo)
+        store.save(tmp_repo, data)
+        index = store._read_retrieval_index(tmp_repo)
+        sid = "one-lookup-all-routes"
+        rows = [{
+            "scope": "personal", "id": decision_id,
+            "fingerprint": doc["guidance_fingerprint"],
+        } for decision_id, doc in index["docs"].items()]
+        assert working_set.write(tmp_repo, sid, rows)
+
+        class CountingRows(list):
+            iterations = 0
+
+            def __iter__(self):
+                self.iterations += 1
+                return super().__iter__()
+
+        snapshot = CountingRows(working_set.records(tmp_repo, sid))
+        original_lookup = working_set.credit_lookup
+        original_probe = working_set.has_credit
+        counts = {"builds": 0, "probes": 0}
+
+        def build_once(current_rows):
+            counts["builds"] += 1
+            return original_lookup(current_rows)
+
+        def count_probe(*args):
+            counts["probes"] += 1
+            return original_probe(*args)
+
+        monkeypatch.setattr(working_set, "records", lambda *_args: snapshot)
+        monkeypatch.setattr(working_set, "credit_lookup", build_once)
+        monkeypatch.setattr(working_set, "has_credit", count_probe)
+
+        result = store.get_context_for_prompt(
+            tmp_repo, "what database policy applies in contexer/ledger.py?", sid)
+
+        assert result == ""
+        assert counts["builds"] == 1
+        assert snapshot.iterations == 1
+        assert counts["probes"] >= 7  # file hit + ranked candidates + topic candidates
+
+    def test_empty_session_retrieves_repeatedly_without_ledger_access(
+        self, tmp_repo, monkeypatch
+    ):
+        _approved(tmp_repo, "Use checkout reservation leases for inventory consistency")
+        monkeypatch.setattr(
+            working_set, "path",
+            lambda *_args: (_ for _ in ()).throw(AssertionError("ledger path accessed")),
+        )
+
+        first = _prompt(tmp_repo, "")
+        second = _prompt(tmp_repo, "")
+
+        assert first == second
+        assert "checkout reservation leases" in first.lower()
+
     def test_legacy_and_future_rows_are_hints_without_suppression_credit(self, tmp_repo):
         did = _approved(tmp_repo, "Use checkout reservation leases for inventory")
         for sid, payload in [
@@ -647,7 +821,7 @@ class TestCompactionDeliveryBoundary:
             payload = store.post_compact_payload(tmp_repo, sid)
             assert "Global checkout reservation guidance" in payload["context"]
             assert working_set.has_credit(
-                working_set.records(tmp_repo, sid), "global", gid,
+                working_set.credit_lookup(working_set.records(tmp_repo, sid)), "global", gid,
                 receipts[0]["fingerprint"],
             )
 
