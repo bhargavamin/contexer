@@ -225,7 +225,7 @@ def install(home: Path) -> list[str]:
                'print(claude.capture_constraint(sys.argv[1], sys.stdin.read()))" "$REPO"')
     cap_rat = ('REPO="$PWD" && '
                f'"{python}" -P -c "from contexer.adapters import claude; import sys; '
-               'print(claude.rationale(sys.argv[1], sys.stdin.read()))" "$REPO"')
+               'print(claude.rationale(sys.argv[1], sys.stdin.read(), \\"codex\\"))" "$REPO"')
     # Team delta poll (T2): Codex shares Claude's UserPromptSubmit output schema, so
     # claude.team_poll is reused — non-blocking, fail-soft, injects newly-approved team
     # decisions on the next prompt. The third arg tags this consumer "codex" so a Codex and a

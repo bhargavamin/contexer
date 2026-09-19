@@ -819,7 +819,77 @@ def test_evaluate_policy_delegates_to_the_shared_facade(tmp_repo, monkeypatch):
     server.evaluate_policy("/repo/x", intent="ship it", operation="deploy",
                            files=["a.py"], artifact_kind="deployment", artifact="plan")
     assert seen == {"repo_path": "/repo/x", "intent": "ship it", "operation": "deploy",
-                    "files": ["a.py"], "artifact_kind": "deployment", "artifact": "plan"}
+                    "files": ["a.py"], "artifact_kind": "deployment", "artifact": "plan",
+                    "artifact_path": "", "guidance_refs": []}
+
+
+def test_get_context_adds_a_receipt_only_when_collection_is_enabled(tmp_repo):
+    store.update_decision(
+        tmp_repo, "Use Postgres for durable queue storage", "s1", "architecture",
+        created_by="human")
+    disabled = server.get_context(tmp_repo, query="Postgres")
+    assert "decision-impact receipt" not in disabled
+
+    config_path = store.store_dir() / "config.toml"
+    config_path.write_text("[diagnostics]\ndecision_impact = true\n")
+    enabled = server.get_context(tmp_repo, query="Postgres")
+    assert "[Contexer decision-impact receipt:" in enabled
+    receipt_id = enabled.rsplit("receipt: ", 1)[1].split("]", 1)[0]
+    record = server.decision_impact.report(
+        tmp_repo, receipt_id=receipt_id)["records"][0]
+    assert record["kind"] == "guidance"
+    assert record["decisions"][0]["revision_id"] != "legacy"
+
+
+def test_explicit_lookup_leaves_unknown_host_session_empty(tmp_repo, monkeypatch):
+    monkeypatch.setattr(server, "_HOST_SESSION_ID", "")
+    store.update_decision(
+        tmp_repo, "Use Postgres for durable queue storage", "s1", "architecture",
+        created_by="human")
+    (store.store_dir() / "config.toml").write_text(
+        "[diagnostics]\ndecision_impact = true\n")
+
+    rendered = server.get_context(tmp_repo, query="Postgres")
+    receipt_id = rendered.rsplit("receipt: ", 1)[1].split("]", 1)[0]
+    record = server.decision_impact.report(
+        tmp_repo, receipt_id=receipt_id)["records"][0]
+
+    assert record["session"] == ""
+    assert record["process"].startswith("sha256:")
+
+
+def test_guidance_receipt_does_not_label_untrusted_approval_as_trusted(tmp_repo):
+    entry = store._new_decision_entry(
+        "Use frobnicator for transport", "s1", "architecture",
+        created_by="ai", status="approved", title="Use frobnicator")
+    data = store.load(tmp_repo)
+    data["entries"].append(entry)
+    store.save(tmp_repo, data)
+    (store.store_dir() / "config.toml").write_text(
+        "[diagnostics]\ndecision_impact = true\n")
+
+    rendered = server.get_context(tmp_repo, query="frobnicator")
+    receipt_id = rendered.rsplit("receipt: ", 1)[1].split("]", 1)[0]
+    record = server.decision_impact.report(
+        tmp_repo, receipt_id=receipt_id)["records"][0]
+
+    assert record["decisions"][0]["authority"] == "approved_untrusted"
+
+
+def test_get_decision_impact_is_a_read_only_projection_not_an_evaluator(tmp_repo, monkeypatch):
+    config_path = store.store_dir() / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("[diagnostics]\ndecision_impact = true\n")
+    receipt_id = server.decision_impact.append(
+        tmp_repo, server.decision_impact.guidance_envelope(
+            tmp_repo, tmp_repo, route="explicit_lookup", rows=[]))
+    monkeypatch.setattr(
+        server.policy_api, "evaluate_operation",
+        lambda *a, **k: pytest.fail("a history read ran an evaluation"))
+
+    out = server.get_decision_impact(tmp_repo, receipt_id=receipt_id)
+    assert receipt_id in out
+    assert "not proof that Contexer improved" in out
 
 
 def test_evaluate_policy_docstring_is_self_approval_proofed():

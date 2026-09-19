@@ -2211,6 +2211,49 @@ class TestReviewOneViewAccuracy:
         assert "shared repo pointer" not in capsys.readouterr().out
 
 
+class TestDecisionImpactStatus:
+    def _record(self, tmp_repo):
+        from contexer import decision_impact, store
+        config_path = store.store_dir() / "config.toml"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text("[diagnostics]\ndecision_impact = true\n")
+        return decision_impact.append(
+            tmp_repo, decision_impact.guidance_envelope(
+                tmp_repo, tmp_repo, route="explicit_lookup", rows=[]))
+
+    def test_impact_report_bypasses_the_status_network_refresh(
+            self, tmp_repo, monkeypatch, capsys):
+        receipt_id = self._record(tmp_repo)
+        monkeypatch.setattr(cli, "_cli_repo", lambda: tmp_repo)
+        monkeypatch.setattr(
+            updates, "refresh", lambda **_kw: pytest.fail("impact report refreshed releases"))
+
+        status(["--impact", "--receipt-id", receipt_id])
+
+        out = capsys.readouterr().out
+        assert receipt_id in out
+        assert "not proof that Contexer improved" in out
+
+    def test_impact_json_and_confirmed_repository_only_clear(
+            self, tmp_repo, monkeypatch, capsys):
+        from contexer import decision_impact
+        receipt_id = self._record(tmp_repo)
+        monkeypatch.setattr(cli, "_cli_repo", lambda: tmp_repo)
+
+        status(["--impact", "--json", "--receipt-id", receipt_id])
+        assert json.loads(capsys.readouterr().out)["records"][0]["receipt_id"] == receipt_id
+
+        with pytest.raises(SystemExit):
+            status(["--impact", "--clear"])
+        assert decision_impact.report(tmp_repo, receipt_id=receipt_id)["status"] == "ok"
+        capsys.readouterr()
+
+        status(["--impact", "--clear", "--confirm"])
+        assert "cleared" in capsys.readouterr().out
+        assert decision_impact.report(
+            tmp_repo, receipt_id=receipt_id)["status"] == "not_retained_or_unknown"
+
+
 class TestPolicyEvaluateCommand:
     """`contexer policy evaluate` - a REPORTER over the policy plane.
 
@@ -2263,6 +2306,19 @@ class TestPolicyEvaluateCommand:
         _run_main("policy", "evaluate", "--operation", "commit",
                   "--diff-file", "-")
         assert "verdict: block" in capsys.readouterr().out
+
+    def test_artifact_path_invokes_the_explicit_server_read_mode(
+            self, tmp_repo, monkeypatch, capsys):
+        from tests.test_policy_api import _grant_file_reads
+        self._armed(tmp_repo, monkeypatch, pattern="TODO", paths="app.py")
+        _grant_file_reads(tmp_repo)
+        (Path(tmp_repo) / "app.py").write_text("ready\n")
+
+        _run_main("policy", "evaluate", "--operation", "commit",
+                  "--artifact-path", "app.py", "--guidance-ref", "bad-ref")
+        out = capsys.readouterr().out
+        assert "verdict: allow" in out
+        assert "artifact: app.py (authorized_server_read" in out
 
     def test_stdin_on_a_terminal_is_refused_rather_than_blocking(self, tmp_repo, monkeypatch,
                                                                  capsys):

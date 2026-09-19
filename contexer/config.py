@@ -5,10 +5,13 @@ store paths (a later ticket does). With no config file (or absent keys) the
 profile is pure-local: mode 'local', endpoint/token None, so existing behavior
 is completely unchanged.
 """
+import json
 import os
+import re
 import tempfile
 import tomllib
 from dataclasses import dataclass
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Literal
 
@@ -23,6 +26,9 @@ CONFIG_PATH = Path.home() / ".contexer" / "config.toml"
 # users' config.toml files. localhost is the explicit developer opt-in.
 DEFAULT_ENDPOINT_PROD = "https://mcp.contexer.ai/mcp"
 DEFAULT_ENDPOINT_LOCAL = "http://localhost:8080/mcp"
+MAX_ARTIFACT_READ_ROOTS = 16
+MAX_ARTIFACT_READ_ROOT_CHARS = 300
+MAX_LOCAL_POLICY_CONFIG_BYTES = 256 * 1024
 
 
 def default_endpoint() -> str:
@@ -114,6 +120,10 @@ def write_team_profile(endpoint: str, path: Path | None = None) -> None:
         lines.append("skip_confirm = true")
     if not existing.redact_secrets:  # preserve the redaction opt-out across `contexer login`
         lines.append("redact_secrets = false")
+    # Preserve parsed values, including invalid settings, independent of TOML spelling.
+    # Login must never enable, broaden, or erase local diagnostics/file-read consent.
+    lines.extend(_preserved_table_lines(config_path, "diagnostics"))
+    lines.extend(_preserved_table_lines(config_path, "policy"))
     lines.extend(_preserved_ui_lines(config_path))  # `contexer login` must not reset [ui]
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -133,6 +143,115 @@ class UiSettings:
     port: int = 31415
     autostart: bool = False
     idle_timeout_minutes: int = 60
+
+
+@dataclass(frozen=True)
+class DiagnosticsSettings:
+    """Local-only optional diagnostics. Collection is off unless explicitly enabled."""
+
+    decision_impact: bool = False
+
+
+@dataclass(frozen=True)
+class PolicySettings:
+    """Developer-owned filesystem grants for explicit policy evaluation."""
+
+    artifact_read_roots: tuple[str, ...] = ()
+
+
+def _config_data(config_path: Path) -> dict:
+    if not config_path.exists():
+        return {}
+    try:
+        with config_path.open("rb") as source:
+            raw = source.read(MAX_LOCAL_POLICY_CONFIG_BYTES + 1)
+        if len(raw) > MAX_LOCAL_POLICY_CONFIG_BYTES:
+            raise ConfigError(
+                f"failed to parse {config_path}: file exceeds "
+                f"{MAX_LOCAL_POLICY_CONFIG_BYTES} bytes")
+        data = tomllib.loads(raw.decode("utf-8"))
+    except (tomllib.TOMLDecodeError, OSError, UnicodeDecodeError) as exc:
+        raise ConfigError(f"failed to parse {config_path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError(f"invalid config in {config_path}: expected a table")
+    return data
+
+
+def load_diagnostics_settings(path: Path | None = None) -> DiagnosticsSettings:
+    """Load ``[diagnostics]``. A malformed value fails collection closed."""
+    config_path = CONFIG_PATH if path is None else path
+    table = _config_data(config_path).get("diagnostics", {})
+    if not isinstance(table, dict):
+        raise ConfigError(
+            f"invalid [diagnostics] in {config_path}: expected a table, "
+            f"got {type(table).__name__}")
+    unknown = sorted(set(table) - {"decision_impact"})
+    if unknown:
+        raise ConfigError(f"unknown [diagnostics] key in {config_path}: {unknown[0]}")
+    return DiagnosticsSettings(decision_impact=_bool_value(
+        table.get("decision_impact", False), "diagnostics.decision_impact", config_path))
+
+
+def decision_impact_enabled(path: Path | None = None) -> bool:
+    """Fail closed: malformed or unavailable consent never enables collection."""
+    try:
+        return load_diagnostics_settings(path).decision_impact
+    except Exception:
+        return False
+
+
+def _validated_artifact_root(value: object, config_path: Path) -> str:
+    if not isinstance(value, str) or not value or len(value) > MAX_ARTIFACT_READ_ROOT_CHARS:
+        raise ConfigError(
+            f"invalid policy.artifact_read_roots in {config_path}: each root must be a "
+            f"non-empty string of at most {MAX_ARTIFACT_READ_ROOT_CHARS} characters")
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        raise ConfigError(
+            f"invalid policy.artifact_read_roots in {config_path}: roots must be absolute")
+    try:
+        canonical = candidate.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ConfigError(
+            f"invalid policy.artifact_read_roots in {config_path}: root is unavailable") from exc
+    if str(canonical) != value or not canonical.is_dir():
+        raise ConfigError(
+            f"invalid policy.artifact_read_roots in {config_path}: roots must be canonical "
+            "physical directories")
+    home = Path.home().resolve()
+    if canonical == Path(canonical.anchor) or canonical == home or canonical in home.parents:
+        raise ConfigError(
+            f"invalid policy.artifact_read_roots in {config_path}: broad home/root grants "
+            "are refused")
+    protected = tuple(home / name for name in (
+        ".claude", ".cursor", ".codex", ".gemini", ".contexer", ".config"))
+    if any(canonical == root or root in canonical.parents for root in protected):
+        raise ConfigError(
+            f"invalid policy.artifact_read_roots in {config_path}: protected config "
+            "directories cannot be granted")
+    return str(canonical)
+
+
+def load_policy_settings(path: Path | None = None) -> PolicySettings:
+    """Load and strictly validate the independent ``[policy]`` read grants."""
+    config_path = CONFIG_PATH if path is None else path
+    table = _config_data(config_path).get("policy", {})
+    if not isinstance(table, dict):
+        raise ConfigError(
+            f"invalid [policy] in {config_path}: expected a table, got {type(table).__name__}")
+    unknown = sorted(set(table) - {"artifact_read_roots"})
+    if unknown:
+        raise ConfigError(f"unknown [policy] key in {config_path}: {unknown[0]}")
+    raw = table.get("artifact_read_roots", [])
+    if not isinstance(raw, list) or len(raw) > MAX_ARTIFACT_READ_ROOTS:
+        raise ConfigError(
+            f"invalid policy.artifact_read_roots in {config_path}: expected at most "
+            f"{MAX_ARTIFACT_READ_ROOTS} roots")
+    roots = tuple(_validated_artifact_root(value, config_path) for value in raw)
+    if len(set(roots)) != len(roots):
+        raise ConfigError(
+            f"invalid policy.artifact_read_roots in {config_path}: duplicate roots")
+    return PolicySettings(artifact_read_roots=roots)
 
 
 # The only keys write_settings() accepts. `mode`, `endpoint` and `token` are deliberately
@@ -223,6 +342,8 @@ def write_settings(path: Path | None = None, /, **allowlisted: object) -> None:
         lines.append("skip_confirm = true")
     if not redact_secrets:
         lines.append("redact_secrets = false")
+    lines.extend(_preserved_table_lines(config_path, "diagnostics"))
+    lines.extend(_preserved_table_lines(config_path, "policy"))
     lines.extend(_ui_lines(merged))
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -239,27 +360,45 @@ def _preserved_ui_lines(config_path: Path) -> list[str]:
     one: `contexer login` used to complete the entire browser flow, save the tokens, and then
     die here on a hand-edited `port = "31500"` — leaving mode/endpoint unwritten and team sync
     off with nothing pointing at why. A table that will not validate is therefore copied
-    through VERBATIM rather than dropped or silently "corrected": login is not the place to
-    rewrite a value the user typed, and the loaders that actually read `[ui]` still reject it,
+    through with its parsed values intact rather than dropped or silently "corrected": login
+    is not the place to rewrite a value the user typed, and the loaders that read `[ui]` still reject it,
     where the error means something.
     """
     try:
         return _ui_lines(load_ui_settings(config_path))
     except ConfigError:
-        return _raw_ui_lines(config_path)
+        return _preserved_table_lines(config_path, "ui")
 
 
-def _raw_ui_lines(config_path: Path) -> list[str]:
-    """The file's `[ui]` header and everything after it, unparsed.
+def _toml_value(value: object) -> str:
+    """Lossless value serialization for tomllib's types, including invalid setting values."""
+    if isinstance(value, str):
+        # JSON allows literal DEL, but TOML requires it to be escaped.
+        return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    if isinstance(value, dict):
+        return "{ " + ", ".join(
+            f"{key if re.fullmatch(r'[A-Za-z0-9_-]+', key) else _toml_value(key)} = "
+            + _toml_value(item) for key, item in value.items()) + " }"
+    raise ConfigError(f"cannot preserve TOML value of type {type(value).__name__}")
 
-    TOML binds every key after a table header to that table, so the header to EOF IS the
-    table — and the file has already parsed as TOML (load_profile would have raised first),
-    so copying that tail through cannot produce something unreadable."""
-    lines = config_path.read_text(encoding="utf-8").splitlines()
-    for index, line in enumerate(lines):
-        if line.strip().startswith("[ui]"):
-            return ["", *lines[index:]]
-    return []
+
+def _preserved_table_lines(config_path: Path, table: str) -> list[str]:
+    """Preserve a parsed top-level value; append before any explicit table headers.
+
+    Spaced/quoted headers, dotted keys, inline tables, comments and multiline values all
+    have the same semantics after parsing. Serializing that value also preserves malformed
+    permissions verbatim in meaning, so a credential/UI save cannot accidentally enable them.
+    """
+    data = _config_data(config_path)
+    return [f"{table} = {_toml_value(data[table])}"] if table in data else []
 
 
 def _ui_lines(ui: UiSettings) -> list[str]:
