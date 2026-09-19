@@ -22,13 +22,15 @@ contexer install --target cursor
 This registers Contexer's MCP server in `~/.cursor/mcp.json` and wires two Cursor hook events in `~/.cursor/hooks.json`:
 
 - `sessionStart`: injects your stored project rules and a usage nudge, and drops a managed always-apply rule at `<repo>/.cursor/rules/contexer.mdc`.
-- `beforeSubmitPrompt`: silently captures your task and any "always / never / don't / create a rule" directives.
+- `beforeSubmitPrompt`: silently captures your task, "always / never / don't / create a rule" directives, bounded deployment-constraint candidates, and explicit lifecycle corrections to retired environments.
 
 The managed rule file (marker-guarded, so your own rules are never touched) steers the agent to call Contexer's `get_context` before reading files for architecture/"why" questions, and to save rules via `update_context` rather than writing native `.cursor/rules` files.
 
 The first time Cursor calls a Contexer tool it asks you to approve it. Contexer does not pre-approve its own MCP tools for you.
 
-**Parity note:** Cursor's `beforeSubmitPrompt` hook cannot inject context (only allow/block) and Cursor exposes no usable compaction hook. So Contexer's per-prompt steering on Cursor rides on the session-start nudge plus the always-apply rule file, rather than Claude's per-prompt hooks. The core value (automatic session-start injection of your stored rules) works identically to Claude Code.
+**Parity note:** Cursor's `beforeSubmitPrompt` hook cannot inject context (only allow/block) and Cursor exposes no usable compaction hook. So Contexer's per-prompt steering on Cursor rides on the session-start nudge plus the always-apply rule file, rather than Claude's per-prompt hooks. That rule also tells Cursor to ask before keeping a factual deployment-constraint candidate that the write-only prompt hook held pending. The core value (automatic session-start injection of your stored rules) works identically to Claude Code.
+
+Across hosts, a sentence such as "the staging environment was retired but is now recreated" versions a matching retired-environment decision forward while preserving its prior revision. This also works when the sentence follows an unrelated task request; only the lifecycle clause is stored. If no matching retired decision exists, Contexer asks before keeping the new factual context.
 
 ## Codex
 

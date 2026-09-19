@@ -84,6 +84,14 @@ class TestBuildProposal:
         assert (prop["session_id"], prop["source"], prop["created_at"]) == ("s2", "ai", "NOW")
         assert prop["confidence"] > 0 and prop["confidence_factors"]
 
+    def test_can_preserve_product_name_case_for_unconfirmed_factual_text(self):
+        prop = review.build_proposal(
+            self._TARGET, "  n8n   runs in production ", "", "s2", "NOW",
+            preserve_case=True,
+        )
+        assert prop["content"] == "n8n runs in production"
+        assert prop["preserve_case"] is True
+
     def test_title_is_derived_when_absent_and_normalized_when_given(self):
         derived = review.build_proposal(self._TARGET, "Never commit secrets", "", "s2", "NOW")
         assert derived["title"] == "Never commit secrets"
