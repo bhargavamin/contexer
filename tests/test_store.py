@@ -996,6 +996,9 @@ class TestEnvironmentScopeDeclaration:
         "n8n runs in live only and is not needed in staging",
         "n8n is required only in production, not in staging",
         "n8n runs only in live, not in staging",
+        "Temporal runs only in eu-primary and is not needed in qa-green",
+        "Temporal is deployed only in the customer live environment and is not required "
+        "in the partner sandbox environment",
     ])
     def test_accepts_equivalent_environment_scope_word_orders(self, text):
         assert prompt_capture.environment_scope_declaration(text) is True
@@ -1010,6 +1013,10 @@ class TestEnvironmentScopeDeclaration:
 
     def test_question_is_not_captured_as_a_declaration(self):
         text = "is n8n only running in live and not required in staging?"
+        assert prompt_capture.environment_scope_declaration(text) is False
+
+    def test_generic_non_environment_scopes_are_not_captured(self):
+        text = "The cache is only used in authentication and is not required in reporting"
         assert prompt_capture.environment_scope_declaration(text) is False
 
     @pytest.mark.parametrize("text", [
@@ -1046,6 +1053,8 @@ class TestEnvironmentLifecycleRevision:
         ("The staging environment was retired, but now it is restored", "staging"),
         ("The QA env was decommissioned and now has been reactivated", "qa"),
         ("The prod environment was torn down but now it's reprovisioned", "production"),
+        ("The preprod-blue env was retired but now it is recreated", "preprod-blue"),
+        ("The customer demo environment was removed but now it is restored", "customer demo"),
     ])
     def test_accepts_generic_environment_lifecycle_reversals(self, text, environment):
         result = prompt_capture.environment_lifecycle_revision(text)
@@ -1112,6 +1121,28 @@ class TestEnvironmentLifecycleRevision:
         assert content == "the staging env was removed but now its recreated in new project"
         entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == entry_id)
         assert entry["status"] == "pending_approval"
+
+    def test_versions_matching_custom_environment_name(self, tmp_repo):
+        data = store.load(tmp_repo)
+        retired = store._new_decision_entry(
+            "The preprod-blue environment was decommissioned", "old-session", "architecture",
+            created_by="human", status="approved",
+        )
+        data["entries"].append(retired)
+        store.save(tmp_repo, data)
+
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo,
+            "Also the preprod-blue env was removed but now it is recreated in project nova",
+            "new-session",
+        )
+
+        assert (entry_id, status) == (retired["id"], "revision_applied")
+        assert content == (
+            "The preprod-blue env was removed but now it is recreated in project nova"
+        )
+        updated = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == retired["id"])
+        assert updated["revision"] == 2
 
 
 class TestConstraintNoiseGuards:

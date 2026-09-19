@@ -394,6 +394,8 @@ class TestCursorEntrypoints:
         assert "managed by contexer" in body
         assert "get_context" in body and "update_context" in body
         assert "Should I keep this as a Contexer constraint?" in body
+        assert "one explicitly named environment" in body
+        assert "live/production" not in body
 
     def test_session_start_does_not_overwrite_user_rule_file(self, tmp_repo):
         rule = Path(tmp_repo) / ".cursor" / "rules" / "contexer.mdc"

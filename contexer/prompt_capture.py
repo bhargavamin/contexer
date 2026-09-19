@@ -19,21 +19,29 @@ _SYSTEM_TEXT_PREFIXES = (
 )
 
 _ENV_OPERATION = r"(?:run(?:s|ning)?|enabled|deployed|hosted|available|used|required|needed)"
-_PRODUCTION_ENV = r"(?:live|prod(?:uction)?)(?:\s+env(?:ironment)?)?"
-_NONPRODUCTION_ENV = r"(?:stag(?:e|ing)|test(?:ing)?|dev(?:elopment)?)(?:\s+env(?:ironment)?)?"
-_PRODUCTION_ONLY_DECLARATION = re.compile(
+_ENVIRONMENT_TOKEN = r"[A-Za-z0-9][A-Za-z0-9_-]*"
+_CUSTOM_ENVIRONMENT_SLUG = r"[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)+"
+_COMMON_ENVIRONMENT_NAME = r"(?:live|prod(?:uction)?|stag(?:e|ing)|test(?:ing)?|dev(?:elopment)?|qa|sandbox|preview|demo)"
+_ENVIRONMENT_REF = (
+    rf"(?:the\s+)?(?:"
+    rf"(?:{_ENVIRONMENT_TOKEN}\s+){{0,2}}{_ENVIRONMENT_TOKEN}\s+env(?:ironment)?"
+    rf"|{_CUSTOM_ENVIRONMENT_SLUG}"
+    rf"|{_COMMON_ENVIRONMENT_NAME}"
+    rf")"
+)
+_SINGLE_ENV_DECLARATION = re.compile(
     rf"(?:"
-    rf"\bonly\s+{_ENV_OPERATION}\s+(?:in|on|for)\s+(?:the\s+)?{_PRODUCTION_ENV}\b"
-    rf"|\b{_ENV_OPERATION}\s+only\s+(?:in|on|for)\s+(?:the\s+)?{_PRODUCTION_ENV}\b"
-    rf"|\b{_ENV_OPERATION}\s+(?:in|on|for)\s+(?:the\s+)?{_PRODUCTION_ENV}\s+only\b"
+    rf"\bonly\s+{_ENV_OPERATION}\s+(?:in|on|for)\s+{_ENVIRONMENT_REF}\b"
+    rf"|\b{_ENV_OPERATION}\s+only\s+(?:in|on|for)\s+{_ENVIRONMENT_REF}\b"
+    rf"|\b{_ENV_OPERATION}\s+(?:in|on|for)\s+{_ENVIRONMENT_REF}\s+only\b"
     rf")",
     re.IGNORECASE,
 )
-_NONPRODUCTION_EXCLUSION = re.compile(
+_OTHER_ENV_EXCLUSION = re.compile(
     rf"(?:"
     rf"\b(?:is|are|was|were)?(?:\s*not|n['’]t)\s+"
-    rf"(?:{_ENV_OPERATION}\s+)?(?:(?:in|on|for)\s+)?(?:the\s+)?{_NONPRODUCTION_ENV}\b"
-    rf"|\b{_NONPRODUCTION_ENV}\s+"
+    rf"(?:{_ENV_OPERATION}\s+)?(?:(?:in|on|for)\s+)?{_ENVIRONMENT_REF}\b"
+    rf"|\b{_ENVIRONMENT_REF}\s+"
     rf"(?:(?:is|are|was|were)(?:\s+not|n['’]t)|does(?:\s+not|n['’]t))\s+"
     rf"(?:need|require|run|use|host|deploy|enable|apply)\w*\b"
     rf")",
@@ -57,7 +65,12 @@ _DECLARATION_NONASSERTION = re.compile(
     re.IGNORECASE,
 )
 
-_ENVIRONMENT_NAME = r"(?:stag(?:e|ing)|test(?:ing)?|dev(?:elopment)?|prod(?:uction)?|live|qa|sandbox|preview|demo)"
+_ENVIRONMENT_NAME_TOKEN = (
+    rf"(?!(?:also|please|note|remember|currently|now|the)\b){_ENVIRONMENT_TOKEN}"
+)
+_ENVIRONMENT_NAME = (
+    rf"{_ENVIRONMENT_NAME_TOKEN}(?:\s+{_ENVIRONMENT_NAME_TOKEN}){{0,2}}"
+)
 _ENV_RETIRED_STATE = re.compile(
     r"\b(?:removed|retired|decommissioned|deleted|destroyed|disabled|shut\s+down|torn\s+down)\b",
     re.IGNORECASE,
@@ -101,7 +114,7 @@ _ENVIRONMENT_ALIASES = {
     "prod": "production", "production": "production", "live": "production",
     "qa": "qa", "sandbox": "sandbox", "preview": "preview", "demo": "demo",
 }
-_ENVIRONMENT_REFERENCES = {
+_ALIASED_ENVIRONMENT_REFERENCES = {
     "staging": re.compile(r"\bstag(?:e|ing)(?:\s+env(?:ironment)?)?\b", re.IGNORECASE),
     "test": re.compile(r"\btest(?:ing)?(?:\s+env(?:ironment)?)?\b", re.IGNORECASE),
     "development": re.compile(r"\bdev(?:elopment)?(?:\s+env(?:ironment)?)?\b", re.IGNORECASE),
@@ -116,7 +129,7 @@ _PUNCT_RE = re.compile(r"[^\w\s]")
 
 
 def environment_scope_declaration(text: str) -> bool:
-    """Whether a prompt asserts the bounded production-only deployment shape."""
+    """Whether a prompt asserts placement in one environment and exclusion from another."""
     candidate = text.strip()
     if not candidate or len(candidate) > MAX_FACTUAL_PROMPT_LEN or "?" in candidate:
         return False
@@ -125,8 +138,8 @@ def environment_scope_declaration(text: str) -> bool:
     if _DECLARATION_NONASSERTION.search(candidate):
         return False
     return bool(
-        _PRODUCTION_ONLY_DECLARATION.search(candidate)
-        and _NONPRODUCTION_EXCLUSION.search(candidate)
+        _SINGLE_ENV_DECLARATION.search(candidate)
+        and _OTHER_ENV_EXCLUSION.search(candidate)
     )
 
 
@@ -142,7 +155,8 @@ def environment_lifecycle_revision(text: str) -> tuple[str, str] | None:
     match = _ENV_LIFECYCLE_REVERSAL.search(candidate)
     if match is None:
         return None
-    environment = _ENVIRONMENT_ALIASES[match.group("environment").lower()]
+    raw_environment = " ".join(match.group("environment").lower().split())
+    environment = _ENVIRONMENT_ALIASES.get(raw_environment, raw_environment)
     content = " ".join(match.group(0).strip(" \t,;.!?").split())
     return environment, content
 
@@ -161,7 +175,12 @@ def find_environment_lifecycle_target(
     environment: str, content: str, existing: list,
 ) -> dict | None:
     """Find the closest still-retired decision for one explicitly reactivated environment."""
-    reference = _ENVIRONMENT_REFERENCES[environment]
+    reference = _ALIASED_ENVIRONMENT_REFERENCES.get(environment)
+    if reference is None:
+        words = [re.escape(word) for word in environment.split()]
+        label = r"\s+".join(words)
+        reference = re.compile(
+            rf"\b{label}(?:\s+env(?:ironment)?)?\b", re.IGNORECASE)
     content_tokens = _tokenize(content)
     candidates = []
     for entry in existing:
