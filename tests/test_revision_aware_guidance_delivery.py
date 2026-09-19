@@ -1,4 +1,4 @@
-"""Contract 03: revision/effective-view-aware prompt delivery bookkeeping."""
+"""Revision- and effective-view-aware prompt guidance delivery."""
 
 import copy
 import hashlib
@@ -10,7 +10,7 @@ import pytest
 from contexer import conflicts, review, revisions, store, working_set
 
 
-SESSION = "contract-03"
+SESSION = "revision-aware-guidance"
 
 
 def _approved(repo: str, content: str, *, title: str = "", source_files=None) -> str:
