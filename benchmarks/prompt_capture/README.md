@@ -46,6 +46,3 @@ and never touches the developer's Contexer data. Adapter cases use the real evid
 paths; only unrelated background work is disabled. The benchmark reports elapsed time, throughput,
 and per-case p50/p95. These numbers characterize harness efficiency rather than production traffic
 latency or natural-language accuracy.
-
-The design rationale and adversarial acceptance checks live in
-[`docs/prompt-capture-benchmark-plan.md`](../../docs/prompt-capture-benchmark-plan.md).

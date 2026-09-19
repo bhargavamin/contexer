@@ -27,11 +27,10 @@ uv run contexer guard anchors --list
 ## Prompt-capture benchmark maintenance
 
 All agents working on prompt capture must read the runnable
-[benchmark guide](benchmarks/prompt_capture/README.md) and consult
-[the design plan](docs/prompt-capture-benchmark-plan.md) for oracle and safety rationale. This is
-separate from the applicability/relevance benchmark: retrieval scores do not validate capture
-correctness. `AGENTS.md` points here; keep this maintenance contract authoritative rather than
-duplicating it in host-specific instructions.
+[benchmark guide](benchmarks/prompt_capture/README.md). This is separate from the
+applicability/relevance benchmark: retrieval scores do not validate capture correctness.
+`AGENTS.md` points here; keep this maintenance contract authoritative rather than duplicating it
+in host-specific instructions.
 
 The benchmark is implemented; its authoritative usage and maintenance guide is
 [`benchmarks/prompt_capture/README.md`](benchmarks/prompt_capture/README.md). Missing fixture,
