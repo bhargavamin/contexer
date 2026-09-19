@@ -526,3 +526,39 @@ class TestExistingNestedCitationsAreWithheld:
         outside.parent.mkdir(parents=True, exist_ok=True)
         outside.write_text("# Elsewhere\n")
         assert bootstrap._citation_under_nested_checkout(Path(tmp_repo), outside) is False
+
+
+class TestGapCounterIsBounded:
+    """Review of 12fc0a3: every append refreshes the sidecar's mtime, so under sustained
+    contention the gap file would grow without limit AND never age out under COLD_REPO's
+    mtime-based sweep. delivery_gap_count also read the whole file unbounded."""
+
+    def test_write_stops_growing_past_the_cap(self, tmp_repo):
+        events_past_cap = (working_set.GAP_FILE_MAX_BYTES // 2) + 1000
+        for _ in range(events_past_cap):
+            working_set.record_delivery_gap(tmp_repo, 1)
+
+        size = working_set._gap_path(tmp_repo).stat().st_size
+        assert size <= working_set.GAP_FILE_MAX_BYTES, (
+            f"file grew to {size} bytes with no ceiling")
+
+    def test_count_saturates_rather_than_growing_unbounded(self, tmp_repo):
+        for _ in range((working_set.GAP_FILE_MAX_BYTES // 2) + 5000):
+            working_set.record_delivery_gap(tmp_repo, 1)
+
+        # A floor, not necessarily exact once saturated - just must not exceed what the
+        # bounded file could possibly hold.
+        assert working_set.delivery_gap_count(tmp_repo) <= working_set.GAP_FILE_MAX_BYTES
+
+    def test_ordinary_gap_counts_are_unaffected(self, tmp_repo):
+        working_set.record_delivery_gap(tmp_repo, 3)
+        working_set.record_delivery_gap(tmp_repo, 2)
+        assert working_set.delivery_gap_count(tmp_repo) == 5
+
+    def test_read_is_bounded_even_against_a_tampered_oversized_file(self, tmp_repo):
+        store.ensure_store_dir()
+        working_set._gap_path(tmp_repo).write_text(
+            "x" * (working_set.GAP_FILE_MAX_BYTES * 3), encoding="utf-8")
+        # Must not attempt to read 3x the cap into memory; the bounded read caps what is
+        # even LOOKED AT, regardless of what a tampered or corrupted file actually holds.
+        assert working_set.delivery_gap_count(tmp_repo) <= working_set.GAP_FILE_MAX_BYTES + 1

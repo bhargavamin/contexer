@@ -183,6 +183,12 @@ def _delivery_lock_slug(repo_path: str) -> str:
 _TALLY_LOCK_TRIES = 3
 _TALLY_LOCK_BACKOFF = 0.005
 
+# One byte per dropped event ("x") plus a newline, so this caps the gap counter at roughly
+# 32K recorded drops - far past anything ordinary contention produces, while still being a
+# real ceiling rather than none. Public (not underscored): the report reading
+# delivery_gap_count needs to know whether a returned count is exact or has saturated.
+GAP_FILE_MAX_BYTES = 64 * 1024
+
 
 def _valid_stamp(value: object) -> bool:
     """A finite, non-negative Unix timestamp. Rejects NaN (value != value) AND +/-Infinity
@@ -257,12 +263,21 @@ def record_delivery_gap(repo_path: str, count: int) -> None:
     A gap is recorded per DROPPED EVENT, not attributed to any one decision: the tally
     cannot know, after losing the race, which specific rows would have been new. Reporting
     it as a total is honest about that limit rather than guessing which decision to blame.
+
+    Bounded at GAP_FILE_MAX_BYTES: every append refreshes the sidecar's mtime, so under
+    SUSTAINED contention the file would both grow without limit and never age out under
+    COLD_REPO's mtime-based sweep. Past the cap this simply stops counting further drops -
+    the count becomes a floor ("at least this many") rather than exact, which is still an
+    honest signal and strictly better than either unbounded growth or losing the counter.
     """
     if count <= 0:
         return
     try:
+        path = _gap_path(repo_path)
+        if path.exists() and path.stat().st_size >= GAP_FILE_MAX_BYTES:
+            return
         store.ensure_store_dir()
-        with open(_gap_path(repo_path), "a", encoding="utf-8") as f:
+        with open(path, "a", encoding="utf-8") as f:
             f.write("x" * count + "\n")
     except OSError:
         pass
@@ -274,10 +289,17 @@ def delivery_gap_count(repo_path: str) -> int:
     A caller drawing on `read_delivery_tally` for "was this decision ever delivered" should
     read this alongside it: a nonzero count means some render events during the measurement
     window are simply missing, not necessarily concentrated on any one row, so absence for
-    a specific decision is reliable only to within this many total lost observations.
+    a specific decision is reliable only to within this many total lost observations. Once
+    the file has hit GAP_FILE_MAX_BYTES the true count may be higher than what is returned -
+    `record_delivery_gap` stops counting further drops past that ceiling.
+
+    Bounded read: never trusts the file's own size, mirroring read_delivery_tally's
+    MAX_BYTES pattern, so external tampering cannot force an unbounded read off this path.
     """
     try:
-        return _gap_path(repo_path).read_text(encoding="utf-8").count("x")
+        with _gap_path(repo_path).open("rb") as source:
+            raw = source.read(GAP_FILE_MAX_BYTES + 1)
+        return raw.decode("utf-8", "replace").count("x")
     except OSError:
         return 0
 
