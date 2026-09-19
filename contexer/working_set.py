@@ -183,11 +183,12 @@ def _delivery_lock_slug(repo_path: str) -> str:
 _TALLY_LOCK_TRIES = 3
 _TALLY_LOCK_BACKOFF = 0.005
 
-# One byte per dropped event ("x") plus a newline, so this caps the gap counter at roughly
-# 32K recorded drops - far past anything ordinary contention produces, while still being a
-# real ceiling rather than none. Public (not underscored): the report reading
+# One byte per dropped event ("x"), so this caps the readable gap counter at roughly 64K
+# recorded drops - far past anything ordinary contention produces, while still being a
+# real bound rather than none. Public (not underscored): the report reading
 # delivery_gap_count needs to know whether a returned count is exact or has saturated.
 GAP_FILE_MAX_BYTES = 64 * 1024
+_MAX_VALID_TIMESTAMP = 253_402_300_799  # 9999-12-31T23:59:59Z
 
 
 def _valid_stamp(value: object) -> bool:
@@ -196,8 +197,15 @@ def _valid_stamp(value: object) -> bool:
     emits for them, so a persisted row can carry either without the file being malformed.
     An infinite `last` would sort newest-forever and evict every genuinely recent row once
     the tally reaches capacity."""
-    return (isinstance(value, (int, float)) and not isinstance(value, bool)
-            and math.isfinite(value) and value >= 0)
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        # `math.isfinite` first converts an int to float and raises OverflowError for a JSON
+        # integer with a few thousand digits. Compare integers directly so malformed state
+        # remains a dropped row rather than escaping the fail-soft reader.
+        return 0 <= value <= _MAX_VALID_TIMESTAMP
+    return (isinstance(value, float) and math.isfinite(value)
+            and 0 <= value <= _MAX_VALID_TIMESTAMP)
 
 
 def read_delivery_tally(repo_path: str) -> dict:
@@ -252,39 +260,44 @@ def _gap_path(repo_path: str) -> Path:
 
 
 def record_delivery_gap(repo_path: str, count: int) -> None:
-    """Durably note `count` render events that were NOT recorded, because the tally's lock
-    was contended past its retry budget. Never raises; never blocks.
+    """Durably note `count` render events that could not be published to the tally because
+    its lock stayed contended or its mutation/write failed. Never raises; never lock-waits.
 
-    Deliberately lock-free: a single `open(..., "a")` write is a single write(2) syscall for
-    a payload this small, and POSIX guarantees that call atomic under O_APPEND (the mode
-    Python's text "a" sets), so two concurrent droppers cannot corrupt each other's line -
-    no flock needed for an append-only counter nobody reads synchronously.
+    Deliberately lock-free: one unbuffered binary append is one write(2) syscall for a payload
+    this small, and O_APPEND keeps concurrent droppers from overwriting each other. No flock
+    is needed for an uncertainty marker nobody reads synchronously.
 
     A gap is recorded per DROPPED EVENT, not attributed to any one decision: the tally
     cannot know, after losing the race, which specific rows would have been new. Reporting
     it as a total is honest about that limit rather than guessing which decision to blame.
 
-    Bounded at GAP_FILE_MAX_BYTES: every append refreshes the sidecar's mtime, so under
+    Bounded toward GAP_FILE_MAX_BYTES: every append refreshes the sidecar's mtime, so under
     SUSTAINED contention the file would both grow without limit and never age out under
-    COLD_REPO's mtime-based sweep. Past the cap this simply stops counting further drops -
-    the count becomes a floor ("at least this many") rather than exact, which is still an
-    honest signal and strictly better than either unbounded growth or losing the counter.
+    COLD_REPO's mtime-based sweep. Each writer appends only the remaining capacity it
+    observed. Simultaneous appenders can overshoot that advisory disk ceiling by their small
+    in-flight payloads, but reads are hard-capped; once saturated the returned count is a
+    floor rather than exact.
     """
     if count <= 0:
         return
     try:
-        path = _gap_path(repo_path)
-        if path.exists() and path.stat().st_size >= GAP_FILE_MAX_BYTES:
-            return
         store.ensure_store_dir()
-        with open(path, "a", encoding="utf-8") as f:
-            f.write("x" * count + "\n")
+        path = _gap_path(repo_path)
+        with path.open("ab", buffering=0) as target:
+            # Inspect the descriptor we will append through. `exists()` followed by `stat()`
+            # has a deletion race that can silently lose the uncertainty marker.
+            current = target.seek(0, 2)
+            remaining = max(0, GAP_FILE_MAX_BYTES - current)
+            payload = b"x" * min(count, remaining)
+            if not payload:
+                return
+            target.write(payload)
     except OSError:
         pass
 
 
 def delivery_gap_count(repo_path: str) -> int:
-    """Total render events lost to lock contention and never reflected in the tally.
+    """Total render events that could not be persisted in the tally.
 
     A caller drawing on `read_delivery_tally` for "was this decision ever delivered" should
     read this alongside it: a nonzero count means some render events during the measurement
@@ -298,8 +311,11 @@ def delivery_gap_count(repo_path: str) -> int:
     """
     try:
         with _gap_path(repo_path).open("rb") as source:
-            raw = source.read(GAP_FILE_MAX_BYTES + 1)
-        return raw.decode("utf-8", "replace").count("x")
+            raw = source.read(GAP_FILE_MAX_BYTES)
+        count = raw.count(b"x")
+        # New writers emit only x; 12fc0a3/42abb90 also emitted newlines. Any other byte is
+        # corruption, which must preserve uncertainty rather than decode to a false zero.
+        return max(1, count) if raw.translate(None, b"x\n") else count
     except OSError:
         return 0
 
@@ -332,32 +348,44 @@ def record_delivery_tally(repo_path: str, session_id: str, delivered: list[dict]
     detect. `record_delivery_gap` makes that loss visible instead of silent; see
     `delivery_gap_count`.
     """
-    valid = [row for row in delivered
-             if isinstance(row.get("scope"), str) and row["scope"] in SCOPES
-             and _valid_string(row.get("id"))]
+    # One event per scoped decision. Deduplicating here also bounds a gap append by the same
+    # store cap as the tally instead of trusting a caller-controlled list length.
+    valid_by_key = {}
+    for row in delivered:
+        if not isinstance(row, dict):
+            continue
+        scope, decision_id = row.get("scope"), row.get("id")
+        if (not isinstance(scope, str) or scope not in SCOPES
+                or not _valid_string(decision_id)
+                or not _valid_string(row.get("fingerprint"))):
+            continue
+        valid_by_key[f"{scope}:{decision_id}"] = {"scope": scope, "id": decision_id}
+    valid = list(valid_by_key.values())[-store.MAX_ENTRIES:]
     if not valid:
         return False
     fingerprint = _session_fingerprint(session_id or "")
+    gap_count = len(valid)
     for attempt in range(_TALLY_LOCK_TRIES):
         try:
             with store.store_lock(_delivery_lock_slug(repo_path), blocking=False):
                 rows = read_delivery_tally(repo_path)
                 now = time.time()
-                changed = False
+                changed = 0
                 for row in valid:
                     key = f"{row['scope']}:{row['id']}"
                     existing = rows.get(key)
                     if existing is None:
                         rows[key] = {"renders": 1, "first": now, "last": now,
                                      "session": fingerprint}
-                        changed = True
+                        changed += 1
                     elif existing["session"] != fingerprint:
                         existing["renders"] += 1
                         existing["last"] = now
                         existing["session"] = fingerprint
-                        changed = True
+                        changed += 1
                 if not changed:
                     return False
+                gap_count = changed
                 if len(rows) > store.MAX_ENTRIES:
                     # Evict least-recently-delivered first: the rows this exists to surface
                     # are the ones still doing work, and the longest-unseen is safest to drop.
@@ -377,8 +405,21 @@ def record_delivery_tally(repo_path: str, session_id: str, delivered: list[dict]
             # Wider than OSError on purpose: bookkeeping on the per-prompt path. A malformed
             # persisted row is filtered by the reader above, but the boundary must hold for
             # whatever the next shape of corruption turns out to be.
+            record_delivery_gap(repo_path, gap_count)
             return False
-    record_delivery_gap(repo_path, len(valid))
+    # The lock was never acquired. An atomic unlocked read is safe here and prevents a known
+    # same-session compaction/retry from being mislabeled as lost merely because another
+    # writer held the lock. A concurrent holder may still publish after this snapshot; in
+    # that irreducible race the conservative uncertainty marker is the honest outcome.
+    try:
+        rows = read_delivery_tally(repo_path)
+        gap_count = sum(
+            (rows.get(f"{row['scope']}:{row['id']}") or {}).get("session") != fingerprint
+            for row in valid
+        )
+    except Exception:
+        pass
+    record_delivery_gap(repo_path, gap_count)
     return False
 
 

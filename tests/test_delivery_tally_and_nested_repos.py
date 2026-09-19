@@ -394,6 +394,51 @@ class TestDroppedDeliveriesAreNotSilent:
             tmp_repo, "s1", [{"scope": "personal", "id": "d", "fingerprint": "f"}])
         assert working_set.delivery_gap_count(tmp_repo) == 0
 
+    def test_a_tally_publish_failure_records_a_gap(self, tmp_repo, monkeypatch):
+        """The session ledger can succeed before the independent durable tally write fails."""
+        original = store.atomic_write
+        tally_path = working_set.delivery_path(tmp_repo)
+
+        def fail_only_the_tally(path, text):
+            if Path(path) == tally_path:
+                raise OSError("simulated tally-only failure")
+            return original(path, text)
+
+        monkeypatch.setattr(store, "atomic_write", fail_only_the_tally)
+        delivered = [{"scope": "personal", "id": "first", "fingerprint": "fp"}]
+
+        assert working_set.record_deliveries(tmp_repo, "s1", delivered) is True
+        assert working_set.has_credit(
+            working_set.records(tmp_repo, "s1"), "personal", "first", "fp")
+        assert working_set.read_delivery_tally(tmp_repo) == {}
+        assert working_set.delivery_gap_count(tmp_repo) == 1
+
+    def test_contended_same_session_noop_does_not_create_a_gap(self, tmp_repo):
+        import threading
+
+        delivered = [{"scope": "personal", "id": "d", "fingerprint": "fp"}]
+        assert working_set.record_delivery_tally(tmp_repo, "same-session", delivered)
+        held = threading.Event()
+        release = threading.Event()
+
+        def hold_the_lock():
+            with store.store_lock(working_set._delivery_lock_slug(tmp_repo)):
+                held.set()
+                release.wait(timeout=5)
+
+        holder = threading.Thread(target=hold_the_lock)
+        holder.start()
+        assert held.wait(timeout=5)
+        try:
+            assert working_set.record_delivery_tally(
+                tmp_repo, "same-session", delivered) is False
+        finally:
+            release.set()
+            holder.join(timeout=5)
+
+        assert working_set.read_delivery_tally(tmp_repo)["personal:d"]["renders"] == 1
+        assert working_set.delivery_gap_count(tmp_repo) == 0
+
 
 class TestLongSessionIdsStillSuppress:
     """Human review of 8c78ab9 (finding 3): the writer stored `session_id` verbatim while the
@@ -447,6 +492,15 @@ class TestNonFiniteTimestampsAreRejected:
         working_set.record_delivery_tally(
             tmp_repo, "s1", [{"scope": "personal", "id": "d", "fingerprint": "f"}])
         assert "personal:d" in working_set.read_delivery_tally(tmp_repo)
+
+    def test_an_enormous_json_integer_is_dropped_without_raising(self, tmp_repo):
+        store.ensure_store_dir()
+        enormous = "1" + "0" * 4000
+        working_set.delivery_path(tmp_repo).write_text(
+            '{"v":2,"rows":{"personal:x":{"renders":1,"first":1,"last":'
+            + enormous + ',"session":"s"}}}', encoding="utf-8")
+
+        assert working_set.read_delivery_tally(tmp_repo) == {}
 
 
 class TestExistingNestedCitationsAreWithheld:
@@ -527,6 +581,39 @@ class TestExistingNestedCitationsAreWithheld:
         outside.write_text("# Elsewhere\n")
         assert bootstrap._citation_under_nested_checkout(Path(tmp_repo), outside) is False
 
+    def test_focused_source_cannot_bypass_nested_checkout_exclusion(self, tmp_repo):
+        wt = Path(tmp_repo, ".claude", "worktrees", "agent-x")
+        wt.mkdir(parents=True)
+        (wt / ".git").write_text("gitdir: /elsewhere/.git/worktrees/agent\n")
+        (wt / "CONTRIBUTING.md").write_text(
+            "# Contributing\n\n- Always use Postgres.\n")
+        nested_rel = ".claude/worktrees/agent-x/CONTRIBUTING.md"
+
+        scan = bootstrap.run(tmp_repo, "focused", source_paths=[nested_rel])
+
+        assert nested_rel not in scan["files"]
+        assert scan["source_paths"] == []
+        assert any("nested checkout excluded" in item for item in scan["omitted"])
+        assert not any(c["source_file"] == nested_rel for c in scan["candidates"])
+
+    def test_focused_source_cannot_revive_a_withheld_nested_citation(self, tmp_repo):
+        wt = Path(tmp_repo, ".claude", "worktrees", "agent-x")
+        wt.mkdir(parents=True)
+        (wt / ".git").write_text("gitdir: /elsewhere/.git/worktrees/agent\n")
+        (wt / "CONTRIBUTING.md").write_text(self.RULE)
+        nested_rel = ".claude/worktrees/agent-x/CONTRIBUTING.md"
+        bootstrap.run(tmp_repo, "seed")
+        entry = self._seed_nested_citation(tmp_repo, nested_rel)
+        bootstrap.run(tmp_repo, "withhold")
+        assert store.entry_status(
+            store.entry_by_id(store.load(tmp_repo)["entries"], entry["id"])) == "ignored"
+
+        bootstrap.run(tmp_repo, "focused", source_paths=[nested_rel])
+        refreshed = store.entry_by_id(store.load(tmp_repo)["entries"], entry["id"])
+
+        assert refreshed.get("bootstrap_withheld")
+        assert store.entry_status(refreshed) == "ignored"
+
 
 class TestGapCounterIsBounded:
     """Review of 12fc0a3: every append refreshes the sidecar's mtime, so under sustained
@@ -561,4 +648,22 @@ class TestGapCounterIsBounded:
             "x" * (working_set.GAP_FILE_MAX_BYTES * 3), encoding="utf-8")
         # Must not attempt to read 3x the cap into memory; the bounded read caps what is
         # even LOOKED AT, regardless of what a tampered or corrupted file actually holds.
-        assert working_set.delivery_gap_count(tmp_repo) <= working_set.GAP_FILE_MAX_BYTES + 1
+        assert working_set.delivery_gap_count(tmp_repo) <= working_set.GAP_FILE_MAX_BYTES
+
+    def test_one_large_append_is_trimmed_to_the_remaining_capacity(self, tmp_repo):
+        working_set.record_delivery_gap(tmp_repo, working_set.GAP_FILE_MAX_BYTES * 2)
+
+        assert working_set._gap_path(tmp_repo).stat().st_size == working_set.GAP_FILE_MAX_BYTES
+        assert working_set.delivery_gap_count(tmp_repo) == working_set.GAP_FILE_MAX_BYTES
+
+    def test_invalid_bytes_do_not_escape_the_bounded_reader(self, tmp_repo):
+        store.ensure_store_dir()
+        working_set._gap_path(tmp_repo).write_bytes(b"x\xffx")
+
+        assert working_set.delivery_gap_count(tmp_repo) == 2
+
+    def test_corruption_cannot_turn_uncertainty_into_zero(self, tmp_repo):
+        store.ensure_store_dir()
+        working_set._gap_path(tmp_repo).write_bytes(b"\xff")
+
+        assert working_set.delivery_gap_count(tmp_repo) == 1

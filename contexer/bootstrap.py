@@ -346,7 +346,17 @@ def _source_paths(paths: list[str]) -> list[str]:
 def snapshot(repo_path: str, external_paths: list[str], source_paths: list[str] | None = None) -> dict:
     root = Path(os.path.abspath(repo_path))
     files, texts, omitted, total = {}, {}, [], 0
-    focus = _source_paths(source_paths or [])
+    requested_focus = _source_paths(source_paths or [])
+    # Focus changes the byte budget, never the trust boundary. Feeding these paths directly
+    # used to bypass `_paths` entirely, which let an agent explicitly re-add a file under a
+    # nested worktree and even revive a legacy duplicate that refresh had just withheld.
+    focus = []
+    for relative in requested_focus:
+        path = root / relative
+        if _citation_under_nested_checkout(root, path):
+            omitted.append(relative + ": nested checkout excluded")
+        else:
+            focus.append(relative)
     roots = [(root, False)] + [(Path(p), True) for p in external_paths]
     inventories = [((root / p for p in focus), False)]
     inventories += [(_paths(p, external=external), external) for p, external in roots]
