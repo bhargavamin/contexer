@@ -4914,8 +4914,7 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     data = load(repo_path)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
     global_rules = get_global_decisions()
-    compact_rehydrated = (_rehydrate_working_set(repo_path, session_id)
-                          if source == "compact" and session_id else "")
+    compact_rehydrated = ""
 
     if source == "resume":
         if decisions:
@@ -4980,6 +4979,12 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     from contexer import bootstrap
     data = bootstrap.refresh_for_session(repo_path, data)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
+    if source == "compact" and session_id:
+        # Rehydrate from this exact applicability view. Loading inside the replay helper
+        # used to race ahead of refresh, so a now-withheld inference could be emitted and
+        # credited before session start learned that its evidence had disappeared.
+        compact_rehydrated = _rehydrate_working_set(
+            repo_path, session_id, local_snapshot=data)
 
     # Read before the no-context branch below, because the reconsideration lane is the one
     # that can be non-empty when `decisions` is empty: a repo whose only decision was RETIRED
@@ -5639,7 +5644,8 @@ def _standing_topic_map(repo_path: str, decisions: list) -> str:
     return f"Stored decisions by topic: {parts} - fetch with get_context(query=<topic>)."
 
 
-def _rehydrate_working_set(repo_path: str, session_id: str) -> str:
+def _rehydrate_working_set(repo_path: str, session_id: str,
+                           *, local_snapshot: dict | None = None) -> str:
     """Reset pre-compaction credit and replay up to ten historical full deliveries.
 
     Selection uses history, including legacy ID-only hints. Credit is cleared before
@@ -5663,7 +5669,8 @@ def _rehydrate_working_set(repo_path: str, session_id: str) -> str:
 
     recent = history[-_REHYDRATE_CAP:]
     rendered, receipts = _render_prompt_decisions_with_records(
-        repo_path, recent, active_only=True)
+        repo_path, recent, active_only=True, local_snapshot=local_snapshot,
+        check_bootstrap_sources=True)
     if not rendered:
         return ""
     working_set.record_deliveries(repo_path, session_id, receipts)
@@ -5845,6 +5852,8 @@ def _render_prompt_decisions_with_records(
     *,
     previous_records: list[dict] | None = None,
     active_only: bool = False,
+    local_snapshot: dict | None = None,
+    check_bootstrap_sources: bool = False,
 ) -> tuple[str, list[dict]]:
     """Render and receipt decisions from the same loaded local/global snapshots.
 
@@ -5854,7 +5863,7 @@ def _render_prompt_decisions_with_records(
     """
     from contexer import conflicts
 
-    local_data = load(repo_path)
+    local_data = local_snapshot if local_snapshot is not None else load(repo_path)
     local_by_id = {e.get("id"): e for e in local_data.get("entries", [])
                    if e.get("type") == "decision"}
     global_data: dict | None = None
@@ -5904,6 +5913,13 @@ def _render_prompt_decisions_with_records(
         entry_id = e.get("id", "")[:8]
         id_tag = f" (id={entry_id})" if entry_id else ""
         title, body, extras = conflicts._conflict_view(e)
+        if check_bootstrap_sources and e.get("bootstrap"):
+            # Compaction replay historically rechecked captured evidence while rendering.
+            # Keep ordinary prompt lookup free of source-file I/O, but preserve the replay
+            # warning when evidence changed after its inference was originally delivered.
+            from contexer import bootstrap
+            conflict_extras = extras if conflicts.has_open_conflict(e) else []
+            extras = bootstrap.render(e, repo_path) + conflict_extras
         lines.append(f"- [{e['timestamp'][:10]}]{subtype_tag}{status_tag}{_recur_suffix(e)} "
                      f"{title}{id_tag}")
         if body is not None:

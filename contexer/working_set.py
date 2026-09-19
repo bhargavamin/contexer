@@ -81,7 +81,8 @@ def read(repo_path: str, session_id: str) -> dict:
             continue
         scope, decision_id, fingerprint = (
             row.get("scope"), row.get("id"), row.get("fingerprint"))
-        if (scope not in SCOPES or not _valid_string(decision_id)
+        if (not isinstance(scope, str) or scope not in SCOPES
+                or not _valid_string(decision_id)
                 or (fingerprint is not None and not _valid_string(fingerprint))):
             continue
         key = (scope, decision_id)
@@ -158,7 +159,8 @@ def record_deliveries(repo_path: str, session_id: str, delivered: list[dict]) ->
     state = read(repo_path, session_id)
     rows = list(state["records"])
     for row in delivered:
-        if (row.get("scope") not in SCOPES
+        scope = row.get("scope")
+        if (not isinstance(scope, str) or scope not in SCOPES
                 or not _valid_string(row.get("id"))
                 or not _valid_string(row.get("fingerprint"))):
             continue

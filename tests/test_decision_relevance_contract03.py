@@ -1,7 +1,9 @@
 """Contract 03: revision/effective-view-aware prompt delivery bookkeeping."""
 
 import copy
+import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -452,6 +454,27 @@ class TestWorkingSetV2:
         path.write_text(payload, encoding="utf-8")
         assert working_set.records(tmp_repo, "malformed") == []
 
+    @pytest.mark.parametrize("scope", [[], {}])
+    def test_unhashable_scope_fails_open_to_guidance_delivery(self, tmp_repo, scope):
+        did = _approved(tmp_repo, "Use checkout reservation leases for inventory")
+        data = store.load(tmp_repo)
+        entry = store.entry_by_id(data["entries"], did)
+        path = working_set.path(tmp_repo, "unhashable-scope")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "v": 2,
+            "injected": [did],
+            "records": [{
+                "scope": scope,
+                "id": did,
+                "fingerprint": store._guidance_fingerprint(entry, data),
+            }],
+        }), encoding="utf-8")
+
+        assert working_set.records(tmp_repo, "unhashable-scope") == []
+        assert "checkout reservation leases" in _prompt(
+            tmp_repo, "unhashable-scope").lower()
+
     def test_empty_session_creates_no_file(self, tmp_repo):
         did = _approved(tmp_repo, "Use checkout reservation leases for inventory")
         working_set.record_deliveries(tmp_repo, "", [{
@@ -515,6 +538,71 @@ class TestWorkingSetV2:
 
 
 class TestCompactionDeliveryBoundary:
+    def test_replay_warns_when_inference_evidence_disappeared(self, tmp_repo):
+        source = Path(tmp_repo) / "checkout-policy.md"
+        source_text = "Checkout reservations use a lease queue."
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(source_text, encoding="utf-8")
+        entry = store.build_inferred_entry(
+            "Checkout reservations use a lease queue", SESSION, "architecture", "suggested")
+        entry["bootstrap"] = {
+            "kind": "inferred",
+            "assessment": "supported",
+            "scope": "checkout reservations",
+            "sources": [{
+                "file": source.name,
+                "line": 1,
+                "quote": source_text,
+                "sha256": hashlib.sha256(source_text.encode()).hexdigest(),
+            }],
+        }
+        data = store.load(tmp_repo)
+        data["entries"].append(entry)
+        store.save(tmp_repo, data)
+        _, receipts = store._render_prompt_decisions_with_records(
+            tmp_repo, [entry["id"]])
+        sid = "missing-inference-evidence"
+        assert working_set.record_deliveries(tmp_repo, sid, receipts)
+
+        source.unlink()
+        replay = store._rehydrate_working_set(tmp_repo, sid)
+
+        assert "Evidence changed or disappeared" in replay
+
+    def test_claude_compaction_replays_refreshed_applicability_view(
+        self, tmp_repo, monkeypatch
+    ):
+        from contexer import bootstrap
+
+        entry = store.build_inferred_entry(
+            "Use the inferred checkout lease queue", SESSION, "architecture", "suggested")
+        entry["bootstrap"] = {
+            "kind": "inferred", "assessment": "supported",
+            "scope": "checkout queue", "sources": [],
+        }
+        data = store.load(tmp_repo)
+        data["entries"].append(entry)
+        store.save(tmp_repo, data)
+        _, receipts = store._render_prompt_decisions_with_records(
+            tmp_repo, [entry["id"]])
+        sid = "refresh-before-replay"
+        assert working_set.record_deliveries(tmp_repo, sid, receipts)
+
+        def withhold(_repo_path, current):
+            refreshed = copy.deepcopy(current)
+            target = store.entry_by_id(refreshed["entries"], entry["id"])
+            target["bootstrap_withheld"] = "Evidence disappeared"
+            target["bootstrap_withheld_reason"] = "evidence"
+            return refreshed
+
+        monkeypatch.setattr(bootstrap, "refresh_for_session", withhold)
+        payload = store._local_session_start_payload(
+            tmp_repo, "compact", sid, "claude")
+
+        assert "Use the inferred checkout lease queue" not in payload["context"]
+        row = working_set.records(tmp_repo, sid)[0]
+        assert row["id"] == entry["id"] and row["fingerprint"] is None
+
     def test_only_ten_replayed_rows_keep_credit_and_omitted_can_replay(self, tmp_repo):
         subjects = [
             "alpha beacon", "bravo compass", "charlie delta", "echo forest",
