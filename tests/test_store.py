@@ -4215,13 +4215,13 @@ class TestWorkingSet:
         assert a == b and a.startswith("[Contexer: auto-fetched for this question]")
         assert working_set.path(tmp_repo, "").exists() is False
 
-    def test_working_set_ids_public_helper(self, tmp_repo):
+    def test_working_set_ids_owner_helper(self, tmp_repo):
         ids = _seed_rv1(tmp_repo, RV1_CORPUS)
         sid = "sess-helper"
         store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens expire in httpOnly cookies?", sid)
         jwt_id = next(v for k, v in ids.items() if "JWT" in k)
-        assert jwt_id in store.working_set_ids(tmp_repo, sid)
-        assert store.working_set_ids(tmp_repo, "") == []
+        assert jwt_id in working_set.ids(tmp_repo, sid)
+        assert working_set.ids(tmp_repo, "") == []
 
 
 # ── Edited-files signal (guard anchor accrual, issue #175 Task 2) ───────────────

@@ -6799,10 +6799,6 @@ _CONSOLE_EXPORTS = frozenset({
 # need them (anchors, reconcile, cli, server, ui/api all do exactly that), which is what keeps
 # the boundary visible instead of letting store slowly re-accumulate the surface it just shed.
 _LIFECYCLE_EXPORTS = frozenset({"restore_decision"})
-# `working_set_ids` was the one public ledger reader before the working-set persistence
-# concern was extracted. Keep that spelling for external compatibility; new production and
-# tests import `working_set.ids` from its owner directly.
-_WORKING_SET_EXPORTS = frozenset({"working_set_ids"})
 
 
 def __getattr__(name):
@@ -6818,9 +6814,6 @@ def __getattr__(name):
     if name in _LIFECYCLE_EXPORTS:
         from contexer import lifecycle
         return getattr(lifecycle, name)
-    if name in _WORKING_SET_EXPORTS:
-        from contexer import working_set
-        return working_set.ids
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -6832,4 +6825,4 @@ def __dir__():
     # only some left a name answerable by getattr but absent from dir(), a split that no
     # longer matches the facade the moment any set changes.
     return sorted([*globals(), *_GUARD_EXPORTS, *_CONFLICT_EXPORTS, *_CONSOLE_EXPORTS,
-                   *_LIFECYCLE_EXPORTS, *_WORKING_SET_EXPORTS])
+                   *_LIFECYCLE_EXPORTS])

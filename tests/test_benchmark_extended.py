@@ -476,6 +476,89 @@ class TestRealisticPromptNoise:
         )
 
 
+# A labelled, multi-decision corpus for the two strong-tier admission guards. Unlike the
+# single regression probes in test_store.py, this measures both sides of the trade-off:
+# irrelevant one-hit candidates must stay out without losing related rationale questions.
+# Each case gets a fresh store so delivery suppression cannot affect the measurement.
+ROUTER_QUALITY_DECISIONS = [
+    ("PAR2_MARKER", "Deploy Scaleway infrastructure to the PAR-2 region, never PAR-1, "
+     "because the selected services run there", "constraint"),
+    ("DAGSTER_MARKER", "Production infra changes deployed Dagster workers to a dedicated "
+     "node pool because memory-heavy jobs need isolation", "architecture"),
+    ("HATCHET_MARKER", "Host Hatchet workers on Scaleway bare metal because microsandbox "
+     "needs KVM nested virtualization", "architecture"),
+    ("PAYMENT_MARKER", "Retry payment card charges with exponential backoff and idempotency "
+     "keys", "architecture"),
+    ("AUTH_MARKER", "Authentication uses JWT access tokens with short expiry and secure "
+     "refresh cookies", "architecture"),
+    ("REPO_MARKER", "No raw SQL outside repository classes to preserve data access "
+     "boundaries", "pattern"),
+    ("POSTGRES_MARKER", "PostgreSQL is the primary transactional database because ACID "
+     "semantics are required", "architecture"),
+    ("BILLING_MARKER", "The billing service was deployed after its readiness check passed",
+     "architecture"),
+    ("SEARCH_MARKER", "The search service was deployed after its readiness check passed",
+     "architecture"),
+    ("EMAIL_MARKER", "The email service was deployed after its readiness check passed",
+     "architecture"),
+]
+
+ROUTER_QUALITY_CASES = [
+    # prompt, expected rendered decision markers, decisions omitted from this case
+    ("why was infra deployed to the par-2 region?", {"PAR2_MARKER"}, set()),
+    ("why was Scaleway selected for infrastructure?", {"PAR2_MARKER"}, set()),
+    ("why was Dagster infrastructure deployed?", {"DAGSTER_MARKER"}, set()),
+    ("why deploy Dagster workers to a dedicated node pool?", {"DAGSTER_MARKER"}, set()),
+    ("why was Hatchet hosted on Scaleway?", {"HATCHET_MARKER"}, set()),
+    ("why was Hatchet hosted on Scaleway?", set(), {"HATCHET_MARKER"}),
+    ("why was Nomad hosted on Scaleway?", set(), set()),
+    ("why was inventory hosted on Scaleway?", set(), set()),
+    ("why did we choose payment retries?", {"PAYMENT_MARKER"}, set()),
+    ("why are payment card charges retried?", {"PAYMENT_MARKER"}, set()),
+    ("explain why authentication was chosen over alternatives", {"AUTH_MARKER"}, set()),
+    ("why did we choose JWT?", {"AUTH_MARKER"}, set()),
+    ("what is the reason for the repo pattern?", {"REPO_MARKER"}, set()),
+    ("what is the reason for repository classes?", {"REPO_MARKER"}, set()),
+    ("why did we decide on postgres?", {"POSTGRES_MARKER"}, set()),
+    ("why use a transactional database?", {"POSTGRES_MARKER"}, set()),
+    ("why did we choose mongodb?", set(), set()),
+    ("why are payment webhooks signed?", set(), set()),
+]
+
+
+class TestRetrievalAdmissionQuality:
+    def test_labelled_corpus_has_full_candidate_precision_and_recall(
+        self, tmp_path, monkeypatch
+    ):
+        redirect_store_dir(monkeypatch, tmp_path / "router-quality")
+        markers = {row[0] for row in ROUTER_QUALITY_DECISIONS}
+        true_positive = false_positive = false_negative = 0
+        unexpected_outputs = []
+
+        for index, (prompt, expected, omitted) in enumerate(ROUTER_QUALITY_CASES):
+            repo = f"/bench/router-quality/{index}"
+            data = store.load(repo)
+            for marker, content, subtype in ROUTER_QUALITY_DECISIONS:
+                if marker not in omitted:
+                    data["entries"].append(store._new_decision_entry(
+                        f"{marker} {content}", SESSION, subtype, created_by="human"))
+            store.save(repo, data)
+
+            result = store.get_context_for_prompt(repo, prompt)
+            actual = {marker for marker in markers if marker in result}
+            true_positive += len(actual & expected)
+            false_positive += len(actual - expected)
+            false_negative += len(expected - actual)
+            if not expected and result:
+                unexpected_outputs.append((prompt, result))
+
+        precision = true_positive / (true_positive + false_positive)
+        recall = true_positive / (true_positive + false_negative)
+        assert precision == 1.0
+        assert recall == 1.0
+        assert unexpected_outputs == []
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 6. NOVELTY THRESHOLD SENSITIVITY
 # ═══════════════════════════════════════════════════════════════════════════════
