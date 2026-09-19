@@ -135,8 +135,12 @@ def sync_decision_cache(entry: dict) -> None:
 
 
 def append_revision(entry: dict, content: str, source: str,
-                    approved_at: str | None = None, title: str = "") -> dict:
-    """Append a revision, advance HEAD, invalidate stale approval, and sync its cache."""
+                    approved_at: str | None = None, title: str = "",
+                    normalize: bool = True) -> dict:
+    """Append a revision, advance HEAD, invalidate stale approval, and sync its cache.
+
+    `normalize=False` preserves already-collapsed case-sensitive factual content.
+    """
     revisions = entry.setdefault("revisions", [])
     next_version = (revisions[-1]["version_number"] + 1) if revisions else 1
     if source != "human":
@@ -146,7 +150,7 @@ def append_revision(entry: dict, content: str, source: str,
     revision = new_revision(
         entry.get("id", ""), next_version, content,
         source=source, confidence_score=score, evidence=factors,
-        approved_at=approved_at, title=effective_title,
+        approved_at=approved_at, title=effective_title, normalize=normalize,
     )
     revisions.append(revision)
     entry["current_revision_id"] = revision["revision_id"]

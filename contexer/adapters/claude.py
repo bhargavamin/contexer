@@ -198,7 +198,7 @@ _COST_NOTE_TOKENS = 150
 _SAVED_MULTIPLIER = 4
 
 
-def rationale(repo_path: str, raw: str) -> str:
+def rationale(repo_path: str, raw: str, host: str = "claude") -> str:
     """UserPromptSubmit (every prompt): inject matching decisions for rationale questions, and
     deliver a due update notice when nothing better is competing for the line.
 
@@ -214,7 +214,7 @@ def rationale(repo_path: str, raw: str) -> str:
     it yields, so it is still owed on the next quiet prompt.
     """
     try:
-        payload = _recall_payload(repo_path, raw)
+        payload = _recall_payload(repo_path, raw, host)
         # Its own try, and it must stay that way. The recall payload is already built by this
         # point, and the update notice is bookkeeping on top of it: an exception here must not
         # cost the developer their context injection, which is the invariant CLAUDE.md states
@@ -233,7 +233,7 @@ def rationale(repo_path: str, raw: str) -> str:
         return "{}"
 
 
-def _recall_payload(repo_path: str, raw: str) -> dict:
+def _recall_payload(repo_path: str, raw: str, host: str = "claude") -> dict:
     """The retrieval half of `rationale`: injected context plus its user-facing note, or {}."""
     try:
         repo = store.resolve_repo(store.hook_repo_from_stdin(raw, repo_path))
@@ -241,7 +241,7 @@ def _recall_payload(repo_path: str, raw: str) -> dict:
             return {}
         session_id = store.session_from_hook_stdin(raw)
         ctx, meta = store.get_context_for_prompt_with_meta(
-            repo, store.prompt_from_hook_stdin(raw), session_id)
+            repo, store.prompt_from_hook_stdin(raw), session_id, host=host)
         if not ctx:
             return {}
         # systemMessage is user-facing only (the model never sees it): name WHAT was

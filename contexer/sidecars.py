@@ -122,6 +122,10 @@ KINDS: tuple[Kind, ...] = (
          "independent flock target for receipt append and compaction"),
     Kind("proposal_attention_lock", ".team-proposal-attention.lock", DURABLE,
          "independent flock target for attention queue read-modify-write"),
+    Kind("decision_impact", ".decision-impact_{slug}.json", DURABLE,
+         "bounded local guidance/check receipt history and pagination header"),
+    Kind("decision_impact_lock", ".decision-impact_{slug}.lock", DURABLE,
+         "independent non-blocking lock for decision-impact history"),
 
 
     # ── session bookkeeping: the session it belonged to is over ────────────────────────

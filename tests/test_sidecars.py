@@ -129,6 +129,8 @@ class TestClassification:
         "proposal_drainer_lock": ("share_policy.proposal_drainer_lock_path", {}),
         "proposal_receipts_lock": ("share_policy.proposal_receipts_lock_path", {}),
         "proposal_attention_lock": ("share_policy.proposal_attention_lock_path", {}),
+        "decision_impact": ("decision_impact.path", {"slug": None}),
+        "decision_impact_lock": ("decision_impact.lock_path", {"slug": None}),
         "console_state":    (None, {}),                      # ui/daemon.py keeps its own literal
         "console_log":      (None, {}),                      # (import allowlist; see sidecars.py)
         "working_set":      (None, {"slug": None, "session": "abc"}),   # working_set.path hashes the id
@@ -172,12 +174,12 @@ class TestClassification:
     def test_the_declared_name_matches_what_the_code_actually_writes(self, tmp_repo):
         """Direction two: for every kind with a builder, the builder's name equals the
         template's. This is what catches a declaration that has drifted from the code."""
-        from contexer import (anchors, auth, guard_engine, share, share_policy, spool,
+        from contexer import (anchors, auth, decision_impact, guard_engine, share, share_policy, spool,
                               team_context, updates, working_set)
         mods = {"store": store, "share": share, "auth": auth, "anchors": anchors,
                 "guard_engine": guard_engine, "team_context": team_context,
                 "share_policy": share_policy, "updates": updates, "spool": spool,
-                "working_set": working_set}
+                "working_set": working_set, "decision_impact": decision_impact}
         slug = store.repo_slug(tmp_repo)
         checked = 0
         for kind, (producer, fields) in self.PRODUCERS.items():

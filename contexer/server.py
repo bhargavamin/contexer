@@ -6,9 +6,11 @@ import threading
 import time
 import uuid
 from mcp.server.fastmcp import FastMCP
-from contexer import conflicts, evidence, lifecycle, policy_api, reconcile, share_policy, store
+from contexer import (conflicts, decision_impact, evidence, lifecycle, policy_api, reconcile,
+                      share_policy, store)
 
-SESSION_ID = os.environ.get("CLAUDE_CODE_SESSION_ID") or str(uuid.uuid4())
+_HOST_SESSION_ID = os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
+SESSION_ID = _HOST_SESSION_ID or str(uuid.uuid4())
 _UPDATE_CONTEXT_SOURCES = frozenset({"ai", "plan", "bootstrap", "scan"})
 
 # Bulk approval is refused rather than supported. Every approve stamps approved_by="human",
@@ -431,7 +433,8 @@ def reconcile_session(repo_path: str = "", session_id: str = "", dry_run: bool =
 @mcp.tool()
 def evaluate_policy(repo_path: str = "", intent: str = "", operation: str = "",
                     files: list[str] | None = None, artifact_kind: str = "",
-                    artifact: str = "") -> str:
+                    artifact: str = "", artifact_path: str = "",
+                    guidance_refs: list[str] | None = None) -> str:
     """Check an operation you are about to perform against the developer's approved decisions,
     and report what they say about it.
 
@@ -453,6 +456,12 @@ def evaluate_policy(repo_path: str = "", intent: str = "", operation: str = "",
                    `omitted` rather than passing clean.
     artifact:      the bytes themselves (<= 2 MiB). Pass them verbatim - a redacted or
                    truncated artifact makes a secret check find nothing.
+    artifact_path: one repository-relative text file to read independently (<= 64 KiB), only
+                   for a check the user requested. Requires a separately configured exact
+                   physical-workspace grant and is mutually exclusive with files/artifact.
+    guidance_refs: optional Contexer decision-impact receipt ids from the guidance used for
+                   this requested check (max 8). A reference links observations; it does not
+                   prove reading, obedience, authorship, or causal benefit.
 
     The sizes above are the schema half of one bound each; the evaluator holds the same bound
     and is what actually enforces it, so an over-bound value comes back as an error naming the
@@ -460,7 +469,8 @@ def evaluate_policy(repo_path: str = "", intent: str = "", operation: str = "",
     """
     result = policy_api.evaluate_operation(
         repo_path, intent=intent, operation=operation, files=list(files or []),
-        artifact_kind=artifact_kind, artifact=artifact)
+        artifact_kind=artifact_kind, artifact=artifact, artifact_path=artifact_path,
+        guidance_refs=list(guidance_refs or [])[:9])
     return policy_api.format_result(result, artifact)
 
 
@@ -490,13 +500,47 @@ def get_context(repo_path: str = "", query: str = "", entry_type: str = "", limi
     resolved = store.resolve_repo(repo_path)
     if not resolved:
         return "No repo path detected."
-    result = store.get_context(resolved, query, entry_type, limit, files)
+    observe = decision_impact.collection_enabled()
+    impact_rows: list[dict] | None = [] if observe else None
+    result = store.get_context(
+        resolved, query, entry_type, limit, files, _impact_rows=impact_rows)
     # Follow-through log (Retrieval V1 Part B): if a recent pointer nudge for this repo
     # matches this query's topic AND this call actually found decisions, record it. Log-only
     # - never changes the result above.
     found = "No matching decisions" not in result and "No context stored" not in result
     store.log_followup_if_matching(resolved, query, found)
+    if found and impact_rows:
+        try:
+            receipt_id = decision_impact.append(
+                resolved,
+                decision_impact.guidance_envelope(
+                    resolved, resolved, route="explicit_lookup", rows=impact_rows,
+                    session_id=_HOST_SESSION_ID, process_id=str(os.getpid()),
+                    configured_cap=(limit if limit > 0 else 25 if (query or entry_type or files)
+                                    else 10),
+                    output_bytes=len(result.encode("utf-8"))),
+            )
+        except Exception:
+            receipt_id = ""
+        if receipt_id:
+            result += f"\n\n[Contexer decision-impact receipt: {receipt_id}]"
     return result
+
+
+@mcp.tool()
+def get_decision_impact(repo_path: str = "", files: list[str] | None = None,
+                        limit: int = 10, receipt_id: str = "", cursor: str = "") -> str:
+    """Read retained local guidance/check observations without running a check.
+
+    Use this only when the user asks what Contexer contributed or what a requested policy
+    evaluation observed. Results concern specific conditions and artifact snapshots; they do
+    not prove that an agent consumed guidance or that Contexer improved the task.
+    """
+    resolved = store.resolve_repo(repo_path)
+    if not resolved:
+        return "Decision impact: repository not detected."
+    return decision_impact.format_report(decision_impact.report(
+        resolved, files=list(files or []), limit=limit, receipt_id=receipt_id, cursor=cursor))
 
 
 # Coarse upper bound for the whole share round-trip (drain outbox + push the new decision,
@@ -798,7 +842,7 @@ def get_context_for_prompt(repo_path: str = "", prompt: str = "") -> str:
     resolved = store.resolve_repo(repo_path)
     if not resolved:
         return ""
-    return store.get_context_for_prompt(resolved, prompt)
+    return store.get_context_for_prompt(resolved, prompt, host="mcp")
 
 
 @mcp.tool()

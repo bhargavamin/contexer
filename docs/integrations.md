@@ -22,13 +22,17 @@ contexer install --target cursor
 This registers Contexer's MCP server in `~/.cursor/mcp.json` and wires two Cursor hook events in `~/.cursor/hooks.json`:
 
 - `sessionStart`: injects your stored project rules and a usage nudge, and drops a managed always-apply rule at `<repo>/.cursor/rules/contexer.mdc`.
-- `beforeSubmitPrompt`: silently captures your task and any "always / never / don't / create a rule" directives.
+- `beforeSubmitPrompt`: silently captures your task, "always / never / don't / create a rule" directives, bounded deployment-constraint candidates, and explicit lifecycle corrections to retired environments.
 
 The managed rule file (marker-guarded, so your own rules are never touched) steers the agent to call Contexer's `get_context` before reading files for architecture/"why" questions, and to save rules via `update_context` rather than writing native `.cursor/rules` files.
 
 The first time Cursor calls a Contexer tool it asks you to approve it. Contexer does not pre-approve its own MCP tools for you.
 
-**Parity note:** Cursor's `beforeSubmitPrompt` hook cannot inject context (only allow/block) and Cursor exposes no usable compaction hook. So Contexer's per-prompt steering on Cursor rides on the session-start nudge plus the always-apply rule file, rather than Claude's per-prompt hooks. The core value (automatic session-start injection of your stored rules) works identically to Claude Code.
+**Parity note:** Cursor's `beforeSubmitPrompt` hook cannot inject context (only allow/block) and Cursor exposes no usable compaction hook. So Contexer's per-prompt steering on Cursor rides on the session-start nudge plus the always-apply rule file, rather than Claude's per-prompt hooks. That rule also tells Cursor to ask before keeping a factual deployment-constraint candidate that the write-only prompt hook held pending. The core value (automatic session-start injection of your stored rules) works identically to Claude Code.
+
+Across hosts, a sentence such as "the staging environment was retired but is now recreated" proposes a new version for review when exactly one approved decision has that retired environment as its subject and the two statements clear a similarity floor. The old version stays active until the developer approves the proposal; approval then advances the same decision and preserves its prior revision. Merely mentioning a retired component cannot overwrite an unrelated decision, and multiple eligible targets fail toward a standalone confirmation candidate. This also works when the sentence follows an unrelated question or task request because assertion checks apply to the matched lifecycle clause.
+
+Environment labels are not limited to production/staging conventions. Names such as `mercury`, `venus`, `preprod-blue`, `qa-east`, or `customer-demo env` are classified by their relationship in the sentence: one named environment is the exclusive placement and another is explicitly excluded. Arbitrary bare labels require strong placement language such as `runs`, `deployed`, or `hosted`; weak wording such as "used in checkout, not required in settings" is ignored unless the labels are explicitly marked as environments. Every accepted factual relationship remains a confirmation candidate rather than becoming active automatically.
 
 ## Codex
 

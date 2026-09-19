@@ -158,6 +158,15 @@ def _store_route(method: str, slug: str, rest: list[str], query: dict,
         # in a bare {"tombstones": ...} threw that signal away.
         return 200, console_api.list_tombstones(repo_path)
 
+    if rest == ["impact"] and method == "GET":
+        return 200, console_api.decision_impact_report(
+            repo_path,
+            files=_list_param(query, "file", MAX_FILES, MAX_FILE_LEN) or None,
+            limit=_int_param(query, "limit", 50) or 10,
+            receipt_id=_str_param(query, "receipt_id"),
+            cursor=_str_param(query, "cursor"),
+        )
+
     if rest == ["decisions"] and method == "GET":
         return 200, console_api.list_decisions(
             repo_path,

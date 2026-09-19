@@ -231,6 +231,7 @@ These results describe the measured tasks, not a guarantee for every project. A 
 | **[How it works](docs/how-it-works.md)** | Capture, bootstrap, session injection, review/versioning, cost, privacy |
 | **[Usage & CLI](docs/usage.md)** | Natural-language commands, CLI reference, teams login, troubleshooting, limitations |
 | **[Local console](docs/ui.md)** | `contexer ui`, the seven views, `[ui]` settings, security model |
+| **[Decision-impact pilot](docs/decision-impact-pilot.md)** | Explicitly requested file checks, local receipts, consent, setup, and claim limits |
 | **[Benchmark](docs/benchmark.md)** | Live-session A/B methodology, findings (including negative ones), raw data |
 
 ---

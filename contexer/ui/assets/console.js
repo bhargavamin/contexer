@@ -1151,6 +1151,9 @@
   // ── View: dashboard ───────────────────────────────────────────────────────────────────
   async function viewDashboard(slug) {
     const data = (await req("/api/store/" + encodeURIComponent(slug))) || {};
+    const impact = data.repo_path
+      ? (await req("/api/store/" + encodeURIComponent(slug) + "/impact?limit=5")) || {}
+      : {};
     const counts = data.counts || {};
     state.counts.global = num(counts.global);
     state.counts.team = num(counts.team);
@@ -1277,6 +1280,36 @@
           ),
     ]);
 
+    const impactRows = asList(impact.records, "records");
+    const impactCard = h("div", { class: "card" }, [
+      h("div", { class: "card-head" }, [
+        h("h3", { class: "card-title", text: "Decision checks · opt-in pilot" }),
+      ]),
+      impactRows.length === 0
+        ? h("p", {
+            class: "muted",
+            text: "No retained observations. A report never runs a check; checks run only when explicitly requested.",
+          })
+        : h("div", { class: "list" }, impactRows.map((row) => {
+            const conditions = asList(row.conditions, "conditions");
+            const satisfied = conditions.filter((c) => c.result === "satisfied" && c.verified === true).length;
+            const violated = conditions.filter((c) => c.result === "violated" && c.verified === true).length;
+            const unverified = conditions.length - satisfied - violated;
+            const artifact = row.artifact || {};
+            const summary = row.kind === "evaluation"
+              ? String(artifact.path || "unknown artifact") + ": " + satisfied +
+                " satisfied, " + violated + " violated, " + unverified + " unverified"
+              : asList(row.decisions, "decisions").length +
+                " decision revision(s) prepared; consumption unconfirmed";
+            return h("div", { class: "drow" }, [
+              h("span", { class: "drow-title", text: row.kind === "evaluation" ? "Condition check" : "Guidance" }),
+              h("span", { class: "drow-text", text: summary }),
+              h("span", { class: "drow-when", text: shortId(String(row.receipt_id || "")) }),
+            ]);
+          })),
+      h("p", { class: "muted", text: "Specific condition snapshots only — not proof that Contexer improved the task." }),
+    ]);
+
     const teamNote =
       stale.stale === true
         ? notice("warn", [
@@ -1296,7 +1329,7 @@
           ])
         : null;
 
-    return frag([head, teamNote, tombNote, cards, needs, mix, timeline]);
+    return frag([head, teamNote, tombNote, cards, needs, mix, impactCard, timeline]);
   }
 
   function needsRow(slug, d, isProposal) {

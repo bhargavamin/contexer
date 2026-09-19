@@ -69,7 +69,8 @@ def refusal_ack(entry: dict) -> str:
 
 
 def build_proposal(target: dict, content: str, subtype: str, session_id: str, now: str,
-                   source: str = "ai", title: str = "", source_files=None) -> dict:
+                   source: str = "ai", title: str = "", source_files=None,
+                   preserve_case: bool = False) -> dict:
     """A Suggested Update (pending revision) attached to a live decision: the detected new
     value, its confidence/evidence, and provenance. The live decision is NOT modified - this
     proposal waits for developer approval, at which point it is promoted to a new revision.
@@ -77,7 +78,8 @@ def build_proposal(target: dict, content: str, subtype: str, session_id: str, no
     source_files: stashed on the proposal, not applied yet — the live entry's anchor must
     keep describing the CURRENTLY RENDERED content until the proposal is actually promoted
     (see store._promote_proposal); re-anchoring here would clear the stale note while the old,
-    still-live text keeps rendering."""
+    still-live text keeps rendering. `preserve_case` keeps a factual candidate's leading
+    product identifier verbatim and is carried through approval."""
     sessions = sorted({s for s in (*(target.get("session_ids") or []), session_id) if s})
     score, factors = revisions.compute_confidence({
         "created_by": "ai",
@@ -85,7 +87,8 @@ def build_proposal(target: dict, content: str, subtype: str, session_id: str, no
         "session_ids": sessions,
         "memory_key": target.get("memory_key"),
     })
-    normalized_content = revisions.normalize_content(content)
+    normalized_content = (" ".join(content.split()) if preserve_case
+                          else revisions.normalize_content(content))
     proposal = {
         "content": normalized_content,
         "subtype": subtype or target.get("subtype", ""),
@@ -98,4 +101,6 @@ def build_proposal(target: dict, content: str, subtype: str, session_id: str, no
     proposal["title"] = revisions.normalize_title(title) or revisions.derive_title(normalized_content)
     if source_files:
         proposal["source_files"] = source_files
+    if preserve_case:
+        proposal["preserve_case"] = True
     return proposal

@@ -1106,3 +1106,135 @@ class TestWorstVerdict:
     def test_an_unknown_verdict_raises_rather_than_being_folded_away(self):
         with pytest.raises(ValueError):
             policy.worst_verdict(["allow", "bl0ck"])
+
+
+# ── Contract 04 bounded server-read profile ─────────────────────────────────────
+
+@pytest.mark.parametrize("pattern", [
+    "TODO", "^import requests$", r"literal\.value", r"cost\$", r"path\\name",
+])
+def test_bounded_file_profile_accepts_only_literal_regexes(pattern):
+    assert policy.bounded_file_rule_supported({
+        "type": "regex", "pattern": pattern, "flags": ""})
+
+
+@pytest.mark.parametrize("rule", [
+    {"type": "secret"},
+    {"type": "regex", "pattern": "(a+)+$", "flags": ""},
+    {"type": "regex", "pattern": "foo|bar", "flags": ""},
+    {"type": "regex", "pattern": "[abc]", "flags": ""},
+    {"type": "regex", "pattern": r"\bword\b", "flags": ""},
+    {"type": "regex", "pattern": "TODO", "flags": "i"},
+    {"type": "regex", "pattern": "TODO", "flags": []},
+    {"type": "regex", "pattern": "TODO", "flags": "", "paths": ["*.py"]},
+    {"type": "regex", "pattern": "x" * 129, "flags": ""},
+])
+def test_bounded_file_profile_rejects_unbounded_or_unsupported_rules(rule):
+    assert not policy.bounded_file_rule_supported(rule)
+
+
+def test_unsupported_bounded_rule_never_reaches_the_matcher(monkeypatch):
+    applicable = {
+        "decision_id": "d1", "revision_id": "r1", "kind": "armed", "title": "",
+        "rule": {"type": "regex", "pattern": "(a+)+$", "flags": ""},
+        "matched_files": ["src/app.py"],
+    }
+    request = {"artifact": {"kind": "file_content", "content": "a" * 31 + "!"},
+               "files": ["src/app.py"]}
+
+    def should_not_run(*_args, **_kwargs):
+        raise AssertionError("unsupported regex entered the matcher")
+
+    monkeypatch.setattr(policy, "rule_matches", should_not_run)
+    observed = []
+    result = policy.evaluate_policies(
+        [applicable], request, profile=policy.BOUNDED_FILE_PROFILE,
+        observer=observed.append, budget_exhausted=lambda: False)
+    assert result["evaluation_status"] == "partial"
+    assert result["unchecked"][0]["reason"] == "unsupported-check"
+    assert observed[0]["result"] == "unchecked"
+
+
+def test_bounded_profile_observes_zero_hit_as_a_specific_satisfied_condition():
+    applicable = {
+        "decision_id": "d1", "revision_id": "r1", "kind": "armed", "title": "",
+        "rule": {"type": "regex", "pattern": "TODO", "flags": ""},
+        "matched_files": ["src/app.py"],
+    }
+    request = {"artifact": {"kind": "file_content", "content": "ready\n"},
+               "files": ["src/app.py"]}
+    observed = []
+    result = policy.evaluate_policies(
+        [applicable], request, profile=policy.BOUNDED_FILE_PROFILE,
+        observer=observed.append, budget_exhausted=lambda: False)
+    assert result["verdict"] == "allow" and result["evaluation_status"] == "complete"
+    assert observed == [{
+        "decision_id": "d1", "revision_id": "r1",
+        "scope": "personal", "authority": "trusted_approved",
+        "rule_digest": policy.rule_digest(applicable["rule"]), "rule_type": "regex",
+        "profile": policy.BOUNDED_FILE_PROFILE, "result": "satisfied", "gap": "",
+        "files": ["src/app.py"], "identity_complete": False,
+        "applicable_units": 1, "evaluated_units": 1, "complete": True,
+        "match_count": 0, "verified": False,
+    }]
+
+
+def test_bounded_profile_rejects_the_entire_over_limit_rule_set_before_matching(monkeypatch):
+    applicable = [{
+        "decision_id": f"d{i:02d}", "revision_id": f"r{i}", "kind": "armed",
+        "title": "", "rule": {"type": "regex", "pattern": "TODO", "flags": ""},
+        "matched_files": ["app.py"],
+    } for i in range(policy.MAX_BOUNDED_FILE_RULES + 1)]
+    request = {"artifact": {"kind": "file_content", "content": "ready\n"},
+               "files": ["app.py"]}
+    monkeypatch.setattr(
+        policy, "rule_matches",
+        lambda *_a, **_k: pytest.fail("over-limit rule set entered the matcher"))
+    observed = []
+
+    result = policy.evaluate_policies(
+        applicable, request, profile=policy.BOUNDED_FILE_PROFILE,
+        observer=observed.append, budget_exhausted=lambda: False)
+
+    assert result["evaluation_status"] == "partial"
+    assert len(result["unchecked"]) == len(applicable)
+    assert {row["reason"] for row in result["unchecked"]} == {"budget"}
+    assert len(observed) == len(applicable)
+    assert all(row["result"] == "unchecked" and not row["verified"] for row in observed)
+
+
+def test_bounded_profile_soft_deadline_keeps_completed_result_and_marks_rest_unchecked():
+    applicable = [{
+        "decision_id": f"d{i}", "revision_id": f"r{i}", "kind": "armed",
+        "title": "", "rule": {"type": "regex", "pattern": "TODO", "flags": ""},
+        "matched_files": ["app.py"],
+    } for i in range(3)]
+    request = {"artifact": {"kind": "file_content", "content": "ready\n"},
+               "files": ["app.py"]}
+    checks = iter([False, True, True])
+    observed = []
+
+    result = policy.evaluate_policies(
+        applicable, request, profile=policy.BOUNDED_FILE_PROFILE,
+        observer=observed.append, budget_exhausted=lambda: next(checks))
+
+    assert result["evaluation_status"] == "partial"
+    assert [row["result"] for row in observed] == ["satisfied", "unchecked", "unchecked"]
+    assert [row.get("gap") for row in observed] == ["", "budget", "budget"]
+
+
+def test_condition_observer_failure_cannot_change_the_evaluation_result():
+    applicable = {
+        "decision_id": "d1", "revision_id": "r1", "kind": "armed", "title": "",
+        "rule": {"type": "regex", "pattern": "TODO", "flags": ""},
+        "matched_files": ["app.py"],
+    }
+    request = {"artifact": {"kind": "file_content", "content": "TODO\n"},
+               "files": ["app.py"]}
+
+    result = policy.evaluate_policies(
+        [applicable], request, profile=policy.BOUNDED_FILE_PROFILE,
+        observer=lambda _row: (_ for _ in ()).throw(OSError("ledger unavailable")),
+        budget_exhausted=lambda: False)
+
+    assert result["verdict"] == "block" and result["evaluation_status"] == "complete"
