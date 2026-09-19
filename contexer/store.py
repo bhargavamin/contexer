@@ -2057,11 +2057,12 @@ def capture_user_constraint_with_meta(
         confirmation_required = True
         content = lifecycle_revision[1][:600]
     elif not is_constraint:
-        if not prompt_capture.environment_scope_declaration(prompt):
+        scope_candidate = prompt_capture.environment_scope_candidate(prompt)
+        if scope_candidate is None:
             return None, None, None, {}
         subtype = "constraint"
         confirmation_required = True
-        content = " ".join(prompt.split())[:600]
+        content = scope_candidate[:600]
     else:
         confirmation_required = False
         content = _sanitize_directive(_directive_policy_text(prompt).strip())[:600]

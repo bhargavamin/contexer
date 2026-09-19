@@ -74,6 +74,7 @@ _DECLARATION_NONASSERTION = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+_LEADING_SCOPE_CONNECTOR = re.compile(r"^\s*(?:also|and|but)\s*[,;:]?\s*", re.IGNORECASE)
 
 _ENVIRONMENT_NAME_TOKEN = (
     rf"(?!(?:also|please|note|remember|currently|now|the)\b){_ENVIRONMENT_TOKEN}"
@@ -94,9 +95,13 @@ _ENV_LIFECYCLE_REVERSAL = re.compile(
     rf"\b(?P<subject>(?:the\s+)?(?P<environment>{_ENVIRONMENT_NAME})\s+env(?:ironment)?)\s+"
     rf"(?:(?:was|had\s+been|is)\s+)?"
     rf"(?P<retired>{_ENV_RETIRED_STATE.pattern})"
-    rf"[^?.!\n]{{0,80}}?(?:[,;]\s*)?(?:but|and)\s+now\s+"
-    rf"(?:(?:it|it['’]?s|that\s+env(?:ironment)?|the\s+same\s+env(?:ironment)?)\s+)?"
+    rf"[^?.!\n]{{0,80}}?(?:[,;]\s*)?(?:but|and)\s+"
+    rf"(?:"
+    rf"now\s+(?:(?:it|it['’]?s|that\s+env(?:ironment)?|the\s+same\s+env(?:ironment)?)\s+)?"
     rf"(?:(?:is|was|has\s+been)\s+)?"
+    rf"|(?:(?:it|that\s+env(?:ironment)?|the\s+same\s+env(?:ironment)?)\s+)?"
+    rf"(?:is|was|has\s+been)\s+now\s+"
+    rf")"
     rf"(?P<active>{_ENV_REACTIVATED_STATE.pattern})"
     rf"(?:\s+(?:in|on|under)\s+"
     rf"(?:(?!(?:and|but|then)\b)[\w'-]+\s*){{1,8}})?",
@@ -143,19 +148,31 @@ _PUNCT_RE = re.compile(r"[^\w\s]")
 _LIFECYCLE_TARGET_MIN_OVERLAP = 0.10
 
 
-def environment_scope_declaration(text: str) -> bool:
-    """Whether a prompt asserts placement in one environment and exclusion from another."""
+def environment_scope_candidate(text: str) -> str | None:
+    """Extract one asserted placement/exclusion clause from a possibly mixed prompt."""
     candidate = text.strip()
-    if not candidate or len(candidate) > MAX_FACTUAL_PROMPT_LEN or "?" in candidate:
-        return False
+    if not candidate or len(candidate) > MAX_FACTUAL_PROMPT_LEN:
+        return None
     if candidate.lower().startswith(_SYSTEM_TEXT_PREFIXES) or "```" in candidate:
-        return False
-    if _DECLARATION_NONASSERTION.search(candidate):
-        return False
+        return None
     placement = _SINGLE_ENV_DECLARATION.search(candidate)
     exclusion = _OTHER_ENV_EXCLUSION.search(candidate)
     if placement is None or exclusion is None:
-        return False
+        return None
+    between = candidate[min(placement.end(), exclusion.end()):
+                        max(placement.start(), exclusion.start())]
+    if re.search(r"[.?!\n]", between):
+        return None
+    match_start = min(placement.start(), exclusion.start())
+    match_end = max(placement.end(), exclusion.end())
+    left_boundary = max(candidate.rfind(mark, 0, match_start) for mark in ".?!\n")
+    right_offsets = [candidate.find(mark, match_end) for mark in ".?!\n"]
+    right_boundary = min((offset for offset in right_offsets if offset >= 0), default=len(candidate))
+    terminator = candidate[right_boundary:right_boundary + 1]
+    clause = candidate[left_boundary + 1:right_boundary].strip()
+    clause = _LEADING_SCOPE_CONNECTOR.sub("", clause).strip()
+    if terminator == "?" or not clause or _DECLARATION_NONASSERTION.search(clause):
+        return None
     matched = f"{placement.group(0)} {exclusion.group(0)}"
     explicit_environment_evidence = (
         (_KNOWN_ENVIRONMENT.search(placement.group(0))
@@ -169,7 +186,14 @@ def environment_scope_declaration(text: str) -> bool:
     # Company-specific labels such as mercury/venus remain supported when the sentence uses
     # deployment language. Weak relationship words alone ("used in checkout", "required in
     # settings") are too generic to establish that either token names an environment.
-    return bool(explicit_environment_evidence or _STRONG_PLACEMENT_OPERATION.search(matched))
+    if not (explicit_environment_evidence or _STRONG_PLACEMENT_OPERATION.search(matched)):
+        return None
+    return " ".join(clause.split())
+
+
+def environment_scope_declaration(text: str) -> bool:
+    """Whether a prompt asserts placement in one environment and exclusion from another."""
+    return environment_scope_candidate(text) is not None
 
 
 def environment_lifecycle_revision(text: str) -> tuple[str, str] | None:
@@ -187,8 +211,10 @@ def environment_lifecycle_revision(text: str) -> tuple[str, str] | None:
     # must not suppress the later factual correction. A question mark ending this clause still
     # rejects it, and reporting/hedging immediately before the matched subject remains unsafe.
     left_boundary = max(candidate.rfind(mark, 0, match.start()) for mark in ".?!\n")
-    assertion_context = candidate[left_boundary + 1:match.end()]
     following_boundary = re.search(r"[?.!\n]", candidate[match.end():])
+    right_boundary = (match.end() + following_boundary.start()
+                      if following_boundary is not None else len(candidate))
+    assertion_context = candidate[left_boundary + 1:right_boundary]
     if ((following_boundary is not None and following_boundary.group(0) == "?")
             or _LIFECYCLE_QUESTION_PREFIX.search(assertion_context)
             or _LIFECYCLE_NONASSERTION.search(assertion_context)):

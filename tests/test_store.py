@@ -1017,6 +1017,11 @@ class TestEnvironmentScopeDeclaration:
             "the uploader is only used in checkout and is not required in settings"
         ) is False
 
+    def test_scope_halves_cannot_be_combined_across_sentences(self):
+        assert prompt_capture.environment_scope_declaration(
+            "n8n runs only in production. Redis is not needed in staging"
+        ) is False
+
     def test_explicit_environment_markers_allow_company_specific_labels(self):
         assert prompt_capture.environment_scope_declaration(
             "the uploader is only used in checkout environment and is not required in "
@@ -1026,6 +1031,12 @@ class TestEnvironmentScopeDeclaration:
     def test_question_is_not_captured_as_a_declaration(self):
         text = "is n8n only running in live and not required in staging?"
         assert prompt_capture.environment_scope_declaration(text) is False
+
+    def test_extracts_scope_fact_after_unrelated_question(self):
+        text = "Can you run the tests? Also, n8n runs only in live and is not needed in staging"
+        assert prompt_capture.environment_scope_candidate(text) == (
+            "n8n runs only in live and is not needed in staging"
+        )
 
     @pytest.mark.parametrize("text", [
         "I thought n8n is only running in live env and it is not required in staging env, "
@@ -1061,6 +1072,15 @@ class TestEnvironmentLifecycleRevision:
         text = "Can you run the tests? Also, the staging environment was retired but now restored"
         assert prompt_capture.environment_lifecycle_revision(text) == (
             "staging", "the staging environment was retired but now restored")
+
+    def test_accepts_is_now_word_order_after_unrelated_question(self):
+        text = "Can you run the tests? Also, the staging environment was retired but is now restored"
+        assert prompt_capture.environment_lifecycle_revision(text) == (
+            "staging", "the staging environment was retired but is now restored")
+
+    def test_rejects_trailing_retraction_after_lifecycle_match(self):
+        text = "The staging environment was retired but now restored, but that is wrong"
+        assert prompt_capture.environment_lifecycle_revision(text) is None
 
     @pytest.mark.parametrize("text, environment", [
         ("The staging environment was retired, but now it is restored", "staging"),

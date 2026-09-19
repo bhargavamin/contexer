@@ -24,6 +24,41 @@ uv run contexer guard --explain
 uv run contexer guard anchors --list
 ```
 
+## Prompt-capture benchmark maintenance
+
+All agents working on prompt capture must read the runnable
+[benchmark guide](benchmarks/prompt_capture/README.md) and consult
+[the design plan](docs/prompt-capture-benchmark-plan.md) for oracle and safety rationale. This is
+separate from the applicability/relevance benchmark: retrieval scores do not validate capture
+correctness. `AGENTS.md` points here; keep this maintenance contract authoritative rather than
+duplicating it in host-specific instructions.
+
+The benchmark is implemented; its authoritative usage and maintenance guide is
+[`benchmarks/prompt_capture/README.md`](benchmarks/prompt_capture/README.md). Missing fixture,
+runner, or report output is a failed check, never a silent success.
+
+Run the dedicated benchmark before and after changes affecting prompt
+classification/extraction or sanitization, capture target selection, proposal/approval/history
+transitions, recurrence, evidence/failure recovery, or host capture/guidance adapters. Run it
+again after resolving a rebase or merge that touches those paths, and after changing its fixtures,
+runner, or assertions. Verified commands:
+
+```bash
+uv run python benchmarks/prompt_capture/run.py --format json
+uv run pytest tests/test_prompt_capture_benchmark.py --no-cov
+```
+
+Maintain coverage in the same change as relevant behavior: add a regression for each newly
+discovered capture bug, neighboring positive/negative cases, and alternate service/environment
+names where relevant. Reuse sufficient existing coverage with an explicit explanation rather
+than adding duplicates. Update independently justified expectations, fixture versions, gap
+registrations, and documentation when the intended contract changes; never rewrite gold labels
+just to match a failing implementation. Remove fixed strict xfails; new gaps require the plan's
+exact assertion-level evidence and review, never a blanket xfail or weakened safety assertion.
+In the handoff/PR, report commands and outcomes, known gaps versus unexpected failures, and
+coverage added or why existing cases suffice. Report unavailable checks explicitly. CI integration
+and the verified run/update instructions are part of benchmark implementation acceptance.
+
 ## Architecture
 
 A small package (`contexer/`), intentionally minimal. Each module below is a cohesive concern; adding a feature means finding the module that owns it, not adding a new layer.
