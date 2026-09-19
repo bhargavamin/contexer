@@ -143,30 +143,6 @@ def _source_hash() -> str:
     return digest.hexdigest()
 
 
-def _stable_id(alias: str) -> str:
-    digest = hashlib.sha256(alias.encode()).hexdigest()
-    return f"{digest[:8]}-{digest[8:12]}-{digest[12:16]}-{digest[16:20]}-{digest[20:32]}"
-
-
-def _seed_entry(spec: dict[str, Any], session: str = "seed") -> dict[str, Any]:
-    entry = store._new_decision_entry(
-        spec["content"], session, spec.get("subtype", "constraint"),
-        created_by=spec.get("created_by", "human"), status=spec.get("status", "approved"),
-        preserve_case=True,
-    )
-    entry_id = _stable_id(spec["alias"])
-    entry["id"] = entry_id
-    for revision in entry["revisions"]:
-        revision["decision_id"] = entry_id
-    if proposal := spec.get("proposal"):
-        entry["proposed_revision"] = review.build_proposal(
-            entry, proposal["content"], entry["subtype"], "proposal-session",
-            "2026-01-01T00:00:00+00:00", source=proposal.get("source", "ai"),
-            preserve_case=True,
-        )
-    return entry
-
-
 @contextmanager
 def _isolated_case() -> Iterator[tuple[str, Path]]:
     old_store_dir = store.store_dir
@@ -201,13 +177,25 @@ def _isolated_case() -> Iterator[tuple[str, Path]]:
 
 
 def _seed(repo: str, case: dict[str, Any]) -> dict[str, str]:
-    data = store.load(repo)
     aliases: dict[str, str] = {}
     for spec in case.get("seed", []):
-        entry = _seed_entry(spec)
-        data["entries"].append(entry)
-        aliases[spec["alias"]] = entry["id"]
-    store.save(repo, data)
+        stored, entry_id = store.update_decision(
+            repo, spec["content"], "seed", spec.get("subtype", "constraint"),
+            created_by=spec.get("created_by", "human"),
+        )
+        if not stored or not entry_id:
+            raise FixtureError(f"{case['case_id']}: could not seed {spec['alias']}")
+        data = store.load(repo)
+        entry = next(item for item in data["entries"] if item.get("id") == entry_id)
+        entry["status"] = spec.get("status", "approved")
+        if proposal := spec.get("proposal"):
+            entry["proposed_revision"] = review.build_proposal(
+                entry, proposal["content"], entry["subtype"], "proposal-session",
+                "2026-01-01T00:00:00+00:00", source=proposal.get("source", "ai"),
+                preserve_case=True,
+            )
+        store.save(repo, data)
+        aliases[spec["alias"]] = entry_id
     return aliases
 
 
@@ -293,13 +281,15 @@ def observe(case: dict[str, Any]) -> dict[str, Any]:
         return {"environment": result[0] if result else None,
                 "content": result[1] if result else None}
     if kind == "target":
-        entries = [_seed_entry(spec) for spec in case.get("seed", [])]
-        target = prompt_capture.find_environment_lifecycle_target(
-            case["environment"], case["prompt"], entries,
-        )
-        aliases = {entry["id"]: spec["alias"]
-                   for entry, spec in zip(entries, case.get("seed", []), strict=True)}
-        return {"target": aliases.get((target or {}).get("id"))}
+        with _isolated_case() as (repo, _root):
+            aliases = _seed(repo, case)
+            entries = [entry for entry in store.load(repo)["entries"]
+                       if entry.get("type") == "decision"]
+            target = prompt_capture.find_environment_lifecycle_target(
+                case["environment"], case["prompt"], entries,
+            )
+            reverse_aliases = {entry_id: alias for alias, entry_id in aliases.items()}
+            return {"target": reverse_aliases.get((target or {}).get("id"))}
     with _isolated_case() as (repo, _root):
         if kind == "capture":
             return _capture_observation(case, repo)
