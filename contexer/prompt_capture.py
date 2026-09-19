@@ -2,8 +2,8 @@
 
 Persistence, locking, revision mutation, and acknowledgments stay in :mod:`contexer.store`.
 This leaf only decides whether a prompt contains one of the deliberately narrow factual shapes
-that deterministic capture supports and, for lifecycle corrections, which existing decision is
-the closest still-retired target.
+that deterministic capture supports and, for lifecycle corrections, whether an approved
+decision is a sufficiently similar, subject-matched still-retired target.
 """
 
 import re
@@ -123,6 +123,7 @@ _ALIASED_ENVIRONMENT_REFERENCES = {
     "demo": re.compile(r"\bdemo(?:\s+env(?:ironment)?)?\b", re.IGNORECASE),
 }
 _PUNCT_RE = re.compile(r"[^\w\s]")
+_LIFECYCLE_TARGET_MIN_OVERLAP = 0.10
 
 
 def environment_scope_declaration(text: str) -> bool:
@@ -171,7 +172,7 @@ def _overlap_ratio(a: set[str], b: set[str]) -> float:
 def find_environment_lifecycle_target(
     environment: str, content: str, existing: list,
 ) -> dict | None:
-    """Find the closest still-retired decision for one explicitly reactivated environment."""
+    """Find an approved decision whose subject is the explicitly reactivated environment."""
     reference = _ALIASED_ENVIRONMENT_REFERENCES.get(environment)
     if reference is None:
         words = [re.escape(word) for word in environment.split()]
@@ -181,16 +182,19 @@ def find_environment_lifecycle_target(
     content_tokens = _tokenize(content)
     candidates = []
     for entry in existing:
-        if entry.get("status", "approved") == "pending_approval":
+        if entry.get("status", "approved") != "approved":
             continue
         current = revisions.current_content(entry)
-        if (reference.search(current) and _ENV_RETIRED_STATE.search(current)
-                and not _ENV_REACTIVATED_STATE.search(current)):
-            candidates.append(entry)
+        retired_subject = re.compile(
+            rf"^\s*(?:the\s+)?{reference.pattern}\s+"
+            rf"(?:(?:is|was|has\s+been|had\s+been)\s+)?{_ENV_RETIRED_STATE.pattern}",
+            re.IGNORECASE,
+        )
+        if not retired_subject.search(current) or _ENV_REACTIVATED_STATE.search(current):
+            continue
+        score = _overlap_ratio(content_tokens, _tokenize(current))
+        if score >= _LIFECYCLE_TARGET_MIN_OVERLAP:
+            candidates.append((score, entry))
     if not candidates:
         return None
-    return max(
-        candidates,
-        key=lambda entry: _overlap_ratio(
-            content_tokens, _tokenize(revisions.current_content(entry))),
-    )
+    return max(candidates, key=lambda candidate: candidate[0])[1]

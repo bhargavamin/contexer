@@ -1141,6 +1141,104 @@ class TestEnvironmentLifecycleRevision:
         updated = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == retired["id"])
         assert updated["revision"] == 2
 
+    def test_unrelated_environment_decision_is_not_overwritten(self, tmp_repo):
+        data = store.load(tmp_repo)
+        cache_decision = store._new_decision_entry(
+            "The staging Redis cache was decommissioned in favour of in-process LRU "
+            "caching, because the cross-process hit rate never exceeded 4%",
+            "old-session", "architecture", created_by="human", status="approved",
+        )
+        data["entries"].append(cache_decision)
+        store.save(tmp_repo, data)
+
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo, self.NEURAVERSE_PROMPT, "new-session")
+
+        assert entry_id != cache_decision["id"]
+        assert status == "confirmation_required"
+        assert content == "the staging env was removed but now its recreated in new project"
+        entries = [e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision"]
+        unchanged = next(e for e in entries if e["id"] == cache_decision["id"])
+        assert unchanged["content"] == cache_decision["content"]
+        assert unchanged["revision"] == 1
+        pending = next(e for e in entries if e["id"] == entry_id)
+        assert pending["status"] == "pending_approval"
+
+    def test_suggested_lifecycle_decision_is_not_promoted(self, tmp_repo):
+        data = store.load(tmp_repo)
+        suggestion = store._new_decision_entry(
+            "The staging environment was retired", "ai-session", "architecture",
+            created_by="ai", status="suggested",
+        )
+        data["entries"].append(suggestion)
+        store.save(tmp_repo, data)
+
+        entry_id, _, status = store.capture_user_constraint(
+            tmp_repo, self.NEURAVERSE_PROMPT, "new-session")
+
+        assert entry_id != suggestion["id"]
+        assert status == "confirmation_required"
+        entries = [e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision"]
+        unchanged = next(e for e in entries if e["id"] == suggestion["id"])
+        assert unchanged["status"] == "suggested"
+        assert unchanged["revision"] == 1
+        assert "approved_by" not in unchanged
+
+    def test_human_lifecycle_revision_supersedes_lower_trust_proposal(self, tmp_repo):
+        data = store.load(tmp_repo)
+        retired = store._new_decision_entry(
+            "The staging environment was retired", "old-session", "architecture",
+            created_by="human", status="approved",
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        retired["proposed_revision"] = review.build_proposal(
+            retired, "Keep staging retired", "architecture", "ai-session", now,
+            source="plan",
+        )
+        data["entries"].append(retired)
+        store.save(tmp_repo, data)
+
+        entry_id, _, status = store.capture_user_constraint(
+            tmp_repo, self.NEURAVERSE_PROMPT, "new-session")
+
+        assert (entry_id, status) == (retired["id"], "revision_applied")
+        updated = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == retired["id"])
+        assert "proposed_revision" not in updated
+        assert updated["superseded_proposals"][-1]["source"] == "plan"
+        assert updated["revision"] == 2
+
+    def test_human_lifecycle_revision_does_not_displace_human_proposal(self, tmp_repo):
+        data = store.load(tmp_repo)
+        retired = store._new_decision_entry(
+            "The staging environment was retired", "old-session", "architecture",
+            created_by="human", status="approved",
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        retired["proposed_revision"] = review.build_proposal(
+            retired, "Recreate staging in the legacy project", "architecture",
+            "human-session", now, source="human",
+        )
+        data["entries"].append(retired)
+        store.save(tmp_repo, data)
+
+        entry_id, _, status = store.capture_user_constraint(
+            tmp_repo, self.NEURAVERSE_PROMPT, "new-session")
+
+        assert (entry_id, status) == (retired["id"], "revision_already_pending")
+        updated = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == retired["id"])
+        assert updated["proposed_revision"]["source"] == "human"
+        assert updated["revision"] == 1
+        assert "superseded_proposals" not in updated
+
+    def test_unmatched_lifecycle_ack_describes_operational_context(self, tmp_repo):
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo, self.NEURAVERSE_PROMPT, "new-session")
+
+        ack = store.constraint_ack(content, status, entry_id)
+
+        assert "reusable operational context" in ack
+        assert "reusable deployment constraint" not in ack
+
 
 class TestConstraintNoiseGuards:
     """Regression: the constraint hook must not store pasted blobs or system text

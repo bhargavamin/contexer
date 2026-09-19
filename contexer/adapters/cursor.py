@@ -42,6 +42,11 @@ _NUDGE = (
     "engineering decision (a tech choice, a naming change, a constraint, a pattern) - tell "
     "the user what decision was made and call update_context to store it. If unsure whether "
     "it qualifies, surface it to the user and let them confirm.\n"
+    "- When the current prompt states as a fact that a service or tool runs only in one "
+    "explicitly named environment and is not needed in another environment, ask exactly: "
+    "'Should I keep this as a Contexer constraint?' The prompt hook may have held it pending, "
+    "but it is not active. Do not approve it yourself; after the user's answer, call "
+    "review_pending and approve/edit or ignore the matching item.\n"
     "- Keep unratified work provisional: store observations and decisions the user approved, but "
     "do NOT record your own not-yet-approved proposals - or approaches you tried and then reverted "
     "- as settled fact. A decision from an approved-but-unimplemented plan is provisional until "
@@ -74,6 +79,11 @@ _RULE_BODY = (
     "engineering decision (a tech choice, a naming change, a constraint, a pattern) - tell "
     "the user what decision was made and call `update_context` to store it. If unsure "
     "whether it qualifies, surface it to the user and let them confirm.\n\n"
+    "When the current prompt states as a fact that a service or tool runs only in one "
+    "explicitly named environment and is not needed in another environment, ask exactly: "
+    "'Should I keep this as a Contexer constraint?' The prompt hook may have held it pending, "
+    "but it is not active. Do not approve it yourself; after the user's answer, call "
+    "`review_pending` and approve/edit or ignore the matching item.\n\n"
     "Keep unratified work provisional: store observations and decisions the user approved, but "
     "do not record your own not-yet-approved proposals - or approaches you tried and then "
     "reverted - as settled fact. A decision from an approved-but-unimplemented plan is provisional "
@@ -213,7 +223,7 @@ def _anchor_current_repo(repo: str) -> None:
 
 
 def capture_constraint(repo_path: str, raw: str) -> str:
-    """beforeSubmitPrompt: anchor the repo pointer + auto-store 'always/never' directives.
+    """beforeSubmitPrompt: anchor the repo and capture directives or factual candidates.
 
     Cursor's evidence is prompt-only: its hooks cannot observe an edit, so this host emits
     `user_directive` and never `file_changed` - an absent event here means Cursor could not
