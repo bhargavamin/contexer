@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.48.2](https://github.com/bhargavamin/contexer/compare/v0.48.1...v0.48.2) (2026-09-19)
+
+
+### Performance Improvements
+
+* optimize working-set credit lookup ([#315](https://github.com/bhargavamin/contexer/issues/315)) ([01e99d1](https://github.com/bhargavamin/contexer/commit/01e99d14c02b028ecb5b59cbbea58c888d93b920))
+
 ## [0.48.1](https://github.com/bhargavamin/contexer/compare/v0.48.0...v0.48.1) (2026-09-19)
 
 
