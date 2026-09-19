@@ -155,7 +155,7 @@ class TestClaudeCaptureEntrypoints:
         entry = next(e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision")
         assert entry["status"] == "pending_approval"
 
-    def test_capture_lifecycle_correction_versions_neuraverse_decision(self, tmp_repo):
+    def test_capture_lifecycle_correction_proposes_neuraverse_revision(self, tmp_repo):
         data = store.load(tmp_repo)
         retired = store._new_decision_entry(
             "The staging environment was retired", "old-session", "architecture",
@@ -172,12 +172,14 @@ class TestClaudeCaptureEntrypoints:
         out = _json.loads(claude.capture_constraint(tmp_repo, raw))
 
         ctx = out["hookSpecificOutput"]["additionalContext"]
-        assert "stale decision was versioned forward" in ctx
+        assert "suggested update to existing rule" in ctx
+        assert "current rule stays active until it is reviewed" in ctx
         updated = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == retired["id"])
-        assert updated["revision"] == 2
-        assert updated["content"] == (
-            "The staging env was removed but now its recreated in new project"
+        assert updated["revision"] == 1
+        assert updated["proposed_revision"]["content"] == (
+            "the staging env was removed but now its recreated in new project"
         )
+        assert updated["content"] == "The staging environment was retired"
         assert "make a pr" not in updated["content"].lower()
 
     def test_rationale_injects_when_decisions_match(self, populated_repo):

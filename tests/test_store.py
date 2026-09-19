@@ -1012,6 +1012,17 @@ class TestEnvironmentScopeDeclaration:
             "n8n is not required in the staging environment"
         ) is False
 
+    def test_weak_bare_scopes_are_not_misclassified_as_environments(self):
+        assert prompt_capture.environment_scope_declaration(
+            "the uploader is only used in checkout and is not required in settings"
+        ) is False
+
+    def test_explicit_environment_markers_allow_company_specific_labels(self):
+        assert prompt_capture.environment_scope_declaration(
+            "the uploader is only used in checkout environment and is not required in "
+            "settings environment"
+        ) is True
+
     def test_question_is_not_captured_as_a_declaration(self):
         text = "is n8n only running in live and not required in staging?"
         assert prompt_capture.environment_scope_declaration(text) is False
@@ -1046,6 +1057,11 @@ class TestEnvironmentLifecycleRevision:
             "the staging env was removed but now its recreated in new project",
         )
 
+    def test_unrelated_question_does_not_suppress_later_asserted_reversal(self):
+        text = "Can you run the tests? Also, the staging environment was retired but now restored"
+        assert prompt_capture.environment_lifecycle_revision(text) == (
+            "staging", "the staging environment was retired but now restored")
+
     @pytest.mark.parametrize("text, environment", [
         ("The staging environment was retired, but now it is restored", "staging"),
         ("The QA env was decommissioned and now has been reactivated", "qa"),
@@ -1062,13 +1078,14 @@ class TestEnvironmentLifecycleRevision:
         "I heard the staging env was removed but now its recreated in a new project",
         "Maybe the staging env was removed but now its recreated in a new project",
         "Was the staging env removed but now recreated?",
+        "Was the staging env removed but now recreated",
         "The staging env is recreated in a new project",
         "The staging env was removed last year",
     ])
     def test_rejects_reported_uncertain_question_or_single_state(self, text):
         assert prompt_capture.environment_lifecycle_revision(text) is None
 
-    def test_versions_matching_retired_decision_and_keeps_history(self, tmp_repo):
+    def test_matching_retired_decision_versions_only_after_review(self, tmp_repo):
         data = store.load(tmp_repo)
         retired = store._new_decision_entry(
             "The staging environment was retired", "old-session", "architecture",
@@ -1081,16 +1098,25 @@ class TestEnvironmentLifecycleRevision:
         entry_id, content, status = store.capture_user_constraint(
             tmp_repo, self.NEURAVERSE_PROMPT, "new-session")
 
-        assert (entry_id, status) == (retired["id"], "revision_applied")
-        assert content == "The staging env was removed but now its recreated in new project"
+        assert (entry_id, status) == (retired["id"], "revision_proposed")
+        assert content == "the staging env was removed but now its recreated in new project"
+        updated = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == retired["id"])
+        assert updated["current_revision_id"] == old_revision_id
+        assert updated["revision"] == 1
+        assert updated["proposed_revision"]["content"] == content
+        assert updated["proposed_revision"]["source"] == "ai"
+        assert updated["content"] == "The staging environment was retired"
+
+        assert store.approve_decision(tmp_repo, entry_id, "approve")[0]
         updated = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == retired["id"])
         assert updated["current_revision_id"] != old_revision_id
         assert updated["revision"] == 2
         assert len(updated["revisions"]) == 2
         assert updated["revisions"][0]["content"] == "The staging environment was retired"
         assert updated["revisions"][1]["content"] == content
-        assert updated["revisions"][1]["source"] == "human"
+        assert updated["revisions"][1]["source"] == "ai"
         assert updated["status"] == "approved"
+        assert updated["approved_by"] == "human"
         assert len([e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision"]) == 1
 
     def test_repeat_does_not_create_another_revision(self, tmp_repo):
@@ -1102,8 +1128,10 @@ class TestEnvironmentLifecycleRevision:
         data["entries"].append(retired)
         store.save(tmp_repo, data)
 
-        assert store.capture_user_constraint(
-            tmp_repo, self.NEURAVERSE_PROMPT, "new-session")[2] == "revision_applied"
+        entry_id, _, status = store.capture_user_constraint(
+            tmp_repo, self.NEURAVERSE_PROMPT, "new-session")
+        assert status == "revision_proposed"
+        assert store.approve_decision(tmp_repo, entry_id, "approve")[0]
         assert store.capture_user_constraint(
             tmp_repo, self.NEURAVERSE_PROMPT, "later-session") == (None, None, None)
         updated = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == retired["id"])
@@ -1119,7 +1147,7 @@ class TestEnvironmentLifecycleRevision:
         entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == entry_id)
         assert entry["status"] == "pending_approval"
 
-    def test_versions_matching_custom_environment_name(self, tmp_repo):
+    def test_proposes_revision_for_matching_custom_environment_name(self, tmp_repo):
         data = store.load(tmp_repo)
         retired = store._new_decision_entry(
             "The preprod-blue environment was decommissioned", "old-session", "architecture",
@@ -1134,12 +1162,11 @@ class TestEnvironmentLifecycleRevision:
             "new-session",
         )
 
-        assert (entry_id, status) == (retired["id"], "revision_applied")
-        assert content == (
-            "The preprod-blue env was removed but now it is recreated in project nova"
-        )
+        assert (entry_id, status) == (retired["id"], "revision_proposed")
+        assert content == "the preprod-blue env was removed but now it is recreated in project nova"
         updated = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == retired["id"])
-        assert updated["revision"] == 2
+        assert updated["revision"] == 1
+        assert updated["proposed_revision"]["content"] == content
 
     def test_unrelated_environment_decision_is_not_overwritten(self, tmp_repo):
         data = store.load(tmp_repo)
@@ -1184,7 +1211,7 @@ class TestEnvironmentLifecycleRevision:
         assert unchanged["revision"] == 1
         assert "approved_by" not in unchanged
 
-    def test_human_lifecycle_revision_supersedes_lower_trust_proposal(self, tmp_repo):
+    def test_unconfirmed_lifecycle_fact_does_not_displace_lower_trust_proposal(self, tmp_repo):
         data = store.load(tmp_repo)
         retired = store._new_decision_entry(
             "The staging environment was retired", "old-session", "architecture",
@@ -1201,11 +1228,12 @@ class TestEnvironmentLifecycleRevision:
         entry_id, _, status = store.capture_user_constraint(
             tmp_repo, self.NEURAVERSE_PROMPT, "new-session")
 
-        assert (entry_id, status) == (retired["id"], "revision_applied")
+        assert (entry_id, status) == (retired["id"], "confirmation_conflict")
         updated = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == retired["id"])
-        assert "proposed_revision" not in updated
-        assert updated["superseded_proposals"][-1]["source"] == "plan"
-        assert updated["revision"] == 2
+        assert updated["proposed_revision"]["source"] == "plan"
+        assert updated["proposed_revision"]["content"] == "Keep staging retired"
+        assert "superseded_proposals" not in updated
+        assert updated["revision"] == 1
 
     def test_human_lifecycle_revision_does_not_displace_human_proposal(self, tmp_repo):
         data = store.load(tmp_repo)
@@ -1224,11 +1252,37 @@ class TestEnvironmentLifecycleRevision:
         entry_id, _, status = store.capture_user_constraint(
             tmp_repo, self.NEURAVERSE_PROMPT, "new-session")
 
-        assert (entry_id, status) == (retired["id"], "revision_already_pending")
+        assert (entry_id, status) == (retired["id"], "confirmation_conflict")
         updated = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == retired["id"])
         assert updated["proposed_revision"]["source"] == "human"
         assert updated["revision"] == 1
         assert "superseded_proposals" not in updated
+
+    def test_ambiguous_matching_targets_create_standalone_pending_candidate(self, tmp_repo):
+        data = store.load(tmp_repo)
+        retired = [
+            store._new_decision_entry(
+                "The staging environment was retired", f"old-session-{index}", "architecture",
+                created_by="human", status="approved",
+            )
+            for index in range(2)
+        ]
+        data["entries"].extend(retired)
+        store.save(tmp_repo, data)
+
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo, self.NEURAVERSE_PROMPT, "new-session")
+
+        assert status == "confirmation_required"
+        assert entry_id not in {entry["id"] for entry in retired}
+        entries = store.load(tmp_repo)["entries"]
+        for original in retired:
+            unchanged = next(entry for entry in entries if entry["id"] == original["id"])
+            assert unchanged["revision"] == 1
+            assert "proposed_revision" not in unchanged
+        pending = next(entry for entry in entries if entry["id"] == entry_id)
+        assert pending["status"] == "pending_approval"
+        assert pending["content"] == content
 
     def test_unmatched_lifecycle_ack_describes_operational_context(self, tmp_repo):
         entry_id, content, status = store.capture_user_constraint(
@@ -1431,6 +1485,19 @@ class TestCaptureUserConstraint:
         assert ok
         approved = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == entry_id)
         assert approved["content"].startswith("n8n"), "approval must preserve product-name casing"
+
+    def test_edited_environment_declaration_preserves_product_name_case(self, tmp_repo):
+        prompt = "n8n was is only running in live env it is not required in staging env"
+        entry_id, _, _ = store.capture_user_constraint(tmp_repo, prompt, "sess-1")
+
+        ok, _ = store.approve_decision(
+            tmp_repo, entry_id, "edit",
+            "n8n runs only in live env and is not required in staging env",
+        )
+
+        assert ok
+        approved = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == entry_id)
+        assert approved["content"].startswith("n8n")
 
 
 # ── Atomic save & corruption recovery ─────────────────────────────────────────

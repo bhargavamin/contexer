@@ -19,7 +19,10 @@ _SYSTEM_TEXT_PREFIXES = (
 )
 
 _ENV_OPERATION = r"(?:run(?:s|ning)?|enabled|deployed|hosted|available|used|required|needed)"
-_ENVIRONMENT_TOKEN = r"[A-Za-z0-9][A-Za-z0-9_-]*"
+_ENVIRONMENT_TOKEN = (
+    r"(?!(?:and|but|or|it|this|that|is|are|was|were|does)\b)"
+    r"[A-Za-z0-9][A-Za-z0-9_-]*"
+)
 _ENVIRONMENT_REF = (
     rf"(?:the\s+)?(?:"
     rf"(?:{_ENVIRONMENT_TOKEN}\s+){{0,2}}{_ENVIRONMENT_TOKEN}\s+env(?:ironment)?"
@@ -44,6 +47,16 @@ _OTHER_ENV_EXCLUSION = re.compile(
     rf")",
     re.IGNORECASE,
 )
+_KNOWN_ENVIRONMENT = re.compile(
+    r"\b(?:stag(?:e|ing)|test(?:ing)?|dev(?:elopment)?|prod(?:uction)?|live|qa|sandbox|"
+    r"preview|demo)\b",
+    re.IGNORECASE,
+)
+_ENVIRONMENT_MARKER = re.compile(r"\benv(?:ironment)?\b", re.IGNORECASE)
+_STRUCTURED_ENVIRONMENT = re.compile(
+    rf"\b{_ENVIRONMENT_TOKEN}[-_]{_ENVIRONMENT_TOKEN}\b", re.IGNORECASE)
+_STRONG_PLACEMENT_OPERATION = re.compile(
+    r"\b(?:run(?:s|ning)?|deployed|hosted|available)\b", re.IGNORECASE)
 _DECLARATION_NONASSERTION = re.compile(
     r"\b(?:"
     r"i\s+(?:thought|heard|read|was\s+told|am\s+not\s+sure|was\s+not\s+sure)"
@@ -103,6 +116,10 @@ _LIFECYCLE_NONASSERTION = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+_LIFECYCLE_QUESTION_PREFIX = re.compile(
+    r"^\s*(?:can|could|did|does|had|has|is|may|might|should|was|were|would)\b",
+    re.IGNORECASE,
+)
 
 _ENVIRONMENT_ALIASES = {
     "stage": "staging", "staging": "staging",
@@ -135,23 +152,46 @@ def environment_scope_declaration(text: str) -> bool:
         return False
     if _DECLARATION_NONASSERTION.search(candidate):
         return False
-    return bool(
-        _SINGLE_ENV_DECLARATION.search(candidate)
-        and _OTHER_ENV_EXCLUSION.search(candidate)
+    placement = _SINGLE_ENV_DECLARATION.search(candidate)
+    exclusion = _OTHER_ENV_EXCLUSION.search(candidate)
+    if placement is None or exclusion is None:
+        return False
+    matched = f"{placement.group(0)} {exclusion.group(0)}"
+    explicit_environment_evidence = (
+        (_KNOWN_ENVIRONMENT.search(placement.group(0))
+         or _ENVIRONMENT_MARKER.search(placement.group(0))
+         or _STRUCTURED_ENVIRONMENT.search(placement.group(0)))
+        and
+        (_KNOWN_ENVIRONMENT.search(exclusion.group(0))
+         or _ENVIRONMENT_MARKER.search(exclusion.group(0))
+         or _STRUCTURED_ENVIRONMENT.search(exclusion.group(0)))
     )
+    # Company-specific labels such as mercury/venus remain supported when the sentence uses
+    # deployment language. Weak relationship words alone ("used in checkout", "required in
+    # settings") are too generic to establish that either token names an environment.
+    return bool(explicit_environment_evidence or _STRONG_PLACEMENT_OPERATION.search(matched))
 
 
 def environment_lifecycle_revision(text: str) -> tuple[str, str] | None:
     """Extract an asserted environment retirement reversal as ``(environment, content)``."""
     candidate = text.strip()
     if (not candidate or len(candidate) > MAX_LIFECYCLE_PROMPT_LEN
-            or "?" in candidate or "```" in candidate):
+            or "```" in candidate):
         return None
-    if (candidate.lower().startswith(_SYSTEM_TEXT_PREFIXES)
-            or _LIFECYCLE_NONASSERTION.search(candidate)):
+    if candidate.lower().startswith(_SYSTEM_TEXT_PREFIXES):
         return None
     match = _ENV_LIFECYCLE_REVERSAL.search(candidate)
     if match is None:
+        return None
+    # Assertion guards are clause-local: an unrelated question earlier in a mixed task prompt
+    # must not suppress the later factual correction. A question mark ending this clause still
+    # rejects it, and reporting/hedging immediately before the matched subject remains unsafe.
+    left_boundary = max(candidate.rfind(mark, 0, match.start()) for mark in ".?!\n")
+    assertion_context = candidate[left_boundary + 1:match.end()]
+    following_boundary = re.search(r"[?.!\n]", candidate[match.end():])
+    if ((following_boundary is not None and following_boundary.group(0) == "?")
+            or _LIFECYCLE_QUESTION_PREFIX.search(assertion_context)
+            or _LIFECYCLE_NONASSERTION.search(assertion_context)):
         return None
     raw_environment = " ".join(match.group("environment").lower().split())
     environment = _ENVIRONMENT_ALIASES.get(raw_environment, raw_environment)
@@ -195,6 +235,6 @@ def find_environment_lifecycle_target(
         score = _overlap_ratio(content_tokens, _tokenize(current))
         if score >= _LIFECYCLE_TARGET_MIN_OVERLAP:
             candidates.append((score, entry))
-    if not candidates:
+    if len(candidates) != 1:
         return None
-    return max(candidates, key=lambda candidate: candidate[0])[1]
+    return candidates[0][1]
