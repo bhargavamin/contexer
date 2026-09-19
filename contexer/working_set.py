@@ -158,7 +158,7 @@ def has_credit(rows: list[dict], scope: str, decision_id: str,
     )
 
 
-DELIVERY_VERSION = 1
+DELIVERY_VERSION = 2
 
 
 def delivery_path(repo_path: str) -> Path:
@@ -166,8 +166,25 @@ def delivery_path(repo_path: str) -> Path:
     return store.sidecar_path("delivery_tally", slug=store.repo_slug(repo_path))
 
 
+def _delivery_lock_slug(repo_path: str) -> str:
+    """Own lock, not the store's: this is written from the PROMPT path, and taking the store
+    lock there would serialize rendering against every ordinary store write for a counter
+    nobody reads synchronously. `<slug>_delivery.lock` still matches the declared `lock` kind,
+    so it inherits that kind's DURABLE lifetime rather than becoming an unswept stray."""
+    return f"{store.repo_slug(repo_path)}_delivery"
+
+
+def _valid_stamp(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value == value
+
+
 def read_delivery_tally(repo_path: str) -> dict:
-    """Validated {"<scope>:<id>": {"n", "first", "last"}}; {} when absent or unreadable."""
+    """Validated {"<scope>:<id>": {"renders", "first", "last", "session"}}; {} if unusable.
+
+    Every field eviction or a report will later read is validated HERE, because the mutation
+    path sorts on `last`: a row that passes this filter without one raised KeyError out of a
+    fail-soft helper and into the prompt path.
+    """
     try:
         with delivery_path(repo_path).open("rb") as source:
             raw = source.read(MAX_BYTES + 1)
@@ -181,48 +198,79 @@ def read_delivery_tally(repo_path: str) -> dict:
     rows = data.get("rows")
     if not isinstance(rows, dict):
         return {}
-    return {key: row for key, row in rows.items()
-            if _valid_string(key) and isinstance(row, dict)
-            and isinstance(row.get("n"), int) and row["n"] > 0}
-
-
-def record_delivery_tally(repo_path: str, delivered: list[dict]) -> bool:
-    """Bump the durable per-decision delivery count. Never raises; never blocks output.
-
-    Keyed by (scope, decision id) rather than appended per event, so the file is bounded by the
-    store's own entry cap instead of by prompt volume - the tail-capped retrieval_log would
-    silently drop the START of a multi-week window, which is exactly the question this exists
-    to answer. Counts SESSIONS, not prompts: the session ledger already suppresses a repeat
-    delivery of the same fingerprint, so a second render inside one session never arrives here.
-    """
-    rows = read_delivery_tally(repo_path)
-    now = time.time()
-    changed = False
-    for row in delivered:
-        scope, decision_id = row.get("scope"), row.get("id")
-        if (not isinstance(scope, str) or scope not in SCOPES
-                or not _valid_string(decision_id)):
+    clean: dict[str, dict] = {}
+    for key, row in rows.items():
+        if not _valid_string(key) or not isinstance(row, dict):
             continue
-        existing = rows.get(f"{scope}:{decision_id}")
-        if existing:
-            existing["n"] += 1
-            existing["last"] = now
-        else:
-            rows[f"{scope}:{decision_id}"] = {"n": 1, "first": now, "last": now}
-        changed = True
-    if not changed:
-        return False
-    if len(rows) > store.MAX_ENTRIES:
-        # Evict least-recently-delivered first: the rows this exists to surface are the ones
-        # still doing work, and a decision unseen for longest is the safest thing to forget.
-        rows = dict(sorted(rows.items(), key=lambda kv: kv[1]["last"])[-store.MAX_ENTRIES:])
+        renders = row.get("renders")
+        if not isinstance(renders, int) or isinstance(renders, bool) or renders <= 0:
+            continue
+        if not _valid_stamp(row.get("first")) or not _valid_stamp(row.get("last")):
+            continue
+        session = row.get("session")
+        clean[key] = {"renders": renders, "first": row["first"], "last": row["last"],
+                      "session": session if _valid_string(session) else ""}
+    return clean
+
+
+def record_delivery_tally(repo_path: str, session_id: str, delivered: list[dict]) -> bool:
+    """Bump the durable per-decision render count. Never raises; never blocks output.
+
+    `renders` is a count of RENDER EVENTS, deliberately not of distinct sessions. Sessions
+    cannot be counted without persisting unbounded session identity per decision, and the
+    question this exists to answer - "was this decision ever delivered at all" - is a
+    boolean that no counting convention changes. `session` holds the most recent session id
+    and suppresses a consecutive repeat, which removes the two ways one session inflated the
+    figure (a compaction re-render, and a retry after the session ledger failed to persist
+    credit). Interleaved sessions still produce separate renders; that is why this is not
+    named `sessions`.
+
+    Keyed by (scope, decision id) rather than appended per event, so the file is bounded by
+    the store's entry cap instead of by prompt volume - the tail-capped retrieval_log would
+    silently drop the START of a multi-week window, which is exactly what this must not do.
+
+    Locked across read-modify-write: atomic replacement prevents a torn file but not a lost
+    update, and two sessions delivering in one repo would otherwise silently drop one
+    another's increments - undercounting is the one failure mode that makes a used decision
+    look dead.
+    """
     try:
-        store.ensure_store_dir()
-        store.atomic_write(delivery_path(repo_path),
-                           json.dumps({"v": DELIVERY_VERSION, "rows": rows, "ts": now},
-                                      separators=(",", ":")))
-        return True
-    except OSError:
+        with store.store_lock(_delivery_lock_slug(repo_path)):
+            rows = read_delivery_tally(repo_path)
+            now = time.time()
+            changed = False
+            for row in delivered:
+                scope, decision_id = row.get("scope"), row.get("id")
+                if (not isinstance(scope, str) or scope not in SCOPES
+                        or not _valid_string(decision_id)):
+                    continue
+                existing = rows.get(f"{scope}:{decision_id}")
+                if existing is None:
+                    rows[f"{scope}:{decision_id}"] = {
+                        "renders": 1, "first": now, "last": now, "session": session_id or ""}
+                    changed = True
+                elif existing["session"] != (session_id or ""):
+                    existing["renders"] += 1
+                    existing["last"] = now
+                    existing["session"] = session_id or ""
+                    changed = True
+            if not changed:
+                return False
+            if len(rows) > store.MAX_ENTRIES:
+                # Evict least-recently-delivered first: the rows this exists to surface are
+                # the ones still doing work, and the longest-unseen is safest to forget.
+                rows = dict(sorted(rows.items(),
+                                   key=lambda kv: kv[1]["last"])[-store.MAX_ENTRIES:])
+            store.ensure_store_dir()
+            store.atomic_write(delivery_path(repo_path),
+                               json.dumps({"v": DELIVERY_VERSION, "rows": rows, "ts": now},
+                                          separators=(",", ":")))
+            return True
+    except Exception:
+        # Wider than OSError on purpose: this is bookkeeping on the per-prompt path, where the
+        # standing rule is that optional state can never stop a hook rendering context. A
+        # malformed persisted row is filtered by the reader above, but the boundary must hold
+        # for whatever the next shape of corruption turns out to be.
         return False
 
 
@@ -247,7 +295,7 @@ def record_deliveries(repo_path: str, session_id: str, delivered: list[dict]) ->
     # Durable tally last: a tally failure must never cost the session its suppression credit,
     # which is the half that actually changes what the developer sees on the next prompt.
     written = write(repo_path, session_id, rows, state["injected"])
-    record_delivery_tally(repo_path, delivered)
+    record_delivery_tally(repo_path, session_id, delivered)
     return written
 
 

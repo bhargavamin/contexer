@@ -71,7 +71,7 @@ class TestDurableDeliveryTally:
             tmp_repo, "sess-1", [{"scope": "personal", "id": "dec-a", "fingerprint": "fp1"}])
 
         rows = working_set.read_delivery_tally(tmp_repo)
-        assert rows["personal:dec-a"]["n"] == 1
+        assert rows["personal:dec-a"]["renders"] == 1
 
     def test_tally_outlives_the_session_ledger(self, tmp_repo):
         """The whole point: the session sidecar is SESSION-lived, this is not."""
@@ -80,7 +80,7 @@ class TestDurableDeliveryTally:
         working_set.path(tmp_repo, "sess-1").unlink()     # session ends
 
         assert working_set.records(tmp_repo, "sess-1") == []
-        assert working_set.read_delivery_tally(tmp_repo)["personal:dec-a"]["n"] == 1
+        assert working_set.read_delivery_tally(tmp_repo)["personal:dec-a"]["renders"] == 1
 
     def test_separate_sessions_accumulate(self, tmp_repo):
         for session in ("s1", "s2", "s3"):
@@ -89,7 +89,7 @@ class TestDurableDeliveryTally:
                 [{"scope": "personal", "id": "dec-a", "fingerprint": "fp1"}])
 
         row = working_set.read_delivery_tally(tmp_repo)["personal:dec-a"]
-        assert row["n"] == 3
+        assert row["renders"] == 3
         assert row["first"] <= row["last"]
 
     def test_scope_is_part_of_identity(self, tmp_repo):
@@ -118,7 +118,7 @@ class TestDurableDeliveryTally:
 
         rows = working_set.read_delivery_tally(tmp_repo)
         assert len(rows) == 1
-        assert rows["personal:hot"]["n"] == 400
+        assert rows["personal:hot"]["renders"] == 400
 
     def test_eviction_drops_the_least_recently_delivered(self, tmp_repo):
         over = store.MAX_ENTRIES + 25
@@ -134,7 +134,12 @@ class TestDurableDeliveryTally:
     def test_malformed_rows_are_dropped_not_trusted(self, tmp_repo):
         store.ensure_store_dir()
         working_set.delivery_path(tmp_repo).write_text(
-            '{"v":1,"rows":{"personal:ok":{"n":2},"bad":{"n":"x"},"zero":{"n":0}}}',
+            '{"v":2,"rows":{'
+            '"personal:ok":{"renders":2,"first":1.0,"last":2.0},'
+            '"nonnumeric":{"renders":"x","first":1.0,"last":2.0},'
+            '"zero":{"renders":0,"first":1.0,"last":2.0},'
+            '"no-last":{"renders":2,"first":1.0},'
+            '"bad-last":{"renders":2,"first":1.0,"last":"soon"}}}',
             encoding="utf-8")
 
         rows = working_set.read_delivery_tally(tmp_repo)
@@ -168,6 +173,88 @@ class TestDurableDeliveryTally:
             working_set.path(tmp_repo, "s1").name) == sidecars.SESSION
 
 
+class TestDeliveryTallyIntegrity:
+    """The three reproductions from review of 8eddeb2, each pinned as a regression."""
+
+    def test_a_corrupt_row_cannot_escape_through_eviction(self, tmp_repo):
+        """Review repro: `KeyError: 'last'`. The old reader accepted a positive count with no
+        `last`, and eviction sorted on `last` outside the fail-soft boundary - so the poison
+        row only detonated once the tally exceeded the cap, which the original test never did.
+        """
+        store.ensure_store_dir()
+        poison = ('{"v":2,"rows":{"personal:rotten":{"renders":9,"first":1.0}}}')
+        working_set.delivery_path(tmp_repo).write_text(poison, encoding="utf-8")
+
+        over = store.MAX_ENTRIES + 5
+        assert working_set.record_delivery_tally(
+            tmp_repo, "s-evict",
+            [{"scope": "personal", "id": f"d{i}", "fingerprint": "f"} for i in range(over)])
+
+        rows = working_set.read_delivery_tally(tmp_repo)
+        assert len(rows) == store.MAX_ENTRIES
+        assert "personal:rotten" not in rows
+
+    def test_one_session_rendering_twice_counts_once(self, tmp_repo):
+        """Review repro: `same_session_count 2`. Compaction re-renders under the same session,
+        and a failed ledger write lets a later prompt retry it."""
+        for fingerprint in ("fp-before-edit", "fp-after-edit"):
+            working_set.record_delivery_tally(
+                tmp_repo, "one-session",
+                [{"scope": "personal", "id": "dec-a", "fingerprint": fingerprint}])
+
+        assert working_set.read_delivery_tally(tmp_repo)["personal:dec-a"]["renders"] == 1
+
+    def test_a_different_session_does_count_again(self, tmp_repo):
+        for session in ("s1", "s2"):
+            working_set.record_delivery_tally(
+                tmp_repo, session,
+                [{"scope": "personal", "id": "dec-a", "fingerprint": "fp"}])
+
+        assert working_set.read_delivery_tally(tmp_repo)["personal:dec-a"]["renders"] == 2
+
+    def test_compaction_replay_does_not_inflate_the_count(self, tmp_repo):
+        """End to end: _rehydrate_working_set clears credit and re-renders, which is the
+        production path that produced the inflated figure."""
+        ok, entry_id = store.update_decision(
+            tmp_repo,
+            "Key the store on the main worktree path, not the linked worktree path, because "
+            "rev-parse returns the worktree path and would split one repo across two stores",
+            "seed", "architecture", created_by="human")
+        assert ok
+        store.ensure_retrieval_index(tmp_repo)
+        store.get_context_for_prompt(tmp_repo, "why key the store on the main worktree?", "sess-c")
+
+        store._rehydrate_working_set(tmp_repo, "sess-c")
+
+        assert working_set.read_delivery_tally(tmp_repo)[f"personal:{entry_id}"]["renders"] == 1
+
+    def test_concurrent_writers_do_not_lose_each_others_rows(self, tmp_repo):
+        """Review repro: only `['personal:decision-1']` survived. Atomic replacement stops a
+        torn file, not a lost update - the read-modify-write needs the lock."""
+        import threading
+
+        start = threading.Barrier(2)
+
+        def deliver(decision_id: str, session: str) -> None:
+            start.wait()
+            for _ in range(20):
+                working_set.record_delivery_tally(
+                    tmp_repo, f"{session}-{_}",
+                    [{"scope": "personal", "id": decision_id, "fingerprint": "f"}])
+
+        threads = [threading.Thread(target=deliver, args=(f"decision-{i}", f"s{i}"))
+                   for i in (1, 2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        rows = working_set.read_delivery_tally(tmp_repo)
+        assert set(rows) == {"personal:decision-1", "personal:decision-2"}, rows
+        assert rows["personal:decision-1"]["renders"] == 20
+        assert rows["personal:decision-2"]["renders"] == 20
+
+
 class TestDeliveryTallyReachesTheRealRouter:
     def test_a_strong_injection_lands_in_the_durable_tally(self, tmp_repo):
         """End to end through get_context_for_prompt, not just the ledger API - the tally is
@@ -185,4 +272,4 @@ class TestDeliveryTallyReachesTheRealRouter:
 
         rows = working_set.read_delivery_tally(tmp_repo)
         assert f"personal:{entry_id}" in rows, rows
-        assert rows[f"personal:{entry_id}"]["n"] == 1
+        assert rows[f"personal:{entry_id}"]["renders"] == 1
