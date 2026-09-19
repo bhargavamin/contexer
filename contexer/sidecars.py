@@ -158,6 +158,12 @@ KINDS: tuple[Kind, ...] = (
     Kind("spool_maintained", ".spool_maintained_{slug}",   COLD_REPO, "spool retention/orphan-sweep TTL "
                                                                       "stamp; same shape as the two above"),
     Kind("guard_advised",    ".guard_advised_{slug}.json", COLD_REPO, "guard throttle stamps, content-keyed"),
+    # COLD_REPO, not SESSION: this answers "has this decision done any work lately", which a
+    # 7-day sweep would erase the moment the developer spends a week on another repo. Keyed by
+    # decision, not by event, so it is bounded by the store's own entry cap and never truncates
+    # on prompt volume the way the tail-capped retrieval_log does.
+    Kind("delivery_tally",   ".delivered_{slug}.json",     COLD_REPO, "per-repo durable count of which "
+                                                                      "decisions were actually rendered"),
     Kind("retrieval_index",  ".retrieval_index_{slug}.json", COLD_REPO, "BM25 index; disposable by design and "
                                                                       "rebuilt by ensure_retrieval_index at the "
                                                                       "next session start that needs it"),

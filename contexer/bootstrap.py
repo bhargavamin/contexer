@@ -121,6 +121,27 @@ def _text(path: Path, limit: int = MAX_FOCUSED_BYTES) -> str:
     return raw.decode("utf-8")
 
 
+def _nested_repo_root(path: Path) -> bool:
+    """Whether `path` is itself a checkout: a git worktree, submodule, or vendored clone.
+
+    `.claude` is deliberately walked (it holds real project config), and `.claude/worktrees/`
+    holds FULL REPO COPIES. Candidate identity digests the source path
+    (`c["candidate_id"] = _digest([source_file, source_heading, content])`), so the same
+    sentence in `CONTRIBUTING.md` and in `.claude/worktrees/<x>/CONTRIBUTING.md` yields two
+    different keys, the `old` lookup misses, and bootstrap stores the convention once per copy
+    present at scan time.
+
+    Checking for `.git` rather than naming `worktrees` covers linked worktrees, submodules and
+    vendored clones in one rule, and matches how the store already canonicalizes linked
+    worktrees onto the main worktree's slug. `.git` is a DIRECTORY in an ordinary clone and a
+    FILE in a linked worktree or submodule, so existence is the right test, not is_dir.
+    """
+    try:
+        return (path / ".git").exists()
+    except OSError:
+        return False
+
+
 def _paths(root: Path, *, external: bool = False):
     if root.is_file():
         if root.suffix.lower() == ".md":
@@ -133,7 +154,8 @@ def _paths(root: Path, *, external: bool = False):
             return
         dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS
                          and (not d.startswith(".") or d in {".github", ".claude", ".cursor"})
-                         and not (Path(parent) / d).is_symlink())
+                         and not (Path(parent) / d).is_symlink()
+                         and not _nested_repo_root(Path(parent) / d))
         # Documentation/config first in each directory; never let lockfiles consume budget.
         for name in sorted(files, key=lambda n: (Path(n).suffix != ".md", n)):
             path = Path(parent) / name

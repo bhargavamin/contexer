@@ -1,4 +1,10 @@
-"""Per-session delivered-guidance ledger and compaction restoration history.
+"""Delivered-guidance ledger: per-session suppression credit and a durable per-repo tally.
+
+Both are the same fact - "this decision was actually rendered to a session" - recorded at the
+same moment under two retention policies. The SESSION ledger answers "has this session already
+seen it" and dies with the session; the COLD_REPO tally answers "has this decision done any
+work at all" and outlives it. Splitting them across modules would mean two writers of one
+observation, so they stay together here.
 
 This module owns the working-set sidecar's schema, validation, bounded persistence, and
 most-recent-delivery ordering. Prompt selection and rendering remain in ``store.py``; they
@@ -152,6 +158,74 @@ def has_credit(rows: list[dict], scope: str, decision_id: str,
     )
 
 
+DELIVERY_VERSION = 1
+
+
+def delivery_path(repo_path: str) -> Path:
+    """The canonical durable delivery-tally path for one repo."""
+    return store.sidecar_path("delivery_tally", slug=store.repo_slug(repo_path))
+
+
+def read_delivery_tally(repo_path: str) -> dict:
+    """Validated {"<scope>:<id>": {"n", "first", "last"}}; {} when absent or unreadable."""
+    try:
+        with delivery_path(repo_path).open("rb") as source:
+            raw = source.read(MAX_BYTES + 1)
+        if len(raw) > MAX_BYTES:
+            return {}
+        data = json.loads(raw.decode("utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return {}
+    if not isinstance(data, dict) or data.get("v") != DELIVERY_VERSION:
+        return {}
+    rows = data.get("rows")
+    if not isinstance(rows, dict):
+        return {}
+    return {key: row for key, row in rows.items()
+            if _valid_string(key) and isinstance(row, dict)
+            and isinstance(row.get("n"), int) and row["n"] > 0}
+
+
+def record_delivery_tally(repo_path: str, delivered: list[dict]) -> bool:
+    """Bump the durable per-decision delivery count. Never raises; never blocks output.
+
+    Keyed by (scope, decision id) rather than appended per event, so the file is bounded by the
+    store's own entry cap instead of by prompt volume - the tail-capped retrieval_log would
+    silently drop the START of a multi-week window, which is exactly the question this exists
+    to answer. Counts SESSIONS, not prompts: the session ledger already suppresses a repeat
+    delivery of the same fingerprint, so a second render inside one session never arrives here.
+    """
+    rows = read_delivery_tally(repo_path)
+    now = time.time()
+    changed = False
+    for row in delivered:
+        scope, decision_id = row.get("scope"), row.get("id")
+        if (not isinstance(scope, str) or scope not in SCOPES
+                or not _valid_string(decision_id)):
+            continue
+        existing = rows.get(f"{scope}:{decision_id}")
+        if existing:
+            existing["n"] += 1
+            existing["last"] = now
+        else:
+            rows[f"{scope}:{decision_id}"] = {"n": 1, "first": now, "last": now}
+        changed = True
+    if not changed:
+        return False
+    if len(rows) > store.MAX_ENTRIES:
+        # Evict least-recently-delivered first: the rows this exists to surface are the ones
+        # still doing work, and a decision unseen for longest is the safest thing to forget.
+        rows = dict(sorted(rows.items(), key=lambda kv: kv[1]["last"])[-store.MAX_ENTRIES:])
+    try:
+        store.ensure_store_dir()
+        store.atomic_write(delivery_path(repo_path),
+                           json.dumps({"v": DELIVERY_VERSION, "rows": rows, "ts": now},
+                                      separators=(",", ":")))
+        return True
+    except OSError:
+        return False
+
+
 def record_deliveries(repo_path: str, session_id: str, delivered: list[dict]) -> bool:
     """MRU-upsert actual full-render receipts, one row per scoped decision."""
     if not session_id or not delivered:
@@ -170,7 +244,11 @@ def record_deliveries(repo_path: str, session_id: str, delivered: list[dict]) ->
             "scope": row["scope"], "id": row["id"],
             "fingerprint": row["fingerprint"],
         })
-    return write(repo_path, session_id, rows, state["injected"])
+    # Durable tally last: a tally failure must never cost the session its suppression credit,
+    # which is the half that actually changes what the developer sees on the next prompt.
+    written = write(repo_path, session_id, rows, state["injected"])
+    record_delivery_tally(repo_path, delivered)
+    return written
 
 
 def add_hints(repo_path: str, session_id: str, decision_ids: list[str]) -> None:
