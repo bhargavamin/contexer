@@ -21,6 +21,19 @@ copied onto ``store``; a leaf does not re-export another leaf's internals.
 
 import re
 
+
+_ORDINARY_TASK_VARIANT = "ordinary_task_v1"
+_TASK_PROMPT_MAX = 8_000
+_TASK_ACTIONS = frozenset({
+    "add", "implement", "fix", "update", "remove", "replace", "refactor",
+    "optimize", "migrate", "configure", "enable", "disable", "extend",
+})
+_TASK_WRAPPER_RE = re.compile(
+    r"^(?:```|~~~|>|[\"'`“”‘’]|\[(?:user|assistant|system)\]|"
+    r"(?:user|assistant|system|developer)\s*:|<(?:user|assistant|system|developer)>)",
+    re.IGNORECASE,
+)
+
 _QUERY_STOP_WORDS = frozenset({
     "why", "was", "the", "did", "we", "for", "what", "how", "is", "are",
     "can", "does", "this", "that", "it", "to", "of", "in", "a", "an",
@@ -86,6 +99,32 @@ def index_tokens(text: str) -> list[str]:
     the novelty filter's set-based `store._tokenize`)."""
     toks = re.findall(r"[a-z0-9]+", (text or "").lower())
     return [t for t in toks if len(t) >= 3 and t not in _QUERY_STOP_WORDS]
+
+
+def ordinary_task_request(prompt: object) -> bool:
+    """Whether ``prompt`` matches the bounded Contract-06 task-admission hypothesis.
+
+    This intentionally narrow, English-oriented classifier is experiment-only. It accepts
+    an optional leading ``please``, then one declared action verb, followed by at least two
+    distinct alphabetic subject terms. Quoted/transcript-shaped inputs and oversized or
+    malformed values fail closed so pasted instructions are not treated as the user's task.
+    """
+    if not isinstance(prompt, str) or not prompt or len(prompt) > _TASK_PROMPT_MAX:
+        return False
+    stripped = prompt.strip()
+    if not stripped or "\x00" in stripped or _TASK_WRAPPER_RE.match(stripped):
+        return False
+    words = re.findall(r"[a-z]+", stripped.lower())
+    if words and words[0] == "please":
+        words = words[1:]
+    if not words or words[0] not in _TASK_ACTIONS:
+        return False
+    action = words[0]
+    subjects = {
+        word for word in words[1:]
+        if len(word) >= 3 and word != action and word not in _QUERY_STOP_WORDS
+    }
+    return len(subjects) >= 2
 
 
 def unresolved_terms(keywords: list[str], index: dict) -> set[str]:

@@ -86,6 +86,43 @@ class TestGeminiRuntime:
         assert "Auto-stored as constraint" in context
         assert "always use conventional commits" in store.get_context(repo).lower()
 
+    def test_before_agent_task_experiment_adds_context_without_notice(self, home, tmp_path):
+        repo = str(tmp_path / "repo")
+        store.update_decision(
+            repo,
+            "Payment retries require exponential backoff and idempotency keys.",
+            "seed",
+            "architecture",
+        )
+        raw = json.dumps({"session_id": "s-task", "prompt": "Add payment retries"})
+
+        def candidate(*args, **kwargs):
+            return store.get_context_for_prompt(
+                *args, **kwargs, experiment_variant="ordinary_task_v1")
+
+        out = json.loads(gemini.before_agent(repo, raw, prompt_lookup=candidate))
+
+        assert "systemMessage" not in out
+        assert "auto-fetched for this task" in out["hookSpecificOutput"]["additionalContext"]
+
+    def test_before_agent_task_experiment_pointer_has_no_notice(self, home, tmp_path):
+        repo = str(tmp_path / "repo")
+        store.update_decision(
+            repo, "PostgreSQL is the primary datastore.", "seed", "architecture")
+        raw = json.dumps({
+            "session_id": "s-task-pointer",
+            "prompt": "Implement schema widget migration",
+        })
+
+        def candidate(*args, **kwargs):
+            return store.get_context_for_prompt(
+                *args, **kwargs, experiment_variant="ordinary_task_v1")
+
+        out = json.loads(gemini.before_agent(repo, raw, prompt_lookup=candidate))
+
+        assert "systemMessage" not in out
+        assert "Related stored decisions" in out["hookSpecificOutput"]["additionalContext"]
+
     def test_before_agent_deictic_directive_acks_pending(self, home, tmp_path):
         # decision ceb955f5: deictic directives are stored pending_approval, not trusted.
         repo = str(tmp_path / "repo")

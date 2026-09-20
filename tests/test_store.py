@@ -4634,6 +4634,125 @@ class TestContextForPromptMeta:
             store.get_context_for_prompt_with_meta(tmp_repo, prompt)[0]
 
 
+class TestOrdinaryTaskExperiment:
+    @staticmethod
+    def _seed(tmp_repo):
+        store.update_decision(
+            tmp_repo,
+            "Payment retries require exponential backoff and idempotency keys.",
+            RV1_SESSION,
+            "architecture",
+        )
+
+    def test_default_path_stays_silent_and_candidate_uses_real_router(self, tmp_repo):
+        self._seed(tmp_repo)
+
+        assert store.get_context_for_prompt(tmp_repo, "Add payment retries") == ""
+        text, meta = store.get_context_for_prompt_with_meta(
+            tmp_repo, "Add payment retries", experiment_variant="ordinary_task_v1")
+
+        assert text.startswith("[Contexer: auto-fetched for this task]")
+        assert "exponential backoff and idempotency keys" in text
+        assert meta["kind"] == "strong"
+        assert meta["origin"] == "ordinary_task_v1"
+
+    def test_existing_route_is_identical_when_candidate_is_selected(self, tmp_repo):
+        self._seed(tmp_repo)
+        prompt = "Why did we choose payment retries?"
+
+        baseline = store.get_context_for_prompt_with_meta(tmp_repo, prompt)
+        candidate = store.get_context_for_prompt_with_meta(
+            tmp_repo, prompt, experiment_variant="ordinary_task_v1")
+
+        assert candidate == baseline
+        assert "origin" not in candidate[1]
+
+    def test_no_match_and_missing_index_stay_silent(self, tmp_repo):
+        self._seed(tmp_repo)
+        assert store.get_context_for_prompt(
+            tmp_repo, "Add unrelated widget colors",
+            experiment_variant="ordinary_task_v1",
+        ) == ""
+        store._index_path(tmp_repo).unlink()
+        assert store.get_context_for_prompt(
+            tmp_repo, "Add payment retries",
+            experiment_variant="ordinary_task_v1",
+        ) == ""
+        assert not store._index_path(tmp_repo).exists()
+
+    def test_unknown_variant_is_rejected_and_malformed_prompt_fails_closed(self, tmp_repo):
+        self._seed(tmp_repo)
+        with pytest.raises(ValueError, match="unknown prompt experiment variant"):
+            store.get_context_for_prompt(
+                tmp_repo, "Add payment retries", experiment_variant="tuned_after_holdout")
+        assert store.get_context_for_prompt_with_meta(
+            tmp_repo, None, experiment_variant="ordinary_task_v1"
+        ) == ("", {"kind": "", "count": 0, "topics": []})
+
+    def test_repeated_task_task_switch_and_compaction_keep_existing_ledger_semantics(
+        self, tmp_repo
+    ):
+        self._seed(tmp_repo)
+        store.update_decision(
+            tmp_repo,
+            "Audit logging redaction removes protected customer fields while preserving "
+            "event identifiers.",
+            RV1_SESSION,
+            "constraint",
+        )
+        sid = "task-sequence"
+        first = store.get_context_for_prompt(
+            tmp_repo, "Add payment retries", sid, experiment_variant="ordinary_task_v1")
+        repeat = store.get_context_for_prompt(
+            tmp_repo, "Add payment retries", sid, experiment_variant="ordinary_task_v1")
+        switched = store.get_context_for_prompt(
+            tmp_repo, "Add audit logging redaction", sid,
+            experiment_variant="ordinary_task_v1")
+        compacted = store.post_compact_payload(tmp_repo, sid)
+
+        assert "Payment retries" in first
+        assert repeat == ""
+        assert "Audit logging redaction" in switched
+        assert "Payment retries" in compacted["context"]
+        assert "Audit logging redaction" in compacted["context"]
+
+    def test_candidate_preserves_existing_pending_authority_label(self, tmp_repo):
+        entry = store._new_decision_entry(
+            "Payment retries require exponential backoff and idempotency keys.",
+            RV1_SESSION,
+            "architecture",
+            created_by="ai",
+            status="pending_approval",
+        )
+        store.save(tmp_repo, {"repo_path": tmp_repo, "entries": [entry]})
+        text = store.get_context_for_prompt(
+            tmp_repo, "Add payment retries", experiment_variant="ordinary_task_v1")
+        assert "[pending]" in text
+        assert "Payment retries" in text
+
+    def test_contract04_collection_stays_opt_in_and_records_no_evaluation(
+        self, tmp_repo, monkeypatch
+    ):
+        from contexer import decision_impact
+
+        self._seed(tmp_repo)
+        seen = []
+        monkeypatch.setattr(decision_impact, "append", lambda repo, envelope: seen.append(envelope))
+        monkeypatch.setattr(decision_impact, "collection_enabled", lambda: False)
+        store.get_context_for_prompt(
+            tmp_repo, "Add payment retries", "off",
+            experiment_variant="ordinary_task_v1")
+        assert seen == []
+
+        monkeypatch.setattr(decision_impact, "collection_enabled", lambda: True)
+        store.get_context_for_prompt(
+            tmp_repo, "Add payment retries", "on",
+            experiment_variant="ordinary_task_v1")
+        assert len(seen) == 1
+        assert seen[0]["kind"] == "guidance"
+        assert seen[0]["route"] == "indexed_prompt"
+
+
 class TestWorkingSet:
     def test_second_identical_prompt_not_reinjected(self, tmp_repo):
         _seed_rv1(tmp_repo, RV1_CORPUS)

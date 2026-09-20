@@ -194,6 +194,83 @@ class TestClaudeCaptureEntrypoints:
         raw = _json.dumps({"prompt": "add a test"})
         assert claude.rationale(populated_repo, raw) == "{}"
 
+    @pytest.mark.parametrize("host", ["claude", "codex"])
+    def test_task_experiment_injects_without_user_facing_recall_notice(
+        self, tmp_repo, host
+    ):
+        store.update_decision(
+            tmp_repo,
+            "Payment retries require exponential backoff and idempotency keys.",
+            "seed",
+            "architecture",
+        )
+        raw = _json.dumps({"prompt": "Add payment retries", "session_id": f"task-{host}"})
+
+        def candidate(*args, **kwargs):
+            return store.get_context_for_prompt_with_meta(
+                *args, **kwargs, experiment_variant="ordinary_task_v1")
+
+        out = _json.loads(claude.rationale(
+            tmp_repo, raw, host=host, prompt_lookup=candidate))
+
+        assert "systemMessage" not in out
+        assert "auto-fetched for this task" in out["hookSpecificOutput"]["additionalContext"]
+
+    @pytest.mark.parametrize("host", ["claude", "codex"])
+    def test_task_experiment_pointer_also_has_no_user_facing_notice(self, tmp_repo, host):
+        store.update_decision(
+            tmp_repo,
+            "PostgreSQL is the primary datastore.",
+            "seed",
+            "architecture",
+        )
+        raw = _json.dumps({
+            "prompt": "Implement schema widget migration",
+            "session_id": f"task-pointer-{host}",
+        })
+
+        def candidate(*args, **kwargs):
+            return store.get_context_for_prompt_with_meta(
+                *args, **kwargs, experiment_variant="ordinary_task_v1")
+
+        out = _json.loads(claude.rationale(
+            tmp_repo, raw, host=host, prompt_lookup=candidate))
+
+        assert "systemMessage" not in out
+        assert "Related stored decisions" in out["hookSpecificOutput"]["additionalContext"]
+
+    def test_silent_task_context_defers_without_consuming_update_notice(
+        self, tmp_repo, monkeypatch
+    ):
+        store.update_decision(
+            tmp_repo,
+            "Payment retries require exponential backoff and idempotency keys.",
+            "seed",
+            "architecture",
+        )
+        notices = []
+        monkeypatch.setattr(claude.updates, "spawn_refresh", lambda: None)
+        monkeypatch.setattr(
+            claude.updates, "deliver",
+            lambda notify: notices.append("delivered") or notify("Contexer update available"),
+        )
+
+        def candidate(*args, **kwargs):
+            return store.get_context_for_prompt_with_meta(
+                *args, **kwargs, experiment_variant="ordinary_task_v1")
+
+        task_raw = _json.dumps({"prompt": "Add payment retries", "session_id": "task"})
+        task = _json.loads(claude.rationale(
+            tmp_repo, task_raw, prompt_lookup=candidate))
+        assert "systemMessage" not in task
+        assert notices == []
+
+        quiet_raw = _json.dumps({"prompt": "continue", "session_id": "task"})
+        quiet = _json.loads(claude.rationale(
+            tmp_repo, quiet_raw, prompt_lookup=candidate))
+        assert quiet["systemMessage"] == "Contexer update available"
+        assert notices == ["delivered"]
+
     def test_rationale_note_shows_tokens_saved(self, tmp_repo):
         # Above the _COST_NOTE_TOKENS gate the notice reports estimated SAVINGS
         # (est × (_SAVED_MULTIPLIER − 1), nearest 10) — never the injected count.

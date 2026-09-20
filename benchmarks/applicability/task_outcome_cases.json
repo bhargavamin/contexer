@@ -1,0 +1,424 @@
+{
+  "schema_version": 1,
+  "fixture_version": "1.0.0-synthetic-unreviewed",
+  "candidate_variant": "ordinary_task_v1",
+  "review_provenance": {
+    "label_source": "synthetic author labels",
+    "candidate_predictions_hidden_from_reviewer": false,
+    "independent_review_complete": false,
+    "holdout_opened": true,
+    "holdout_reuse": "historical test evidence only"
+  },
+  "scenario_coverage": {
+    "lexical_positives": {"fixture_cases": ["D-PAY-01", "D-RED-01"], "regression_tests": []},
+    "paraphrases_and_synonyms": {"fixture_cases": ["D-PAY-02", "D-RED-02"], "regression_tests": []},
+    "ambiguous_action_words": {"fixture_cases": [], "regression_tests": ["tests/test_retrieval.py::TestOrdinaryTaskRequest::test_rejects_wrappers_ambiguity_and_malformed_input"]},
+    "acknowledgements": {"fixture_cases": [], "regression_tests": ["tests/test_retrieval.py::TestOrdinaryTaskRequest::test_rejects_wrappers_ambiguity_and_malformed_input"]},
+    "general_non_project_requests": {"fixture_cases": ["D-PAY-06", "H-LOG-03"], "regression_tests": []},
+    "quoted_task_instructions": {"fixture_cases": ["D-PAY-15", "D-RED-15", "H-LOG-07"], "regression_tests": []},
+    "negation": {"fixture_cases": [], "regression_tests": ["tests/test_retrieval.py::TestOrdinaryTaskRequest::test_rejects_wrappers_ambiguity_and_malformed_input"]},
+    "no_relevant_knowledge": {"fixture_cases": ["V-MIG-04", "H-AUT-04"], "regression_tests": []},
+    "hub_files": {"fixture_cases": [], "regression_tests": ["tests/test_store.py::TestFileRoute::test_directory_anchor_hit_in_task_prompt_injects_full_content"]},
+    "incidental_mentions": {"fixture_cases": [], "regression_tests": ["tests/test_store.py::TestFileRoute::test_mention_only_hit_is_a_pointer_not_full_content"]},
+    "more_than_three_relevant_decisions": {"fixture_cases": [], "regression_tests": ["tests/test_revision_aware_guidance_delivery.py::TestVersionAwarePromptDelivery::test_pointer_and_cap_excluded_candidate_receive_no_credit"]},
+    "pending_conflicting_retired_withheld_guidance": {"fixture_cases": [], "regression_tests": ["tests/test_store.py::TestOrdinaryTaskExperiment::test_candidate_preserves_existing_pending_authority_label", "tests/test_revision_aware_guidance_delivery.py::TestVersionAwarePromptDelivery::test_proposal_edit_replays_rendered_conflict_view_then_suppresses", "tests/test_revision_aware_guidance_delivery.py::TestCompactionDeliveryBoundary::test_missing_local_is_not_restored_and_old_credit_is_cleared", "tests/test_revision_aware_guidance_delivery.py::TestCompactionDeliveryBoundary::test_claude_compaction_replays_refreshed_applicability_view"]},
+    "scope_collisions": {"fixture_cases": [], "regression_tests": ["tests/test_revision_aware_guidance_delivery.py::TestVersionAwarePromptDelivery::test_global_anchor_keeps_scope_when_local_store_has_same_id"]},
+    "revisions": {"fixture_cases": [], "regression_tests": ["tests/test_revision_aware_guidance_delivery.py::TestVersionAwarePromptDelivery::test_file_anchor_replays_current_revision"]},
+    "repeated_prompts": {"fixture_cases": [], "regression_tests": ["tests/test_store.py::TestOrdinaryTaskExperiment::test_repeated_task_task_switch_and_compaction_keep_existing_ledger_semantics"]},
+    "task_switches": {"fixture_cases": [], "regression_tests": ["tests/test_store.py::TestOrdinaryTaskExperiment::test_repeated_task_task_switch_and_compaction_keep_existing_ledger_semantics"]},
+    "compaction": {"fixture_cases": [], "regression_tests": ["tests/test_store.py::TestOrdinaryTaskExperiment::test_repeated_task_task_switch_and_compaction_keep_existing_ledger_semantics"]}
+  },
+  "repositories": [
+    {
+      "repo_id": "synthetic/commerce",
+      "decisions": [
+        {
+          "decision_id": "commerce-payment-retries",
+          "revision_id": "rev-commerce-payment-retries-v2",
+          "content": "Payment retries use bounded exponential backoff and idempotency keys.",
+          "title": "Bound payment retries safely",
+          "status": "approved",
+          "subtype": "architecture",
+          "timestamp": "2026-09-20T00:00:00+00:00",
+          "source": "human"
+        },
+        {
+          "decision_id": "commerce-audit-redaction",
+          "revision_id": "rev-commerce-audit-redaction-v1",
+          "content": "Audit logging redaction removes protected customer fields while preserving event identifiers.",
+          "title": "Redact protected audit fields",
+          "status": "approved",
+          "subtype": "constraint",
+          "timestamp": "2026-09-20T00:00:00+00:00",
+          "source": "human"
+        }
+      ]
+    },
+    {
+      "repo_id": "synthetic/platform",
+      "decisions": [
+        {
+          "decision_id": "platform-schema-migration",
+          "revision_id": "rev-platform-schema-migration-v3",
+          "content": "Database schema migrations retain legacy compatibility behavior during staged rollout.",
+          "title": "Preserve migration compatibility",
+          "status": "approved",
+          "subtype": "architecture",
+          "timestamp": "2026-09-20T00:00:00+00:00",
+          "source": "human"
+        },
+        {
+          "decision_id": "platform-cache-invalidation",
+          "revision_id": "rev-platform-cache-invalidation-v1",
+          "content": "Cache invalidation uses versioned namespace keys and bounded expiration.",
+          "title": "Version cache invalidation",
+          "status": "approved",
+          "subtype": "pattern",
+          "timestamp": "2026-09-20T00:00:00+00:00",
+          "source": "human"
+        }
+      ]
+    },
+    {
+      "repo_id": "synthetic/security",
+      "decisions": [
+        {
+          "decision_id": "security-token-refresh",
+          "revision_id": "rev-security-token-refresh-v2",
+          "content": "Authentication token refresh requires rotation and revocation checks.",
+          "title": "Rotate refreshed authentication tokens",
+          "status": "approved",
+          "subtype": "constraint",
+          "timestamp": "2026-09-20T00:00:00+00:00",
+          "source": "human"
+        },
+        {
+          "decision_id": "security-request-logging",
+          "revision_id": "rev-security-request-logging-v4",
+          "content": "Security logging excludes secret payload fields and preserves request identifiers.",
+          "title": "Keep secrets out of request logs",
+          "status": "approved",
+          "subtype": "constraint",
+          "timestamp": "2026-09-20T00:00:00+00:00",
+          "source": "human"
+        }
+      ]
+    }
+  ],
+  "scenario_groups": [
+    {
+      "split": "development",
+      "family": "payment_retry",
+      "repo_id": "synthetic/commerce",
+      "review_status": "unreviewed_synthetic",
+      "applicable": [
+        {"decision_id": "commerce-payment-retries", "revision_id": "rev-commerce-payment-retries-v2", "required_tier": "prompt_full"}
+      ],
+      "cases": [
+        {"case_id": "D-PAY-01", "host": "claude", "category": "ordinary_positive", "prompt": "Add payment retries"},
+        {"case_id": "D-PAY-02", "host": "codex", "category": "ordinary_positive", "prompt": "Implement payment retry backoff"},
+        {"case_id": "D-PAY-03", "host": "gemini", "category": "ordinary_positive", "prompt": "Configure bounded payment retries"},
+        {"case_id": "D-PAY-04", "host": "claude", "category": "ordinary_positive", "prompt": "Extend payment retries idempotency"},
+        {"case_id": "D-PAY-05", "host": "codex", "category": "ordinary_positive", "prompt": "Optimize payment retry handling"},
+        {"case_id": "D-PAY-06", "host": "claude", "category": "negative", "prompt": "Add dashboard widget colors", "expected_silence": true},
+        {"case_id": "D-PAY-07", "host": "codex", "category": "negative", "prompt": "Implement profile avatar cropping", "expected_silence": true},
+        {"case_id": "D-PAY-08", "host": "gemini", "category": "negative", "prompt": "Refactor newsletter template rendering", "expected_silence": true},
+        {"case_id": "D-PAY-09", "host": "claude", "category": "negative", "prompt": "Enable calendar reminder colors", "expected_silence": true},
+        {"case_id": "D-PAY-10", "host": "codex", "category": "negative", "prompt": "Remove obsolete image thumbnails", "expected_silence": true},
+        {"case_id": "D-PAY-11", "host": "claude", "category": "existing_route_control", "prompt": "Why did we choose payment retries?"},
+        {"case_id": "D-PAY-12", "host": "codex", "category": "existing_route_control", "prompt": "How do payment retries work?"},
+        {"case_id": "D-PAY-13", "host": "gemini", "category": "existing_route_control", "prompt": "What bounds payment retries?"},
+        {"case_id": "D-PAY-14", "host": "cursor", "category": "existing_route_control", "prompt": "Add payment retries", "expected_silence": true},
+        {"case_id": "D-PAY-15", "host": "claude", "category": "existing_route_control", "prompt": "\"Add payment retries\"", "expected_silence": true, "hard_negative": true}
+      ]
+    },
+    {
+      "split": "development",
+      "family": "audit_redaction",
+      "repo_id": "synthetic/commerce",
+      "review_status": "unreviewed_synthetic",
+      "applicable": [
+        {"decision_id": "commerce-audit-redaction", "revision_id": "rev-commerce-audit-redaction-v1", "required_tier": "prompt_full"}
+      ],
+      "cases": [
+        {"case_id": "D-RED-01", "host": "claude", "category": "ordinary_positive", "prompt": "Add audit logging redaction"},
+        {"case_id": "D-RED-02", "host": "codex", "category": "ordinary_positive", "prompt": "Implement protected customer redaction"},
+        {"case_id": "D-RED-03", "host": "gemini", "category": "ordinary_positive", "prompt": "Update audit redaction fields"},
+        {"case_id": "D-RED-04", "host": "claude", "category": "ordinary_positive", "prompt": "Extend logging event identifiers"},
+        {"case_id": "D-RED-05", "host": "codex", "category": "ordinary_positive", "prompt": "Fix customer field redaction"},
+        {"case_id": "D-RED-06", "host": "claude", "category": "negative", "prompt": "Add invoice export buttons", "expected_silence": true},
+        {"case_id": "D-RED-07", "host": "codex", "category": "negative", "prompt": "Implement product search filters", "expected_silence": true},
+        {"case_id": "D-RED-08", "host": "gemini", "category": "negative", "prompt": "Optimize image loading animations", "expected_silence": true},
+        {"case_id": "D-RED-09", "host": "claude", "category": "negative", "prompt": "Configure weekly email digests", "expected_silence": true},
+        {"case_id": "D-RED-10", "host": "codex", "category": "negative", "prompt": "Replace storefront navigation icons", "expected_silence": true},
+        {"case_id": "D-RED-11", "host": "claude", "category": "existing_route_control", "prompt": "Why redact protected customer fields?"},
+        {"case_id": "D-RED-12", "host": "codex", "category": "existing_route_control", "prompt": "How does audit logging redaction work?"},
+        {"case_id": "D-RED-13", "host": "gemini", "category": "existing_route_control", "prompt": "What preserves audit event identifiers?"},
+        {"case_id": "D-RED-14", "host": "cursor", "category": "existing_route_control", "prompt": "Add audit logging redaction", "expected_silence": true},
+        {"case_id": "D-RED-15", "host": "claude", "category": "existing_route_control", "prompt": "> Add audit logging redaction", "expected_silence": true, "hard_negative": true}
+      ]
+    },
+    {
+      "split": "validation",
+      "family": "schema_migration",
+      "repo_id": "synthetic/platform",
+      "review_status": "unreviewed_synthetic",
+      "applicable": [
+        {"decision_id": "platform-schema-migration", "revision_id": "rev-platform-schema-migration-v3", "required_tier": "prompt_full"}
+      ],
+      "cases": [
+        {"case_id": "V-MIG-01", "host": "claude", "category": "ordinary_positive", "prompt": "Add database schema migration"},
+        {"case_id": "V-MIG-02", "host": "codex", "category": "ordinary_positive", "prompt": "Implement legacy migration compatibility"},
+        {"case_id": "V-MIG-03", "host": "gemini", "category": "ordinary_positive", "prompt": "Configure staged schema rollout"},
+        {"case_id": "V-MIG-04", "host": "claude", "category": "negative", "prompt": "Add mobile gesture navigation", "expected_silence": true},
+        {"case_id": "V-MIG-05", "host": "codex", "category": "negative", "prompt": "Implement document preview thumbnails", "expected_silence": true},
+        {"case_id": "V-MIG-06", "host": "gemini", "category": "negative", "prompt": "Remove unused marketing banners", "expected_silence": true},
+        {"case_id": "V-MIG-07", "host": "claude", "category": "existing_route_control", "prompt": "Why preserve migration compatibility?"},
+        {"case_id": "V-MIG-08", "host": "cursor", "category": "existing_route_control", "prompt": "Add database schema migration", "expected_silence": true}
+      ]
+    },
+    {
+      "split": "validation",
+      "family": "cache_invalidation",
+      "repo_id": "synthetic/platform",
+      "review_status": "unreviewed_synthetic",
+      "applicable": [
+        {"decision_id": "platform-cache-invalidation", "revision_id": "rev-platform-cache-invalidation-v1", "required_tier": "prompt_full"}
+      ],
+      "cases": [
+        {"case_id": "V-CAC-01", "host": "claude", "category": "ordinary_positive", "prompt": "Implement cache invalidation keys"},
+        {"case_id": "V-CAC-02", "host": "codex", "category": "ordinary_positive", "prompt": "Configure bounded cache expiration"},
+        {"case_id": "V-CAC-03", "host": "claude", "category": "negative", "prompt": "Add printable receipt layouts", "expected_silence": true},
+        {"case_id": "V-CAC-04", "host": "codex", "category": "negative", "prompt": "Extend catalog sorting options", "expected_silence": true},
+        {"case_id": "V-CAC-05", "host": "gemini", "category": "existing_route_control", "prompt": "How does cache invalidation work?"},
+        {"case_id": "V-CAC-06", "host": "claude", "category": "existing_route_control", "prompt": "What versions cache namespace keys?"},
+        {"case_id": "V-CAC-07", "host": "claude", "category": "existing_route_control", "prompt": "User: Implement cache invalidation keys", "expected_silence": true, "hard_negative": true}
+      ]
+    },
+    {
+      "split": "heldout",
+      "family": "token_refresh",
+      "repo_id": "synthetic/security",
+      "review_status": "unreviewed_synthetic",
+      "applicable": [
+        {"decision_id": "security-token-refresh", "revision_id": "rev-security-token-refresh-v2", "required_tier": "prompt_full"}
+      ],
+      "cases": [
+        {"case_id": "H-AUT-01", "host": "claude", "category": "ordinary_positive", "prompt": "Add authentication token refresh"},
+        {"case_id": "H-AUT-02", "host": "codex", "category": "ordinary_positive", "prompt": "Implement token rotation checks"},
+        {"case_id": "H-AUT-03", "host": "gemini", "category": "ordinary_positive", "prompt": "Extend refresh revocation handling"},
+        {"case_id": "H-AUT-04", "host": "claude", "category": "negative", "prompt": "Add account theme preferences", "expected_silence": true},
+        {"case_id": "H-AUT-05", "host": "codex", "category": "negative", "prompt": "Implement team avatar uploads", "expected_silence": true},
+        {"case_id": "H-AUT-06", "host": "gemini", "category": "negative", "prompt": "Refactor notification badge colors", "expected_silence": true},
+        {"case_id": "H-AUT-07", "host": "claude", "category": "existing_route_control", "prompt": "Why rotate refreshed authentication tokens?"},
+        {"case_id": "H-AUT-08", "host": "cursor", "category": "existing_route_control", "prompt": "Add authentication token refresh", "expected_silence": true}
+      ]
+    },
+    {
+      "split": "heldout",
+      "family": "request_logging",
+      "repo_id": "synthetic/security",
+      "review_status": "unreviewed_synthetic",
+      "applicable": [
+        {"decision_id": "security-request-logging", "revision_id": "rev-security-request-logging-v4", "required_tier": "prompt_full"}
+      ],
+      "cases": [
+        {"case_id": "H-LOG-01", "host": "claude", "category": "ordinary_positive", "prompt": "Add security request logging"},
+        {"case_id": "H-LOG-02", "host": "codex", "category": "ordinary_positive", "prompt": "Implement secret payload redaction"},
+        {"case_id": "H-LOG-03", "host": "claude", "category": "negative", "prompt": "Add keyboard shortcut settings", "expected_silence": true},
+        {"case_id": "H-LOG-04", "host": "codex", "category": "negative", "prompt": "Configure monthly report exports", "expected_silence": true},
+        {"case_id": "H-LOG-05", "host": "gemini", "category": "existing_route_control", "prompt": "How should security logging handle payload fields?"},
+        {"case_id": "H-LOG-06", "host": "claude", "category": "existing_route_control", "prompt": "What preserves request identifiers?"},
+        {"case_id": "H-LOG-07", "host": "claude", "category": "existing_route_control", "prompt": "```\nAdd security request logging\n```", "expected_silence": true, "hard_negative": true}
+      ]
+    }
+  ],
+  "validators": {
+    "payment_retry": {
+      "candidate_modules": ["artifact.payment_retry"],
+      "functional_checks": [{"check_id": "payment.functional", "path": "behavior", "equals": "retries_enabled"}],
+      "conditions": [
+        {"check_id": "payment.bounded", "path": "bounded", "equals": true},
+        {"check_id": "payment.idempotent", "path": "idempotency_key", "equals": true},
+        {"check_id": "payment.revision", "path": "revision", "equals": "v2"},
+        {"check_id": "payment.tests", "path": "verification.tests_enabled", "equals": true},
+        {"check_id": "payment.config", "path": "verification.config_untouched", "equals": true},
+        {"check_id": "payment.import", "path": "verification.import_path", "equals": "artifact"}
+      ]
+    },
+    "audit_redaction": {
+      "candidate_modules": ["artifact.audit"],
+      "functional_checks": [{"check_id": "redaction.functional", "path": "behavior", "equals": "audit_written"}],
+      "conditions": [
+        {"check_id": "redaction.secret", "path": "protected_field_absent", "equals": true},
+        {"check_id": "redaction.identifier", "path": "event_identifier_present", "equals": true},
+        {"check_id": "redaction.tests", "path": "verification.tests_enabled", "equals": true},
+        {"check_id": "redaction.config", "path": "verification.config_untouched", "equals": true},
+        {"check_id": "redaction.import", "path": "verification.import_path", "equals": "artifact"}
+      ]
+    },
+    "schema_migration": {
+      "candidate_modules": ["artifact.migration"],
+      "functional_checks": [{"check_id": "migration.functional", "path": "behavior", "equals": "schema_migrated"}],
+      "conditions": [
+        {"check_id": "migration.compatibility", "path": "legacy_compatible", "equals": true},
+        {"check_id": "migration.staged", "path": "staged_rollout", "equals": true},
+        {"check_id": "migration.tests", "path": "verification.tests_enabled", "equals": true},
+        {"check_id": "migration.config", "path": "verification.config_untouched", "equals": true},
+        {"check_id": "migration.import", "path": "verification.import_path", "equals": "artifact"}
+      ]
+    },
+    "cache_invalidation": {
+      "candidate_modules": ["artifact.cache"],
+      "functional_checks": [{"check_id": "cache.functional", "path": "behavior", "equals": "cache_invalidated"}],
+      "conditions": [
+        {"check_id": "cache.versioned", "path": "versioned_namespace", "equals": true},
+        {"check_id": "cache.bounded", "path": "bounded_expiration", "equals": true},
+        {"check_id": "cache.tests", "path": "verification.tests_enabled", "equals": true},
+        {"check_id": "cache.config", "path": "verification.config_untouched", "equals": true},
+        {"check_id": "cache.import", "path": "verification.import_path", "equals": "artifact"}
+      ]
+    },
+    "token_refresh": {
+      "candidate_modules": ["artifact.auth"],
+      "functional_checks": [{"check_id": "auth.functional", "path": "behavior", "equals": "token_refreshed"}],
+      "conditions": [
+        {"check_id": "auth.rotation", "path": "rotation_checked", "equals": true},
+        {"check_id": "auth.revocation", "path": "revocation_checked", "equals": true},
+        {"check_id": "auth.tests", "path": "verification.tests_enabled", "equals": true},
+        {"check_id": "auth.config", "path": "verification.config_untouched", "equals": true},
+        {"check_id": "auth.import", "path": "verification.import_path", "equals": "artifact"}
+      ]
+    },
+    "request_logging": {
+      "candidate_modules": ["artifact.logging"],
+      "functional_checks": [{"check_id": "logging.functional", "path": "behavior", "equals": "request_logged"}],
+      "conditions": [
+        {"check_id": "logging.secret", "path": "secret_payload_absent", "equals": true},
+        {"check_id": "logging.identifier", "path": "request_identifier_present", "equals": true},
+        {"check_id": "logging.tests", "path": "verification.tests_enabled", "equals": true},
+        {"check_id": "logging.config", "path": "verification.config_untouched", "equals": true},
+        {"check_id": "logging.import", "path": "verification.import_path", "equals": "artifact"}
+      ]
+    }
+  },
+  "outcome_assignments": [
+    {
+      "assignment_id": "O-PAY-GOOD", "task_id": "T-PAY", "family": "payment_retry", "expected_aggregate": "success",
+      "baseline_artifact": {"behavior": "disabled"},
+      "artifact": {"behavior": "retries_enabled", "bounded": true, "idempotency_key": true, "revision": "v2", "verification": {"tests_enabled": true, "config_untouched": true, "import_path": "artifact"}}
+    },
+    {
+      "assignment_id": "O-RED-GOOD", "task_id": "T-RED", "family": "audit_redaction", "expected_aggregate": "success",
+      "baseline_artifact": {"behavior": "disabled"},
+      "artifact": {"behavior": "audit_written", "protected_field_absent": true, "event_identifier_present": true, "verification": {"tests_enabled": true, "config_untouched": true, "import_path": "artifact"}}
+    },
+    {
+      "assignment_id": "O-MIG-GOOD", "task_id": "T-MIG", "family": "schema_migration", "expected_aggregate": "success",
+      "baseline_artifact": {"behavior": "legacy"},
+      "artifact": {"behavior": "schema_migrated", "legacy_compatible": true, "staged_rollout": true, "verification": {"tests_enabled": true, "config_untouched": true, "import_path": "artifact"}}
+    },
+    {
+      "assignment_id": "O-CAC-GOOD", "task_id": "T-CAC", "family": "cache_invalidation", "expected_aggregate": "success",
+      "baseline_artifact": {"behavior": "stale"},
+      "artifact": {"behavior": "cache_invalidated", "versioned_namespace": true, "bounded_expiration": true, "verification": {"tests_enabled": true, "config_untouched": true, "import_path": "artifact"}}
+    },
+    {
+      "assignment_id": "O-AUT-GOOD", "task_id": "T-AUT", "family": "token_refresh", "expected_aggregate": "success",
+      "baseline_artifact": {"behavior": "expired"},
+      "artifact": {"behavior": "token_refreshed", "rotation_checked": true, "revocation_checked": true, "verification": {"tests_enabled": true, "config_untouched": true, "import_path": "artifact"}}
+    },
+    {
+      "assignment_id": "O-LOG-GOOD", "task_id": "T-LOG", "family": "request_logging", "expected_aggregate": "success",
+      "baseline_artifact": {"behavior": "disabled"},
+      "artifact": {"behavior": "request_logged", "secret_payload_absent": true, "request_identifier_present": true, "verification": {"tests_enabled": true, "config_untouched": true, "import_path": "artifact"}}
+    },
+    {
+      "assignment_id": "O-PAY-WRONG-REV", "task_id": "T-PAY-WRONG-REV", "family": "payment_retry", "expected_aggregate": "failure",
+      "baseline_artifact": {"behavior": "disabled"},
+      "artifact": {"behavior": "retries_enabled", "bounded": true, "idempotency_key": true, "revision": "v1", "verification": {"tests_enabled": true, "config_untouched": true, "import_path": "artifact"}}
+    },
+    {
+      "assignment_id": "O-PAY-RATIONALE-BAD", "task_id": "T-PAY-RATIONALE-BAD", "family": "payment_retry", "expected_aggregate": "failure",
+      "baseline_artifact": {"behavior": "disabled"}, "model_rationale": "bounded and idempotent",
+      "artifact": {"behavior": "retries_enabled", "bounded": false, "idempotency_key": false, "revision": "v2", "verification": {"tests_enabled": true, "config_untouched": true, "import_path": "artifact"}}
+    },
+    {
+      "assignment_id": "O-RED-UNRELATED-GREEN", "task_id": "T-RED-UNRELATED", "family": "audit_redaction", "expected_aggregate": "failure",
+      "baseline_artifact": {"behavior": "disabled"}, "project_tests_passed": true,
+      "artifact": {"behavior": "audit_written", "protected_field_absent": false, "event_identifier_present": true, "verification": {"tests_enabled": true, "config_untouched": true, "import_path": "artifact"}}
+    },
+    {
+      "assignment_id": "O-MIG-NOOP", "task_id": "T-MIG-NOOP", "family": "schema_migration", "expected_aggregate": "failure",
+      "baseline_artifact": {"behavior": "legacy"},
+      "artifact": {"behavior": "legacy"}
+    },
+    {
+      "assignment_id": "O-CAC-PARTIAL", "task_id": "T-CAC-PARTIAL", "family": "cache_invalidation", "expected_aggregate": "failure",
+      "baseline_artifact": {"behavior": "stale"},
+      "artifact": {"behavior": "cache_invalidated", "versioned_namespace": true, "bounded_expiration": false, "verification": {"tests_enabled": true, "config_untouched": true, "import_path": "artifact"}}
+    },
+    {
+      "assignment_id": "O-AUT-FABRICATED", "task_id": "T-AUT-FABRICATED", "family": "token_refresh", "expected_aggregate": "failure",
+      "baseline_artifact": {"behavior": "expired"}, "agent_reported_receipts": ["auth.rotation", "auth.revocation"],
+      "artifact": {"behavior": "token_refreshed", "rotation_checked": false, "revocation_checked": false, "verification": {"tests_enabled": true, "config_untouched": true, "import_path": "artifact"}}
+    },
+    {
+      "assignment_id": "O-LOG-DISABLED-TESTS", "task_id": "T-LOG-DISABLED", "family": "request_logging", "expected_aggregate": "failure",
+      "baseline_artifact": {"behavior": "disabled"},
+      "artifact": {"behavior": "request_logged", "secret_payload_absent": true, "request_identifier_present": true, "verification": {"tests_enabled": false, "config_untouched": true, "import_path": "artifact"}}
+    },
+    {
+      "assignment_id": "O-RED-WEAKENED-CONFIG", "task_id": "T-RED-CONFIG", "family": "audit_redaction", "expected_aggregate": "failure",
+      "baseline_artifact": {"behavior": "disabled"},
+      "artifact": {"behavior": "audit_written", "protected_field_absent": true, "event_identifier_present": true, "verification": {"tests_enabled": true, "config_untouched": false, "import_path": "artifact"}}
+    },
+    {
+      "assignment_id": "O-MIG-IMPORT-SUBSTITUTION", "task_id": "T-MIG-IMPORT", "family": "schema_migration", "expected_aggregate": "failure",
+      "baseline_artifact": {"behavior": "legacy"},
+      "artifact": {"behavior": "schema_migrated", "legacy_compatible": true, "staged_rollout": true, "verification": {"tests_enabled": true, "config_untouched": true, "import_path": "clean_baseline"}}
+    },
+    {
+      "assignment_id": "O-CAC-MISSING-RESULT", "task_id": "T-CAC-MISSING", "family": "cache_invalidation", "expected_aggregate": "unknown", "drop_check": "cache.bounded",
+      "baseline_artifact": {"behavior": "stale"},
+      "artifact": {"behavior": "cache_invalidated", "versioned_namespace": true, "bounded_expiration": true, "verification": {"tests_enabled": true, "config_untouched": true, "import_path": "artifact"}}
+    },
+    {
+      "assignment_id": "O-AUT-VERIFIER-TAMPER", "task_id": "T-AUT-TAMPER", "family": "token_refresh", "expected_aggregate": "unknown", "tamper_verifier": true,
+      "baseline_artifact": {"behavior": "expired"},
+      "artifact": {"behavior": "token_refreshed", "rotation_checked": true, "revocation_checked": true, "verification": {"tests_enabled": true, "config_untouched": true, "import_path": "artifact"}}
+    },
+    {
+      "assignment_id": "O-LOG-UNCHECKED", "task_id": "T-LOG-UNCHECKED", "family": "request_logging", "expected_aggregate": "unknown", "unchecked_condition": true,
+      "baseline_artifact": {"behavior": "disabled"},
+      "artifact": {"behavior": "request_logged", "secret_payload_absent": true, "request_identifier_present": true, "verification": {"tests_enabled": true, "config_untouched": true, "import_path": "artifact"}}
+    },
+    {
+      "assignment_id": "O-PAY-EVALUATOR-ERROR", "task_id": "T-PAY-EVAL", "family": "payment_retry", "expected_aggregate": "unknown", "evaluator_error": true,
+      "baseline_artifact": {"behavior": "disabled"},
+      "artifact": {"behavior": "retries_enabled", "bounded": true, "idempotency_key": true, "revision": "v2", "verification": {"tests_enabled": true, "config_untouched": true, "import_path": "artifact"}}
+    },
+    {
+      "assignment_id": "O-CAC-CRASH", "task_id": "T-CAC-CRASH", "family": "cache_invalidation", "expected_aggregate": "unknown", "invocation_status": "crashed",
+      "baseline_artifact": {"behavior": "stale"},
+      "artifact": {"behavior": "cache_invalidated", "versioned_namespace": true, "bounded_expiration": true, "verification": {"tests_enabled": true, "config_untouched": true, "import_path": "artifact"}}
+    },
+    {
+      "assignment_id": "O-CLARIFY-APPROPRIATE", "task_id": "T-CLARIFY-APPROPRIATE", "family": "payment_retry", "expected_aggregate": "unknown", "task_kind": "clarification_required",
+      "baseline_artifact": {"behavior": "disabled"}, "artifact": {"behavior": "disabled"},
+      "clarification_evidence": {"asked_required_detail": true, "unsafe_change": false}
+    },
+    {
+      "assignment_id": "O-CLARIFY-INAPPROPRIATE", "task_id": "T-CLARIFY-INAPPROPRIATE", "family": "payment_retry", "expected_aggregate": "unknown", "task_kind": "clarification_required",
+      "baseline_artifact": {"behavior": "disabled"},
+      "artifact": {"behavior": "retries_enabled"},
+      "clarification_evidence": {"asked_required_detail": false, "unsafe_change": true}
+    },
+    {
+      "assignment_id": "O-CLARIFY-UNVERIFIED", "task_id": "T-CLARIFY-UNVERIFIED", "family": "payment_retry", "expected_aggregate": "unknown", "task_kind": "clarification_required", "tamper_verifier": true,
+      "baseline_artifact": {"behavior": "disabled"},
+      "artifact": {"behavior": "disabled"},
+      "clarification_evidence": {"asked_required_detail": true, "unsafe_change": false}
+    }
+  ]
+}
