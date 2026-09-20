@@ -13,7 +13,7 @@ does not hold.
 import ast
 import pathlib
 
-from contexer import store
+from contexer import candidates, share, store
 
 SRC = pathlib.Path(store.__file__).parent
 STORE_PY = SRC / "store.py"
@@ -279,3 +279,12 @@ class TestRuleThreeNoLeafReExportsAnotherLeaf:
         on_disk = {p.stem for p in (SRC).glob("*.py") if p.stem != "__init__"}
         missing = sorted(on_disk - scanned)
         assert missing == [], f"not scanned by the module-object check: {missing}"
+
+
+class TestObsoleteTestOnlyWrappersStayRemoved:
+    """Tests exercise the production entry points instead of keeping convenience APIs alive."""
+
+    def test_removed_wrappers_do_not_return(self):
+        assert not hasattr(store, "_render_prompt_decisions")
+        assert not hasattr(share, "_load_reconcile_outbox")
+        assert not hasattr(candidates, "_overlap")

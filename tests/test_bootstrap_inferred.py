@@ -1046,7 +1046,9 @@ def test_startup_withholds_stale_inference_before_any_prompt_can_use_it(project,
     payload = store.session_start_payload(str(project))
     assert before["content"] not in payload["context"]
     assert "call bootstrap_context now" in payload["context"]
-    assert before["content"] not in store._render_prompt_decisions(str(project), [did])
+    rendered, receipts = store._render_prompt_decisions_with_records(str(project), [did])
+    assert before["content"] not in rendered
+    assert receipts == []
     entry = store.entry_by_id(store.load(str(project))["entries"], did)
     assert entry["bootstrap_withheld"]
     assert entry["revisions"] == before["revisions"]

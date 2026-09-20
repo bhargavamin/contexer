@@ -4584,10 +4584,9 @@ class TestBM25Router:
         assert store.get_context_for_prompt(tmp_repo, "why do birds fly south?") == ""
 
 
-class TestRenderPromptDecisions:
-    """_render_prompt_decisions feeds the BM25 strong-match auto-injection path — it must
-    render the SAME two-line shape as get_context (title-bearing bullet line, then a
-    `    `-indented content line), not the old title-less single line."""
+class TestRenderPromptDecisionsWithRecords:
+    """The live BM25 renderer must return the same text shape as get_context and matching
+    delivery receipts from the snapshots used to render it."""
 
     def test_two_line_shape_with_title_on_bullet_content_on_next(self, tmp_repo):
         _, id1 = store.update_decision(
@@ -4598,9 +4597,11 @@ class TestRenderPromptDecisions:
             tmp_repo, "JWT refresh tokens live in httpOnly cookies", RV1_SESSION,
             "architecture", title="JWT refresh in cookies",
         )
-        rendered = store._render_prompt_decisions(tmp_repo, [id1, id2])
+        rendered, receipts = store._render_prompt_decisions_with_records(tmp_repo, [id1, id2])
         lines = rendered.splitlines()
         assert len(lines) == 4   # 2 decisions x (bullet line + indented content line)
+        assert [(r["scope"], r["id"]) for r in receipts] == [
+            ("personal", id1), ("personal", id2)]
 
         assert lines[0].startswith("- [")
         assert "Postgres storage layer" in lines[0]
@@ -4619,9 +4620,10 @@ class TestRenderPromptDecisions:
             tmp_repo, "Settings load from a TOML file validated at startup", RV1_SESSION,
             "convention",
         )
-        rendered = store._render_prompt_decisions(tmp_repo, [eid])
+        rendered, receipts = store._render_prompt_decisions_with_records(tmp_repo, [eid])
         lines = rendered.splitlines()
         assert len(lines) == 1
+        assert [(r["scope"], r["id"]) for r in receipts] == [("personal", eid)]
         assert lines[0].startswith("- [")
         assert "Settings load from a TOML file validated at startup" in lines[0]
 
@@ -4631,9 +4633,10 @@ class TestRenderPromptDecisions:
         long_content = ("Settings load from a TOML file validated at startup against a strict "
                         "schema before anything else in the app is allowed to run.")
         _, eid = store.update_decision(tmp_repo, long_content, RV1_SESSION, "convention")
-        rendered = store._render_prompt_decisions(tmp_repo, [eid])
+        rendered, receipts = store._render_prompt_decisions_with_records(tmp_repo, [eid])
         lines = rendered.splitlines()
         assert len(lines) == 2
+        assert [(r["scope"], r["id"]) for r in receipts] == [("personal", eid)]
         assert lines[0].startswith("- [")
         assert long_content not in lines[0]
         assert lines[1] == f"    {long_content}"
@@ -5678,7 +5681,7 @@ class TestFileRoute:
     def test_global_scope_anchor_hit_renders_full_content(self, tmp_repo):
         # Global-store decisions never carry source_files (docs elsewhere), so a global-scope
         # STRONG hit can only happen via the `decisions=` override path in tests / a future
-        # global anchor feature — exercised here directly to prove _render_prompt_decisions'
+        # global anchor feature — exercised here directly to prove the prompt renderer's
         # global-store fallback still applies when a file-route anchor hit is global-scope.
         store.update_decision(tmp_repo, "The cart service owns checkout totals",
                               RV1_SESSION, "architecture")   # forces a repo index to exist
@@ -7308,8 +7311,8 @@ class TestCaptureLintSplit:
 
 class TestBodyClipping:
     """clip_body - the human-review-surface clip (review_pending, contexer review, share
-    lists). Model-facing surfaces (get_context, _render_prompt_decisions) stay full-content
-    and are untouched by this class."""
+    lists). Model-facing surfaces (get_context, _render_prompt_decisions_with_records) stay
+    full-content and are untouched by this class."""
 
     def test_short_body_unchanged(self):
         assert store.clip_body("short decision", 400) == "short decision"

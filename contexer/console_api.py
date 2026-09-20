@@ -144,7 +144,8 @@ def _console_summary(entry: dict) -> dict:
     entry, and this projection backs the console's 10-second poll of `list_decisions` /
     `dashboard_summary` — adding a git call per row there would multiply into a poll-time
     subprocess storm. Staleness stays confined to its two existing render sites
-    (`get_context`, `_render_prompt_decisions`), both budget-capped and neither on a UI poll."""
+    (`get_context`, `_render_prompt_decisions_with_records`), both budget-capped and neither on
+    a UI poll."""
     content = revisions.current_content(entry)
     rev = revisions.current_revision(entry) or {}
     return {
