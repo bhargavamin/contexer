@@ -98,7 +98,8 @@ Run in this order when verifying a significant change:
 ## What each test suite validates
 
 **`test_store.py`** — unit tests for every function in `store.py`:
-- `_is_novel`, `_passes_filter` — novelty filter (70% token overlap)
+- `_find_match` — production novelty matcher (strictly greater than 70% token overlap), including boundary, normalization, and first-match tests
+- `update_decision` novelty integration — duplicate recurrence, strict overlap boundary, and exclusion of identical task entries
 - `_is_prescriptive_constraint` — directive detection (always/never/ensure/make sure/from now on)
 - `_sanitize_directive` — profanity stripping, frustration opener removal, trailing filler, caps normalisation, sarcasm exclusion
 - `capture_user_constraint` — full pipeline: detect → sanitize → store (returns tuple)
