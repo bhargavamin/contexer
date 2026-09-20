@@ -98,53 +98,98 @@ class TestOverlapRatio:
             assert store._overlap_ratio(a, b) == expected
 
 
-# ── _is_novel ─────────────────────────────────────────────────────────────────
+# ── _find_match: the matcher called by production writers ─────────────────────
 
-class TestIsNovel:
-    def test_novel_against_empty(self):
-        assert store._is_novel("use postgres for persistence", []) is True
+class TestFindMatch:
+    def test_empty_store_has_no_match(self):
+        assert store._find_match("use postgres for persistence", []) is None
 
-    def test_exact_duplicate_rejected(self):
+    @pytest.mark.parametrize("content", [
+        "use postgres for persistence",
+        "fastmcp handles routing and tool listing automatically",
+        "decided to use jwt instead of sessions for stateless auth",
+    ])
+    def test_exact_duplicate_returns_the_existing_entry(self, content):
+        entry = {"content": content}
+        assert store._find_match(content, [entry]) is entry
+
+    def test_high_overlap_returns_the_existing_entry(self):
+        entry = {"content": "decided to use postgres for primary persistence layer"}
+        assert store._find_match(
+            "decided to use postgres for primary persistence layer today", [entry]) is entry
+
+    def test_different_content_has_no_match(self):
         existing = [{"content": "use postgres for persistence"}]
-        assert store._is_novel("use postgres for persistence", existing) is False
+        assert store._find_match(
+            "authentication uses JWT tokens for stateless sessions", existing) is None
 
-    def test_high_overlap_rejected(self):
-        existing = [{"content": "decided to use postgres for primary persistence layer"}]
-        assert store._is_novel("decided to use postgres for primary persistence layer today", existing) is False
+    def test_case_and_punctuation_are_normalized(self):
+        entry = {"content": "Use Postgres, for persistence!"}
+        assert store._find_match("use postgres for persistence", [entry]) is entry
 
-    def test_different_content_passes(self):
-        existing = [{"content": "use postgres for persistence"}]
-        assert store._is_novel("authentication uses JWT tokens for stateless sessions", existing) is True
+    @pytest.mark.parametrize("content", ["", " \n ", "!!!"])
+    def test_no_tokens_has_no_match(self, content):
+        assert store._find_match(content, [{"content": "use postgres"}]) is None
 
+    def test_empty_entries_are_skipped_and_first_match_is_returned(self):
+        first = {"content": "use postgres for persistence"}
+        second = dict(first)
+        assert store._find_match(first["content"], [{}, {"content": "!"}, first, second]) is first
 
-# ── _passes_filter ────────────────────────────────────────────────────────────
-
-class TestPassesFilter:
-    def test_novel_content_passes(self):
-        assert store._passes_filter("decided to use FastMCP over raw server API", []) is True
-
-    def test_novel_content_without_signals_passes(self):
-        # novelty is the gate — update_context is only called for significant content
-        assert store._passes_filter("fastmcp handles routing and tool listing automatically", []) is True
-
-    def test_duplicate_rejected(self):
-        existing = [{"type": "decision", "content": "fastmcp handles routing and tool listing automatically"}]
-        assert store._passes_filter("fastmcp handles routing and tool listing automatically", existing) is False
-
-    def test_duplicate_with_signals_still_rejected(self):
-        # signal keywords do NOT override the novelty veto
-        existing = [{"type": "decision", "content": "decided to use jwt instead of sessions for stateless auth"}]
-        assert store._passes_filter("decided to use jwt instead of sessions for stateless auth", existing) is False
-
-    def test_novelty_ignores_task_entries(self):
-        # task entries must NOT trigger the duplicate veto for decisions
-        tasks = [{"type": "task", "content": "add jwt authentication to the api endpoints"}]
-        assert store._passes_filter("decided to use jwt for authentication — stateless and scalable", tasks) is True
+    @pytest.mark.parametrize("shared, matches", [(6, False), (7, False), (8, True)])
+    @pytest.mark.parametrize("equal_size", [False, True], ids=["size-prefilter", "intersection"])
+    def test_overlap_must_be_strictly_above_seventy_percent(self, shared, matches, equal_size):
+        # Ten unique tokens make 7/10 exactly the boundary. Equal-sized sets exercise the
+        # intersection threshold; the subset also exercises the cheap size pre-filter.
+        words = [f"token{i}" for i in range(10)]
+        candidate = words[:shared]
+        if equal_size:
+            candidate += [f"other{i}" for i in range(10 - shared)]
+        entry = {"content": " ".join(words)}
+        found = store._find_match(" ".join(candidate), [entry])
+        assert found is (entry if matches else None)
 
 
 # ── update_decision ───────────────────────────────────────────────────────────
 
 class TestUpdateDecision:
+    @pytest.mark.parametrize("content", [
+        "decided to use FastMCP over raw server API",
+        "fastmcp handles routing and tool listing automatically",
+    ])
+    def test_novelty_and_recurrence_use_the_real_write_path(self, tmp_repo, content):
+        stored, entry_id = store.update_decision(tmp_repo, content, "first", created_by="human")
+        assert stored is True
+        assert entry_id is not None
+        assert store.update_decision(tmp_repo, content, "second", created_by="human") == (False, None)
+        entries = store.load(tmp_repo)["entries"]
+        assert len(entries) == 1
+        assert entries[0]["id"] == entry_id
+        assert entries[0]["occurrence_count"] == 2
+
+    def test_novelty_ignores_identical_task_entries(self, tmp_repo):
+        # Candidate selection belongs to the writer, not _find_match. Use IDENTICAL text
+        # so this fails if tasks accidentally enter the decision-candidate list.
+        content = "Use jwt for authentication because sessions must remain stateless"
+        data = store.load(tmp_repo)
+        data["entries"].append({"id": "task-1", "type": "task", "content": content})
+        store.save(tmp_repo, data)
+        stored, entry_id = store.update_decision(tmp_repo, content, "first", created_by="human")
+        assert stored is True
+        entries = store.load(tmp_repo)["entries"]
+        assert {e["type"] for e in entries} == {"task", "decision"}
+        assert next(e for e in entries if e["id"] == entry_id)["content"] == content
+
+    @pytest.mark.parametrize("shared, stored_again", [(7, True), (8, False)])
+    def test_write_path_uses_the_strict_overlap_boundary(self, tmp_repo, shared, stored_again):
+        words = [f"token{i}" for i in range(10)]
+        candidate = words[:shared] + [f"other{i}" for i in range(10 - shared)]
+        assert store.update_decision(tmp_repo, " ".join(words), "first", created_by="human")[0]
+        stored, _ = store.update_decision(
+            tmp_repo, " ".join(candidate), "second", created_by="human")
+        assert stored is stored_again
+        assert len(store.load(tmp_repo)["entries"]) == (2 if stored_again else 1)
+
     def test_stores_decision(self, tmp_repo):
         stored, entry_id = store.update_decision(
             tmp_repo, "decided to use postgres over sqlite — needs concurrent writes", "sess-1"

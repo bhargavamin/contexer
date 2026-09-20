@@ -909,19 +909,6 @@ def clip_body(body: str, limit: int = _BODY_CLIP) -> str:
     return f"{kept}… [+{len(body) - len(kept)} chars]"
 
 
-def _is_novel(content: str, existing: list) -> bool:
-    if not _is_storable(content):
-        return False
-    return _find_match(content, existing) is None
-
-
-def _passes_filter(content: str, existing: list) -> bool:
-    # Novelty is a prerequisite veto - duplicates are rejected regardless of signal keywords.
-    # Novel content always passes: update_context is only called for significant decisions.
-    decisions_only = [e for e in existing if e["type"] == "decision"]
-    return _is_novel(content, decisions_only)
-
-
 _LINT_MIN_LEN = 400          # short captures are cheap to store; never bounce them
 _LINT_MAX_FIRST_SENT = 45    # words before the first sentence must have stated a decision
 _LINT_NARRATIVE_RE = re.compile(

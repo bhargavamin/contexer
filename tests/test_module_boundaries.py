@@ -167,6 +167,15 @@ def _store_reads_in_strings(tree):
                 yield n.attr, node.lineno
 
 
+class TestObsoleteNoveltyWrappersStayRemoved:
+    def test_store_does_not_restore_test_only_novelty_wrappers(self):
+        # Issue #311: green tests kept two dead wrappers alive and the architecture guide
+        # called one the core gate. Keep this regression narrow: a package-wide static
+        # "no test-only callers" rule cannot reliably classify framework callbacks/entrypoints.
+        for name in ("_is_novel", "_passes_filter"):
+            assert not hasattr(store, name), f"test the production _find_match path, not {name}"
+
+
 class TestRuleOneFacadeIsBackCompatOnly:
     """`store`'s lazy __getattr__ re-exports names that were public on store before an
     extraction moved them. It is a compatibility shim, not the surface production code uses."""
