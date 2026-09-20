@@ -17,6 +17,7 @@ import json
 import math
 import os
 import random
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -31,6 +32,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from benchmarks.applicability import relevance_baseline  # noqa: E402
+from benchmarks.applicability import task_outcome_fixtures  # noqa: E402
 from contexer import retrieval, store, working_set  # noqa: E402
 from contexer.adapters import claude, cursor, gemini  # noqa: E402
 
@@ -229,9 +231,22 @@ def validate_fixture(fixture: dict[str, Any]) -> None:
         for row in assignments
     ):
         raise FixtureError("clarification tasks cannot receive implementation credit")
+    for assignment in assignments:
+        if assignment.get("task_kind") == "clarification_required":
+            continue
+        for field in ("implementation_fixture", "baseline_implementation_fixture"):
+            fixture_id = assignment.get(field)
+            if fixture_id not in task_outcome_fixtures.IMPLEMENTATIONS:
+                raise FixtureError(
+                    f"{assignment.get('assignment_id')}: unknown {field}"
+                )
     for family, validator in validators.items():
         if not validator.get("functional_checks") or not validator.get("conditions"):
             raise FixtureError(f"{family}: functional and condition checks are required")
+        if validator.get("candidate_modules") != [
+            f"artifact.{task_outcome_fixtures.MODULE_FILENAMES[family][:-3]}"
+        ]:
+            raise FixtureError(f"{family}: candidate module must name the executable artifact")
         check_ids = {
             check["check_id"]
             for check in validator["functional_checks"] + validator["conditions"]
@@ -645,30 +660,65 @@ def retrieval_breakdowns(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _value_at(value: dict[str, Any], path: str) -> object:
-    current: object = value
-    for part in path.split("."):
-        if not isinstance(current, dict) or part not in current:
-            return None
-        current = current[part]
-    return current
+def _artifact_tree_sha256(root: Path) -> str:
+    return _digest([
+        (path.relative_to(root).as_posix(), _sha256(path))
+        for path in sorted(root.rglob("*")) if path.is_file()
+    ])
 
 
-def _run_checks(validator: dict[str, Any], artifact: dict[str, Any]) -> list[dict[str, Any]]:
-    results = []
-    for kind, checks in (
-        ("functional", validator["functional_checks"]),
-        ("condition", validator["conditions"]),
-    ):
-        for check in checks:
-            actual = _value_at(artifact, check["path"])
-            results.append({
-                "check_id": check["check_id"],
-                "kind": kind,
-                "status": "pass" if actual == check["equals"] else "fail",
-                "actual": actual,
-            })
-    return results
+def _materialize_artifact(assignment: dict[str, Any], root: Path) -> None:
+    """Write one executable synthetic candidate plus concrete verification artifacts."""
+    root.mkdir(parents=True)
+    artifact = assignment.get("artifact", {})
+    (root / "artifact.json").write_text(_canonical(artifact), encoding="utf-8")
+    fixture_id = assignment.get("implementation_fixture")
+    if not fixture_id:
+        return
+    source = assignment.get("implementation_source")
+    if source is None:
+        source = task_outcome_fixtures.IMPLEMENTATIONS[fixture_id]
+    verification = artifact.get("verification") if isinstance(artifact, dict) else None
+    verification = verification if isinstance(verification, dict) else {}
+    import_root = verification.get("import_path", "artifact")
+    module_dir = root / import_root
+    module_dir.mkdir(parents=True)
+    (module_dir / "__init__.py").write_text("", encoding="utf-8")
+    filename = task_outcome_fixtures.MODULE_FILENAMES[assignment["family"]]
+    (module_dir / filename).write_text(source.strip() + "\n", encoding="utf-8")
+    if verification.get("tests_enabled") is True:
+        tests = root / "tests"
+        tests.mkdir()
+        (tests / "test_candidate.py").write_text(
+            "# frozen synthetic verification\n", encoding="utf-8",
+        )
+    config = "baseline\n" if verification.get("config_untouched") is True else "weakened\n"
+    (root / "config.lock").write_text(config, encoding="utf-8")
+
+
+def _run_behavioral_validator(
+    verifier_path: Path,
+    artifact_root: Path,
+    family: str,
+    module_name: str,
+) -> list[dict[str, Any]]:
+    result = subprocess.run(
+        [sys.executable, "-I", str(verifier_path), str(artifact_root), family, module_name],
+        cwd=verifier_path.parent,
+        env={"PATH": os.environ.get("PATH", ""), "PYTHONHASHSEED": "0"},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("behavioral validator failed")
+    if len(result.stdout.encode("utf-8")) > 65_536:
+        raise RuntimeError("behavioral validator output exceeded limit")
+    checks = json.loads(result.stdout)
+    if not isinstance(checks, list):
+        raise RuntimeError("behavioral validator returned malformed results")
+    return checks
 
 
 def aggregate_outcome(row: dict[str, Any]) -> dict[str, Any]:
@@ -723,15 +773,17 @@ def evaluate_stub_assignment(
     verifier_root.mkdir(parents=True)
     artifact_root.mkdir(parents=True)
     check_root.mkdir(parents=True)
-    verifier_path = verifier_root / "validator.json"
-    verifier_path.write_text(_canonical(validator), encoding="utf-8")
+    verifier_path = verifier_root / "task_outcome_validator.py"
+    shutil.copyfile(Path(__file__).with_name("task_outcome_validator.py"), verifier_path)
     verifier_hash = _sha256(verifier_path)
-    artifact_path = artifact_root / "artifact.json"
-    artifact_path.write_text(_canonical(assignment.get("artifact", {})), encoding="utf-8")
-    artifact_hash = _sha256(artifact_path)
-    immutable_path = artifact_root / f"snapshot-{artifact_hash}.json"
-    immutable_path.write_bytes(artifact_path.read_bytes())
-    immutable_path.chmod(0o444)
+    staged_path = artifact_root / "staged"
+    _materialize_artifact(assignment, staged_path)
+    artifact_hash = _artifact_tree_sha256(staged_path)
+    immutable_path = artifact_root / f"snapshot-{artifact_hash}"
+    staged_path.rename(immutable_path)
+    for path in immutable_path.rglob("*"):
+        if path.is_file():
+            path.chmod(0o444)
 
     validation_started = time.perf_counter_ns()
     evidence_valid = True
@@ -740,10 +792,9 @@ def evaluate_stub_assignment(
     clarification_task = assignment.get("task_kind") == "clarification_required"
     try:
         if assignment.get("artifact_escape"):
-            escaped = root / "escaped-artifact.json"
-            escaped.write_text(immutable_path.read_text(encoding="utf-8"), encoding="utf-8")
-            immutable_path.chmod(0o644)
-            immutable_path.unlink()
+            escaped = root / "escaped-artifact"
+            shutil.copytree(immutable_path, escaped)
+            shutil.rmtree(immutable_path)
             immutable_path.symlink_to(escaped)
         if assignment.get("tamper_verifier"):
             verifier_path.write_text("{}", encoding="utf-8")
@@ -755,11 +806,11 @@ def evaluate_stub_assignment(
         ):
             evidence_valid = False
             invalid_reasons.append("artifact_path_escape")
-        copied = check_root / "artifact.json"
-        copied.write_bytes(immutable_path.read_bytes())
+        copied = check_root / "artifact"
+        shutil.copytree(immutable_path, copied)
         if assignment.get("evaluator_error"):
             raise RuntimeError("synthetic evaluator failure")
-        artifact = json.loads(copied.read_text(encoding="utf-8"))
+        artifact = json.loads((copied / "artifact.json").read_text(encoding="utf-8"))
         if clarification_task:
             evidence = assignment.get("clarification_evidence") or {}
             checks = [
@@ -777,7 +828,12 @@ def evaluate_stub_assignment(
                 },
             ]
         else:
-            checks = _run_checks(validator, artifact)
+            checks = _run_behavioral_validator(
+                verifier_path,
+                copied,
+                assignment["family"],
+                validator["candidate_modules"][0],
+            )
         if assignment.get("drop_check"):
             checks = [check for check in checks if check["check_id"] != assignment["drop_check"]]
         if assignment.get("unchecked_condition"):
@@ -790,7 +846,7 @@ def evaluate_stub_assignment(
         if assignment.get("mislabel_check_kind") and checks:
             checks[0]["kind"] = "condition" if checks[0]["kind"] == "functional" \
                 else "functional"
-        if _sha256(immutable_path) != artifact_hash:
+        if _artifact_tree_sha256(immutable_path) != artifact_hash:
             evidence_valid = False
             invalid_reasons.append("artifact_identity")
         if _sha256(verifier_path) != verifier_hash:
@@ -841,8 +897,19 @@ def evaluate_stub_assignment(
     if any(check.get("status") not in STATUS_STATES for check in checks):
         evidence_valid = False
         invalid_reasons.append("invalid_result_status")
+    evidence_integrity_valid = all(
+        reason == "missing_expected_result" for reason in invalid_reasons
+    )
     artifact_complete = bool(assignment.get("artifact")) and (
-        _digest(assignment.get("artifact")) != _digest(assignment.get("baseline_artifact"))
+        _digest({
+            "artifact": assignment.get("artifact"),
+            "implementation_fixture": assignment.get("implementation_fixture"),
+            "implementation_source": assignment.get("implementation_source"),
+        }) != _digest({
+            "artifact": assignment.get("baseline_artifact"),
+            "implementation_fixture": assignment.get("baseline_implementation_fixture"),
+            "implementation_source": None,
+        })
     )
     evidence_is_valid = evidence_valid and not invalid_reasons
     clarification_result = "not_applicable"
@@ -875,15 +942,21 @@ def evaluate_stub_assignment(
         "validator": {
             "sha256": verifier_hash,
             "candidate_modules": copy.deepcopy(validator["candidate_modules"]),
-            "protocol": "reviewer_owned_structured_json_v1",
+            "protocol": "reviewer_owned_behavioral_subprocess_v2",
             "arguments": [assignment["family"]],
             "runtime": sys.version,
             "collector_sha256": _sha256(Path(__file__)),
-            "protection": "integrity-detected stub boundary; not an OS security sandbox",
+            "limits": {"timeout_seconds": 5, "stdout_bytes": 65_536},
+            "protection": "isolated Python mode and integrity detection; not an OS sandbox",
         },
+        "expected_checks": [
+            {"check_id": check_id, "kind": kind}
+            for check_id, kind in expected_kinds.items()
+        ],
         "expected_check_ids": expected_check_ids,
         "checks": checks,
         "evidence_valid": evidence_is_valid,
+        "evidence_integrity_valid": evidence_integrity_valid,
         "invalid_reasons": invalid_reasons,
         "clarification": clarification_result,
         "latency_ms": (time.perf_counter_ns() - validation_started) / 1_000_000,
@@ -908,6 +981,41 @@ def evaluate_stub_assignment(
     return row
 
 
+def _expected_checks(row: dict[str, Any]) -> dict[str, str]:
+    return {
+        expected["check_id"]: expected["kind"]
+        for expected in row.get("expected_checks", [])
+        if isinstance(expected, dict)
+        and isinstance(expected.get("check_id"), str)
+        and isinstance(expected.get("kind"), str)
+    }
+
+
+def _verified_check_ids(row: dict[str, Any]) -> set[str]:
+    """Return uniquely observed, typed, terminal checks from an intact validator run."""
+    if not row.get("evidence_integrity_valid"):
+        return set()
+    expected = _expected_checks(row)
+    observed: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for check in row.get("checks", []):
+        observed[check.get("check_id")].append(check)
+    return {
+        check_id for check_id, kind in expected.items()
+        if len(observed.get(check_id, [])) == 1
+        and observed[check_id][0].get("kind") == kind
+        and observed[check_id][0].get("status") in {"pass", "fail"}
+    }
+
+
+def _verification_complete(row: dict[str, Any]) -> bool:
+    expected = _expected_checks(row)
+    return bool(expected) and (
+        row.get("invocation_status") == "completed"
+        and row.get("artifact_complete") is True
+        and _verified_check_ids(row) == set(expected)
+    )
+
+
 def outcome_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     implementable = [row for row in rows if row["clarification"] == "not_applicable"]
     clarification = [row for row in rows if row["clarification"] != "not_applicable"]
@@ -915,11 +1023,16 @@ def outcome_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     if set(counts) - RESULT_STATES:
         raise AssertionError("unknown aggregate outcome state")
     assigned = len(implementable)
-    conditions = [check for row in implementable for check in row["checks"]
-                  if check["kind"] == "condition"]
-    valid_conditions = sum(check["status"] in {"pass", "fail"} for check in conditions)
-    complete = sum(row["aggregate"]["result"] in {"success", "failure"}
-                   for row in implementable)
+    required_conditions = [
+        (row, check_id)
+        for row in implementable
+        for check_id, kind in _expected_checks(row).items()
+        if kind == "condition"
+    ]
+    valid_conditions = sum(
+        check_id in _verified_check_ids(row) for row, check_id in required_conditions
+    )
+    complete = sum(_verification_complete(row) for row in implementable)
     return {
         "assigned_implementable": assigned,
         "success": counts["success"],
@@ -929,8 +1042,8 @@ def outcome_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "upper_sensitivity_bound": _ratio(counts["success"] + counts["unknown"], assigned),
         "required_condition_coverage": {
             "numerator": valid_conditions,
-            "denominator": len(conditions),
-            "ratio": _ratio(valid_conditions, len(conditions)),
+            "denominator": len(required_conditions),
+            "ratio": _ratio(valid_conditions, len(required_conditions)),
         },
         "tasks_with_complete_verification": complete,
         "implementation_reconciliation": (
@@ -987,6 +1100,7 @@ def build_report(fixture: dict[str, Any] | None = None) -> dict[str, Any]:
                 "assignment_id": f"{assignment['assignment_id']}-PAIRED-BASELINE",
                 "arm": "baseline",
                 "artifact": copy.deepcopy(assignment["baseline_artifact"]),
+                "implementation_fixture": assignment["baseline_implementation_fixture"],
                 "expected_aggregate": "failure",
             })
             candidate = copy.deepcopy(assignment)

@@ -233,6 +233,29 @@ def test_mutants_cannot_become_success(report):
                if assignment_id not in good and row["clarification"] == "not_applicable")
 
 
+def test_behavioral_validator_executes_candidate_instead_of_trusting_claims(
+    fixture_data, tmp_path
+):
+    assignment = copy.deepcopy(fixture_data["outcome_assignments"][0])
+    assignment["assignment_id"] = "synthetic-broken-implementation"
+    assignment["implementation_source"] = '''
+REVISION = "v2"
+
+def retry_plan(operation_id, attempts):
+    return []
+'''
+    assignment["expected_aggregate"] = "failure"
+
+    row = experiment.evaluate_stub_assignment(fixture_data, assignment, tmp_path)
+
+    assert assignment["artifact"]["behavior"] == "retries_enabled"
+    assert row["checks"][0] == {
+        "check_id": "payment.functional", "kind": "functional", "status": "fail",
+    }
+    assert row["aggregate"]["result"] == "failure"
+    assert row["validator"]["protocol"] == "reviewer_owned_behavioral_subprocess_v2"
+
+
 def test_protected_boundary_detects_tampering_missing_results_and_evaluator_failure(report):
     runs = {row["assignment_id"]: row for row in report["outcomes"]["runs"]}
     assert runs["O-AUT-VERIFIER-TAMPER"]["aggregate"] == {
@@ -274,6 +297,49 @@ def test_result_collector_rejects_duplicate_or_mislabeled_results(
 
     assert row["aggregate"] == {"result": "unknown", "reason": "invalid_evidence"}
     assert reason in row["invalid_reasons"]
+
+
+def test_required_condition_coverage_uses_frozen_manifest(fixture_data, tmp_path):
+    assignment = copy.deepcopy(next(
+        row for row in fixture_data["outcome_assignments"]
+        if row["assignment_id"] == "O-CAC-MISSING-RESULT"
+    ))
+    row = experiment.evaluate_stub_assignment(fixture_data, assignment, tmp_path)
+
+    coverage = experiment.outcome_metrics([row])["required_condition_coverage"]
+
+    assert coverage == {"numerator": 4, "denominator": 5, "ratio": 0.8}
+
+
+def test_invalid_verifier_evidence_cannot_inflate_coverage(fixture_data, tmp_path):
+    assignment = copy.deepcopy(next(
+        row for row in fixture_data["outcome_assignments"]
+        if row["assignment_id"] == "O-AUT-VERIFIER-TAMPER"
+    ))
+    row = experiment.evaluate_stub_assignment(fixture_data, assignment, tmp_path)
+
+    coverage = experiment.outcome_metrics([row])["required_condition_coverage"]
+
+    assert coverage == {"numerator": 0, "denominator": 5, "ratio": 0.0}
+
+
+def test_failed_task_with_unchecked_condition_is_not_complete(fixture_data, tmp_path):
+    assignment = copy.deepcopy(fixture_data["outcome_assignments"][0])
+    assignment["assignment_id"] = "synthetic-failure-and-unchecked"
+    assignment["implementation_source"] = '''
+REVISION = "v2"
+
+def retry_plan(operation_id, attempts):
+    return []
+'''
+    assignment["unchecked_condition"] = True
+    assignment["expected_aggregate"] = "failure"
+    row = experiment.evaluate_stub_assignment(fixture_data, assignment, tmp_path)
+
+    metrics = experiment.outcome_metrics([row])
+
+    assert row["aggregate"]["result"] == "failure"
+    assert metrics["tasks_with_complete_verification"] == 0
 
 
 def test_all_assigned_tasks_remain_in_primary_denominator(report):
