@@ -6327,11 +6327,17 @@ def _prompt_file_hits(
 
 
 def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
-                            host: str = "") -> tuple[str, dict]:
+                            host: str = "", *,
+                            experiment_variant: str | None = None) -> tuple[str, dict]:
     """Body of get_context_for_prompt, returning (text, meta). meta = {"kind": "strong"|
     "pointer"|"overview"|"global"|"", "count": int, "topics": [...]} - structured data for
     a caller's status line (claude.rationale) instead of scraping the rendered text."""
     from contexer import working_set
+
+    if experiment_variant not in (None, retrieval._ORDINARY_TASK_VARIANT):
+        raise ValueError(f"unknown prompt experiment variant: {experiment_variant}")
+    if experiment_variant is not None and not isinstance(prompt, str):
+        return "", dict(_EMPTY_META)
 
     words_raw = [w.strip("?,./!;:\"'()[]") for w in prompt.lower().split()]
     word_set = set(words_raw)
@@ -6364,8 +6370,15 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
     # (no rationale/project word) additionally clear a discriminative-term guard below, so
     # a generic-token question can't drag in whatever decision happens to share a word.
     artifacts = retrieval.extract_artifacts(prompt)
-    if not is_rationale and not is_project and not artifacts and not is_question:
-        return "", dict(_EMPTY_META)
+    existing_route = is_rationale or is_project or bool(artifacts) or is_question
+    task_origin = False
+    if not existing_route:
+        task_origin = (
+            experiment_variant == retrieval._ORDINARY_TASK_VARIANT
+            and retrieval.ordinary_task_request(prompt)
+        )
+        if not task_origin:
+            return "", dict(_EMPTY_META)
 
     # BM25 query vector: the SAME tokenizer the index uses (not the legacy alpha-only
     # extraction), so digit-bearing terms like k8s / oauth2 reach the ranker. Artifacts
@@ -6419,7 +6432,8 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
         # this corpus. Otherwise "what time is the standup?" would inject the p99-latency
         # constraint on the word "time".
         question_only = is_question and not is_rationale and not is_project
-        allow_strong = not question_only or ranked[0][3] >= 1
+        conservative_route = question_only or task_origin
+        allow_strong = not conservative_route or ranked[0][3] >= 1
         bm25_strong: list[str] = []
         # A title hit belongs to this exact decision and is authored as its concise subject,
         # so a rationale/project question may trust the top title-ranked candidate even when
@@ -6468,8 +6482,10 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
             # Suffix (not part of the pinned header prefix): the block normally avoids a
             # redundant fetch, but a lexical candidate can still be a false positive. Tell
             # the model to judge relevance and recover through Contexer before reading files.
-            text = ("[Contexer: auto-fetched for this question] "
-                    "(use the relevant context below; if it does not answer the question, "
+            subject = "task" if task_origin else "question"
+            request_kind = "task" if task_origin else "question"
+            text = (f"[Contexer: auto-fetched for this {subject}] "
+                    f"(use the relevant context below; if it does not answer the {request_kind}, "
                     "call Contexer's get_context with concise subject keywords before reading files; "
                     "do not substitute another memory, graph, or search tool)\n"
                     f"{rendered}")
@@ -6481,7 +6497,10 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
                         output_bytes=len(text.encode("utf-8"))))
                 except Exception:
                     pass
-            return text, _rendered_meta("strong", text)
+            meta = _rendered_meta("strong", text)
+            if task_origin:
+                meta["origin"] = retrieval._ORDINARY_TASK_VARIANT
+            return text, meta
 
     # WEAK: no strong content, but the prompt's topics overlap not-yet-injected docs →
     # a ~15-token pointer instead of full content.
@@ -6501,6 +6520,8 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
             text = (f"[Contexer] Related stored decisions: {parts} - "
                     f"call get_context(query='{ordered_topics[0]}') if relevant.")
             meta = {"kind": "pointer", "count": sum(counts.values()), "topics": ordered_topics}
+            if task_origin:
+                meta["origin"] = retrieval._ORDINARY_TASK_VARIANT
             return text, meta
 
     # WEAK (file-mention tier, #187 fix round 1): a content-artifact match alone is not a
@@ -6520,6 +6541,8 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
                 f"{', '.join(file_artifacts_prompt[:3])}: {named}{more} - "
                 f"call get_context(files={file_artifacts_prompt!r}) if relevant.")
         meta = {"kind": "pointer", "count": len(mention_hits), "topics": file_artifacts_prompt}
+        if task_origin:
+            meta["origin"] = retrieval._ORDINARY_TASK_VARIANT
         return text, meta
 
     # Overview + global fallbacks run ONLY for rationale/project prompts - legacy was silent
@@ -6544,19 +6567,23 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
 
 
 def get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
-                           host: str = "") -> str:
+                           host: str = "", *,
+                           experiment_variant: str | None = None) -> str:
     """Auto-injected by UserPromptSubmit hook. Returns relevant stored decisions when
     the prompt is a rationale/decision or project-context question. Silent no-op otherwise.
     Searches repo decisions first; falls back to global decisions."""
-    return _get_context_for_prompt(repo_path, prompt, session_id, host)[0]
+    return _get_context_for_prompt(
+        repo_path, prompt, session_id, host, experiment_variant=experiment_variant)[0]
 
 
 def get_context_for_prompt_with_meta(repo_path: str, prompt: str, session_id: str = "",
-                                     host: str = "") -> tuple[str, dict]:
+                                     host: str = "", *,
+                                     experiment_variant: str | None = None) -> tuple[str, dict]:
     """Same as get_context_for_prompt but also returns structured metadata about the
     injection - {"kind": ..., "count": int, "topics": [...]} - so a caller (claude.rationale)
     can build a status line without scraping the rendered text."""
-    return _get_context_for_prompt(repo_path, prompt, session_id, host)
+    return _get_context_for_prompt(
+        repo_path, prompt, session_id, host, experiment_variant=experiment_variant)
 
 
 def _team_section(repo_path: str, query: str, entry_type: str, *,

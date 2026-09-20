@@ -6,7 +6,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from contexer import evidence, memory_sync, store, updates
+from contexer import evidence, memory_sync, retrieval, store, updates
 from contexer.adapters.base import (
     _BOOTSTRAP_CMD_MARKER,
     _bootstrap_command_text,
@@ -198,7 +198,7 @@ _COST_NOTE_TOKENS = 150
 _SAVED_MULTIPLIER = 4
 
 
-def rationale(repo_path: str, raw: str, host: str = "claude") -> str:
+def rationale(repo_path: str, raw: str, host: str = "claude", *, prompt_lookup=None) -> str:
     """UserPromptSubmit (every prompt): inject matching decisions for rationale questions, and
     deliver a due update notice when nothing better is competing for the line.
 
@@ -214,7 +214,10 @@ def rationale(repo_path: str, raw: str, host: str = "claude") -> str:
     it yields, so it is still owed on the next quiet prompt.
     """
     try:
-        payload = _recall_payload(repo_path, raw, host)
+        payload = (
+            _recall_payload(repo_path, raw, host, prompt_lookup=prompt_lookup)
+            if prompt_lookup is not None else _recall_payload(repo_path, raw, host)
+        )
         # Its own try, and it must stay that way. The recall payload is already built by this
         # point, and the update notice is bookkeeping on top of it: an exception here must not
         # cost the developer their context injection, which is the invariant CLAUDE.md states
@@ -233,14 +236,15 @@ def rationale(repo_path: str, raw: str, host: str = "claude") -> str:
         return "{}"
 
 
-def _recall_payload(repo_path: str, raw: str, host: str = "claude") -> dict:
+def _recall_payload(repo_path: str, raw: str, host: str = "claude", *, prompt_lookup=None) -> dict:
     """The retrieval half of `rationale`: injected context plus its user-facing note, or {}."""
     try:
         repo = store.resolve_repo(store.hook_repo_from_stdin(raw, repo_path))
         if not repo:
             return {}
         session_id = store.session_from_hook_stdin(raw)
-        ctx, meta = store.get_context_for_prompt_with_meta(
+        lookup = prompt_lookup or store.get_context_for_prompt_with_meta
+        ctx, meta = lookup(
             repo, store.prompt_from_hook_stdin(raw), session_id, host=host)
         if not ctx:
             return {}
@@ -264,10 +268,11 @@ def _recall_payload(repo_path: str, raw: str, host: str = "claude") -> dict:
         if est > _COST_NOTE_TOKENS:
             saved = int(round(est * (_SAVED_MULTIPLIER - 1), -1))
             msg += f" · ~{saved} tokens saved"
-        return {
-            "systemMessage": msg,
-            "hookSpecificOutput": {
-                "hookEventName": "UserPromptSubmit", "additionalContext": ctx}}
+        payload = {"hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit", "additionalContext": ctx}}
+        if meta.get("origin") != retrieval._ORDINARY_TASK_VARIANT:
+            payload["systemMessage"] = msg
+        return payload
     except Exception:
         return {}
 

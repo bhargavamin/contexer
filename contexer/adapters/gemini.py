@@ -158,7 +158,7 @@ def session_start(repo_path: str, raw: str) -> str:
         return _output("SessionStart", [], notice)
 
 
-def before_agent(repo_path: str, raw: str) -> str:
+def before_agent(repo_path: str, raw: str, *, prompt_lookup=None) -> str:
     """Run per-prompt capture, retrieval, and deferred post-compression reinjection.
 
     Repo resolution is `hook_cwd_repo`, NOT `resolve_repo` (Greptile P1 #2, PR #181,
@@ -232,7 +232,8 @@ def before_agent(repo_path: str, raw: str) -> str:
         if entry_id is not None:
             contexts.append(store.constraint_ack(content, status, entry_id, near))
 
-        rationale = store.get_context_for_prompt(repo, prompt, session_id, host="gemini")
+        lookup = prompt_lookup or store.get_context_for_prompt
+        rationale = lookup(repo, prompt, session_id, host="gemini")
         if rationale:
             contexts.append(rationale)
         return _output("BeforeAgent", contexts)

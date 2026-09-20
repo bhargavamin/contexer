@@ -106,6 +106,40 @@ class TestIndexTokens:
     def test_keeps_duplicates_because_bm25_weights_them(self):
         assert retrieval.index_tokens("orders orders") == ["orders", "orders"]
 
+
+class TestOrdinaryTaskRequest:
+    @pytest.mark.parametrize("prompt", [
+        "Add payment retries",
+        "please implement bounded payment retries",
+        "Fix token refresh handling",
+        "Refactor durable storage adapters",
+        "disable legacy authentication fallback",
+    ])
+    def test_accepts_frozen_candidate_shape(self, prompt):
+        assert retrieval.ordinary_task_request(prompt)
+
+    @pytest.mark.parametrize("prompt", [
+        None,
+        7,
+        "",
+        "please continue",
+        "add a test",
+        "can you add payment retries",
+        "do not add payment retries",
+        '\"Add payment retries\"',
+        "“Add payment retries”",
+        "> Add payment retries",
+        "```\nAdd payment retries\n```",
+        "User: Add payment retries",
+        "[assistant] Add payment retries",
+        "<user>Add payment retries</user>",
+        "Add payment payment",
+        "Add payment retries" + "x" * 8_000,
+        "Add payment\x00retries",
+    ])
+    def test_rejects_wrappers_ambiguity_and_malformed_input(self, prompt):
+        assert not retrieval.ordinary_task_request(prompt)
+
 class TestDeriveTopics:
     def test_single_alias_hit(self):
         assert retrieval.derive_topics("we migrated the postgres schema for orders") == ["db"]
