@@ -50,7 +50,8 @@ def test_unchanged_file_renders_no_note(repo):
     assert stored
     assert _entry(repo)["anchor_commit"]  # HEAD resolved
     assert " [may be stale" not in store.get_context(repo, query="auth")
-    assert " [may be stale" not in store._render_prompt_decisions(repo, [eid])
+    rendered, _ = store._render_prompt_decisions_with_records(repo, [eid])
+    assert " [may be stale" not in rendered
 
 
 def test_changed_file_renders_note_only_on_explicit_retrieval(repo):
@@ -63,7 +64,7 @@ def test_changed_file_renders_note_only_on_explicit_retrieval(repo):
 
     # Prompt/editor hooks are deliberately Git-free. Explicit get_context remains
     # the authoritative path for source-file staleness evaluation.
-    rendered = store._render_prompt_decisions(repo, [eid])
+    rendered, _ = store._render_prompt_decisions_with_records(repo, [eid])
     assert "[may be stale" not in rendered
 
 
@@ -78,7 +79,8 @@ def test_directory_anchor_tracks_changed_descendant(repo):
     _touch(repo, "auth/providers/oauth.py", "TOKEN = 2\n")
     out = store.get_context(repo, query="auth")
     assert "[may be stale: auth/providers/oauth.py changed since capture]" in out
-    assert "[may be stale" not in store._render_prompt_decisions(repo, [eid])
+    rendered, _ = store._render_prompt_decisions_with_records(repo, [eid])
+    assert "[may be stale" not in rendered
 
 
 def test_files_hit_renders_staleness_note(repo):
@@ -98,7 +100,8 @@ def test_uncommitted_edit_renders_note(repo):
     Path(repo, "auth.py").write_text("def login(): return 'edited, uncommitted'\n",
                                      encoding="utf-8")
     assert "[may be stale: auth.py changed since capture]" in store.get_context(repo, query="auth")
-    assert "[may be stale" not in store._render_prompt_decisions(repo, [eid])
+    rendered, _ = store._render_prompt_decisions_with_records(repo, [eid])
+    assert "[may be stale" not in rendered
 
 
 def test_note_counts_extra_changed_files(repo):
@@ -124,7 +127,8 @@ def test_bogus_anchor_fails_soft(repo):
     store.save(repo, data)
     assert store._staleness_note(repo, data["entries"][0]) == ""
     assert " [may be stale" not in store.get_context(repo, query="auth")
-    assert " [may be stale" not in store._render_prompt_decisions(repo, [eid])
+    rendered, _ = store._render_prompt_decisions_with_records(repo, [eid])
+    assert " [may be stale" not in rendered
 
 
 def test_non_git_repo_fails_soft(tmp_path, monkeypatch):
@@ -285,7 +289,8 @@ def test_identical_content_new_title_recapture_reanchors_nongated(repo):
     assert entry["anchor_commit"] != old_anchor
     assert entry["title"] == "Login issues a session cookie after verifying the token"
     assert " [may be stale" not in store.get_context(repo, query="auth")
-    assert " [may be stale" not in store._render_prompt_decisions(repo, [eid])
+    rendered, _ = store._render_prompt_decisions_with_records(repo, [eid])
+    assert " [may be stale" not in rendered
 
 
 def test_identical_content_new_title_recapture_reanchors_gated(repo):
@@ -308,7 +313,8 @@ def test_identical_content_new_title_recapture_reanchors_gated(repo):
         "Login issues a session cookie after verifying the token"
     assert entry["anchor_commit"] != old_anchor  # content is unchanged, so this applies now
     assert " [may be stale" not in store.get_context(repo, query="auth")
-    assert " [may be stale" not in store._render_prompt_decisions(repo, [eid])
+    rendered, _ = store._render_prompt_decisions_with_records(repo, [eid])
+    assert " [may be stale" not in rendered
 
 
 def test_session_start_payload_never_shows_staleness_note(repo):

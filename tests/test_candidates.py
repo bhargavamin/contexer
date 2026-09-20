@@ -277,7 +277,10 @@ def test_a_negating_seed_over_the_normal_merge_bar_is_still_a_contradiction():
     events = [_ev("user_directive", _SEED, at="2026-08-24T10:00:00+00:00"),
               _ev("user_directive", _NEGATED_ABOVE_MERGE, session="s2",
                   at="2026-08-24T11:00:00+00:00")]
-    assert candidates._overlap(_NEGATED_ABOVE_MERGE, _SEED) > candidates._MERGE_OVERLAP
+    assert candidates._overlap_tokens(
+        candidates._tokens(_NEGATED_ABOVE_MERGE),
+        candidates._tokens(_SEED),
+    ) > candidates._MERGE_OVERLAP
     result = candidates.aggregate_candidates(events, [])
     got = _only(result)
     assert result["diagnostics"]["merged_duplicates"] == 1, "it merges, as it did before"

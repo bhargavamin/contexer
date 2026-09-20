@@ -1,6 +1,6 @@
 """Tests for contexer/conflicts.py: labeled dual injection + resolution memos (issue #193).
 
-The seams stay in store.py — the render loops (`get_context`, `_render_prompt_decisions`,
+The seams stay in store.py — the render loops (`get_context`, `_render_prompt_decisions_with_records`,
 `session_start_payload`, `_rehydrate_working_set`, `format_pending_review`) are what a session
 actually sees, so these exercise store's public surface and assert on what it renders; `store`
 is imported directly for the entry-construction helpers the fixtures need (borrowed pattern:
@@ -56,13 +56,14 @@ class TestConflictDualInjection:
                        for ln in out.splitlines())
         assert eid[:8] in out
 
-    def test_render_prompt_decisions_renders_both_sides_and_guide(self, tmp_repo):
+    def test_prompt_renderer_renders_both_sides_and_guide(self, tmp_repo):
         eid = _conflicted(tmp_repo)
-        out = store._render_prompt_decisions(tmp_repo, [eid])
+        out, receipts = store._render_prompt_decisions_with_records(tmp_repo, [eid])
         assert "SQLite won't handle concurrent sessions" in out
         assert "Unreviewed update" in out and "DynamoDB" in out
         assert "resolve_conflict(" in out
         assert sum(1 for ln in out.splitlines() if ln.startswith("- ")) == 1
+        assert [(r["scope"], r["id"]) for r in receipts] == [("personal", eid)]
 
     def test_meta_count_unchanged_with_three_conflicts(self, tmp_repo):
         ids = [
@@ -70,8 +71,9 @@ class TestConflictDualInjection:
             _conflicted(tmp_repo, "Deploy through fly.io regions", "Deploy through render.com"),
             _conflicted(tmp_repo, "Cache sessions in redis", "Cache sessions in memcached"),
         ]
-        out = store._render_prompt_decisions(tmp_repo, ids)
+        out, receipts = store._render_prompt_decisions_with_records(tmp_repo, ids)
         assert store._rendered_meta("strong", out)["count"] == 3
+        assert [r["id"] for r in receipts] == ids
 
     def test_session_start_project_rules_carry_both_sides(self, tmp_repo):
         # Deliberate pin: an `ai` replace_id proposal on an APPROVED constraint now renders,

@@ -170,10 +170,6 @@ def _read_reconcile_outbox() -> tuple[list[dict], str | None]:
     return data, None
 
 
-def _load_reconcile_outbox() -> list[dict]:
-    return _read_reconcile_outbox()[0]
-
-
 def _save_reconcile_outbox(entries: list[dict]) -> None:
     store.ensure_store_dir()
     store.atomic_write(

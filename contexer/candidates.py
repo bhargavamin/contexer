@@ -115,16 +115,11 @@ def _tokens(text: str) -> set:
 def _overlap_tokens(a: set, b: set) -> float:
     """|A∩B| / |smaller| over two ALREADY-tokenized statements. Empty on either side scores 0.
 
-    Split out of `_overlap` so every hot path can tokenize each statement exactly once and
-    compare the sets, rather than re-tokenizing both sides of every pair."""
+    Tokenized inputs let every hot path tokenize each statement exactly once rather than
+    re-tokenizing both sides of every pair."""
     if not a or not b:
         return 0.0
     return len(a & b) / min(len(a), len(b))
-
-
-def _overlap(left: str, right: str) -> float:
-    """|A∩B| / |smaller| over the shared index tokenizer. Empty on either side scores 0."""
-    return _overlap_tokens(_tokens(left), _tokens(right))
 
 
 def _first_sentence(text: str) -> str:
