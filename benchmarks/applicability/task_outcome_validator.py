@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import selectors
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -47,8 +49,7 @@ import json
 import os
 import sys
 
-path, module_name, requests_json = sys.argv[1:]
-requests = json.loads(requests_json)
+path, module_name = sys.argv[1:]
 try:
     with open(os.devnull, "w", encoding="utf-8") as sink:
         with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
@@ -57,21 +58,68 @@ try:
                 raise ImportError(module_name)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
-            observations = []
-            for request in requests:
-                try:
+    sys.stdout.write(json.dumps({"ready": True}) + "\n")
+    sys.stdout.flush()
+    for request_line in sys.stdin:
+        request = json.loads(request_line)
+        try:
+            with open(os.devnull, "w", encoding="utf-8") as sink:
+                with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
                     if request["operation"] == "getattr":
                         result = getattr(module, request["name"])
                     else:
                         result = getattr(module, request["name"])(*request["args"])
-                    observations.append({"ok": True, "result": result})
-                except BaseException as exc:
-                    observations.append({"ok": False, "error_type": type(exc).__name__})
-    response = {"ok": True, "observations": observations}
+            response = {"ok": True, "result": result}
+        except BaseException as exc:
+            response = {"ok": False, "error_type": type(exc).__name__}
+        sys.stdout.write(json.dumps(response, sort_keys=True) + "\n")
+        sys.stdout.flush()
 except BaseException as exc:
-    response = {"ok": False, "error_type": type(exc).__name__}
-sys.stdout.write(json.dumps(response, sort_keys=True))
+    sys.stdout.write(json.dumps({"ready": False, "error_type": type(exc).__name__}) + "\n")
+    sys.stdout.flush()
 '''
+
+
+def _read_response(process: subprocess.Popen[bytes], timeout: float) -> dict[str, Any]:
+    if process.stdout is None:
+        raise RuntimeError("candidate stdout unavailable")
+    descriptor = process.stdout.fileno()
+    os.set_blocking(descriptor, False)
+    selector = selectors.DefaultSelector()
+    selector.register(descriptor, selectors.EVENT_READ)
+    deadline = time.monotonic() + timeout
+    payload = bytearray()
+    try:
+        while b"\n" not in payload:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                raise TimeoutError("candidate observation timed out")
+            chunk = os.read(descriptor, 4096)
+            if not chunk:
+                raise RuntimeError("candidate exited before responding")
+            payload.extend(chunk)
+            if len(payload) > 32_768:
+                raise RuntimeError("candidate observation exceeded output limit")
+    finally:
+        selector.close()
+    line, _, trailing = payload.partition(b"\n")
+    if trailing:
+        raise RuntimeError("candidate emitted unsolicited output")
+    response = json.loads(line)
+    if not isinstance(response, dict):
+        raise RuntimeError("candidate returned malformed observation")
+    return response
+
+
+def _stop_candidate(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=0.2)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=0.2)
 
 
 def _execute_candidate_batch(
@@ -81,8 +129,10 @@ def _execute_candidate_batch(
 ) -> list[dict[str, Any]]:
     """Collect stateful raw observations without loading candidate code here."""
     failure = {"ok": False, "error_type": "executor_failure"}
+    observations: list[dict[str, Any]] = []
+    process: subprocess.Popen[bytes] | None = None
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             [
                 sys.executable,
                 "-I",
@@ -90,35 +140,26 @@ def _execute_candidate_batch(
                 _CANDIDATE_RUNNER,
                 str(path),
                 module_name,
-                json.dumps(requests, sort_keys=True),
             ],
             env={"PATH": os.environ.get("PATH", ""), "PYTHONHASHSEED": "0"},
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=max(1, len(requests)),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return [failure.copy() for _ in requests]
-    if result.returncode != 0 or len(result.stdout.encode("utf-8")) > 32_768:
-        return [failure.copy() for _ in requests]
-    try:
-        response = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return [failure.copy() for _ in requests]
-    observations = response.get("observations") if isinstance(response, dict) else None
-    if not isinstance(response, dict) or response.get("ok") is not True or not isinstance(
-        observations, list
-    ) or (
-        len(observations) != len(requests)
-    ):
-        return [failure.copy() for _ in requests]
-    if any(
-        not isinstance(observation, dict)
-        or observation.get("ok") not in {True, False}
-        for observation in observations
-    ):
-        return [failure.copy() for _ in requests]
+        if _read_response(process, 1) != {"ready": True} or process.stdin is None:
+            raise RuntimeError("candidate failed to initialize")
+        for request in requests:
+            process.stdin.write((json.dumps(request, sort_keys=True) + "\n").encode("utf-8"))
+            process.stdin.flush()
+            observation = _read_response(process, 1)
+            if observation.get("ok") not in {True, False}:
+                raise RuntimeError("candidate returned malformed observation")
+            observations.append(observation)
+    except (OSError, RuntimeError, TimeoutError, json.JSONDecodeError):
+        observations.extend(failure.copy() for _ in range(len(requests) - len(observations)))
+    finally:
+        if process is not None:
+            _stop_candidate(process)
     return observations
 
 
