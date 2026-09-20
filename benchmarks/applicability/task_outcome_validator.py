@@ -47,8 +47,8 @@ import json
 import os
 import sys
 
-path, module_name, request_json = sys.argv[1:]
-request = json.loads(request_json)
+path, module_name, requests_json = sys.argv[1:]
+requests = json.loads(requests_json)
 try:
     with open(os.devnull, "w", encoding="utf-8") as sink:
         with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
@@ -57,26 +57,30 @@ try:
                 raise ImportError(module_name)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
-            if request["operation"] == "getattr":
-                result = getattr(module, request["name"])
-            else:
-                result = getattr(module, request["name"])(*request["args"])
-    response = {"ok": True, "result": result}
+            observations = []
+            for request in requests:
+                try:
+                    if request["operation"] == "getattr":
+                        result = getattr(module, request["name"])
+                    else:
+                        result = getattr(module, request["name"])(*request["args"])
+                    observations.append({"ok": True, "result": result})
+                except BaseException as exc:
+                    observations.append({"ok": False, "error_type": type(exc).__name__})
+    response = {"ok": True, "observations": observations}
 except BaseException as exc:
     response = {"ok": False, "error_type": type(exc).__name__}
 sys.stdout.write(json.dumps(response, sort_keys=True))
 '''
 
 
-def _execute_candidate(
+def _execute_candidate_batch(
     path: Path,
     module_name: str,
-    operation: str,
-    name: str,
-    args: list[Any] | None = None,
-) -> dict[str, Any]:
-    """Collect raw observations without loading candidate code into this interpreter."""
-    request = {"operation": operation, "name": name, "args": args or []}
+    requests: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Collect stateful raw observations without loading candidate code here."""
+    failure = {"ok": False, "error_type": "executor_failure"}
     try:
         result = subprocess.run(
             [
@@ -86,7 +90,7 @@ def _execute_candidate(
                 _CANDIDATE_RUNNER,
                 str(path),
                 module_name,
-                json.dumps(request, sort_keys=True),
+                json.dumps(requests, sort_keys=True),
             ],
             env={"PATH": os.environ.get("PATH", ""), "PYTHONHASHSEED": "0"},
             capture_output=True,
@@ -95,16 +99,27 @@ def _execute_candidate(
             timeout=1,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return {"ok": False, "error_type": "executor_failure"}
+        return [failure.copy() for _ in requests]
     if result.returncode != 0 or len(result.stdout.encode("utf-8")) > 32_768:
-        return {"ok": False, "error_type": "executor_failure"}
+        return [failure.copy() for _ in requests]
     try:
-        observation = json.loads(result.stdout)
+        response = json.loads(result.stdout)
     except json.JSONDecodeError:
-        return {"ok": False, "error_type": "invalid_observation"}
-    if not isinstance(observation, dict) or observation.get("ok") not in {True, False}:
-        return {"ok": False, "error_type": "invalid_observation"}
-    return observation
+        return [failure.copy() for _ in requests]
+    observations = response.get("observations") if isinstance(response, dict) else None
+    if not isinstance(response, dict) or response.get("ok") is not True or not isinstance(
+        observations, list
+    ) or (
+        len(observations) != len(requests)
+    ):
+        return [failure.copy() for _ in requests]
+    if any(
+        not isinstance(observation, dict)
+        or observation.get("ok") not in {True, False}
+        for observation in observations
+    ):
+        return [failure.copy() for _ in requests]
+    return observations
 
 
 def _result(observation: dict[str, Any]) -> Any:
@@ -112,12 +127,17 @@ def _result(observation: dict[str, Any]) -> Any:
 
 
 def _payment(path: Path, module_name: str) -> tuple[bool, ...]:
-    plan = _result(_execute_candidate(
-        path, module_name, "call", "retry_plan", ["op-7", 6],
-    ))
-    repeat = _result(_execute_candidate(
-        path, module_name, "call", "retry_plan", ["op-7", 6],
-    ))
+    plan_observation, repeat_observation, revision_observation = _execute_candidate_batch(
+        path,
+        module_name,
+        [
+            {"operation": "call", "name": "retry_plan", "args": ["op-7", 6]},
+            {"operation": "call", "name": "retry_plan", "args": ["op-7", 6]},
+            {"operation": "getattr", "name": "REVISION", "args": []},
+        ],
+    )
+    plan = _result(plan_observation)
+    repeat = _result(repeat_observation)
     functional = (
         isinstance(plan, list) and len(plan) == 6
         and all(
@@ -129,14 +149,17 @@ def _payment(path: Path, module_name: str) -> tuple[bool, ...]:
     idempotent = functional and plan == repeat and all(
         row.get("idempotency_key") == "op-7" for row in plan
     )
-    revision = _result(_execute_candidate(path, module_name, "getattr", "REVISION"))
+    revision = _result(revision_observation)
     return functional, bounded, idempotent, revision == "v2"
 
 
 def _redaction(path: Path, module_name: str) -> tuple[bool, ...]:
-    result = _result(_execute_candidate(path, module_name, "call", "write_audit", [{
-        "event_id": "event-1", "secret": "hidden", "action": "login",
-    }]))
+    [observation] = _execute_candidate_batch(path, module_name, [{
+        "operation": "call",
+        "name": "write_audit",
+        "args": [{"event_id": "event-1", "secret": "hidden", "action": "login"}],
+    }])
+    result = _result(observation)
     functional = isinstance(result, dict) and result.get("action") == "login"
     return functional, functional and "secret" not in result, (
         functional and result.get("event_id") == "event-1"
@@ -145,12 +168,16 @@ def _redaction(path: Path, module_name: str) -> tuple[bool, ...]:
 
 def _migration(path: Path, module_name: str) -> tuple[bool, ...]:
     record = {"id": "1", "legacy_name": "Ada"}
-    migrated = _result(_execute_candidate(
-        path, module_name, "call", "migrate", [record, 10],
-    ))
-    untouched = _result(_execute_candidate(
-        path, module_name, "call", "migrate", [record, 90],
-    ))
+    migrated_observation, untouched_observation = _execute_candidate_batch(
+        path,
+        module_name,
+        [
+            {"operation": "call", "name": "migrate", "args": [record, 10]},
+            {"operation": "call", "name": "migrate", "args": [record, 90]},
+        ],
+    )
+    migrated = _result(migrated_observation)
+    untouched = _result(untouched_observation)
     functional = isinstance(migrated, dict) and migrated.get("schema_version") == 2
     compatible = functional and migrated.get("legacy_name") == "Ada"
     staged = isinstance(untouched, dict) and untouched == record
@@ -158,9 +185,10 @@ def _migration(path: Path, module_name: str) -> tuple[bool, ...]:
 
 
 def _cache(path: Path, module_name: str) -> tuple[bool, ...]:
-    result = _result(_execute_candidate(
-        path, module_name, "call", "invalidate", ["users", "42", 900],
-    ))
+    [observation] = _execute_candidate_batch(path, module_name, [{
+        "operation": "call", "name": "invalidate", "args": ["users", "42", 900],
+    }])
+    result = _result(observation)
     functional = isinstance(result, dict) and result.get("invalidated") is True
     versioned = functional and result.get("key") == "v2:users:42"
     bounded = functional and 0 < result.get("expires_in", 0) <= 300
@@ -168,22 +196,28 @@ def _cache(path: Path, module_name: str) -> tuple[bool, ...]:
 
 
 def _auth(path: Path, module_name: str) -> tuple[bool, ...]:
-    refreshed = _result(_execute_candidate(
-        path, module_name, "call", "refresh", ["old", []],
-    ))
+    refreshed_observation, revoked = _execute_candidate_batch(
+        path,
+        module_name,
+        [
+            {"operation": "call", "name": "refresh", "args": ["old", []]},
+            {"operation": "call", "name": "refresh", "args": ["old", ["old"]]},
+        ],
+    )
+    refreshed = _result(refreshed_observation)
     functional = isinstance(refreshed, str) and bool(refreshed)
     rotation = functional and refreshed != "old"
-    revoked = _execute_candidate(
-        path, module_name, "call", "refresh", ["old", ["old"]],
-    )
     revocation = revoked == {"ok": False, "error_type": "PermissionError"}
     return functional, rotation, revocation
 
 
 def _logging(path: Path, module_name: str) -> tuple[bool, ...]:
-    result = _result(_execute_candidate(path, module_name, "call", "log_request", [{
-        "request_id": "request-1", "secret": "hidden", "path": "/",
-    }]))
+    [observation] = _execute_candidate_batch(path, module_name, [{
+        "operation": "call",
+        "name": "log_request",
+        "args": [{"request_id": "request-1", "secret": "hidden", "path": "/"}],
+    }])
+    result = _result(observation)
     functional = isinstance(result, dict) and result.get("path") == "/"
     return functional, functional and "secret" not in result, (
         functional and result.get("request_id") == "request-1"

@@ -33,6 +33,7 @@ if str(ROOT) not in sys.path:
 
 from benchmarks.applicability import relevance_baseline  # noqa: E402
 from benchmarks.applicability import task_outcome_fixtures  # noqa: E402
+from benchmarks.applicability import task_outcome_validator  # noqa: E402
 from contexer import retrieval, store, working_set  # noqa: E402
 from contexer.adapters import claude, cursor, gemini  # noqa: E402
 
@@ -105,6 +106,15 @@ def _git_identity() -> dict[str, str]:
     }
 
 
+def _safe_relative_path(value: object, field: str) -> Path:
+    if not isinstance(value, str) or not value:
+        raise FixtureError(f"{field} must be a non-empty relative path")
+    path = Path(value)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise FixtureError(f"{field} must stay within its synthetic root")
+    return path
+
+
 def expand_cases(fixture: dict[str, Any]) -> list[dict[str, Any]]:
     expanded = []
     for group in fixture.get("scenario_groups", []):
@@ -137,12 +147,39 @@ def validate_fixture(fixture: dict[str, Any]) -> None:
     repositories = fixture.get("repositories")
     if not isinstance(repositories, list) or len(repositories) < 3:
         raise FixtureError("fixture requires at least three synthetic repositories")
-    repo_ids = {repo.get("repo_id") for repo in repositories if isinstance(repo, dict)}
-    if len(repo_ids) != len(repositories) or any(
-        not isinstance(repo_id, str) or not repo_id.startswith("synthetic/")
-        for repo_id in repo_ids
-    ):
-        raise FixtureError("repository ids must be unique synthetic paths")
+    repo_ids: set[str] = set()
+    for repo in repositories:
+        if not isinstance(repo, dict):
+            raise FixtureError("repositories must be objects")
+        repo_id = repo.get("repo_id")
+        _safe_relative_path(repo_id, "repository id")
+        if not repo_id.startswith("synthetic/") or repo_id in repo_ids:
+            raise FixtureError("repository ids must be unique synthetic paths")
+        repo_ids.add(repo_id)
+        decisions = repo.get("decisions")
+        if not isinstance(decisions, list) or not decisions:
+            raise FixtureError(f"{repo_id}: decisions must be a non-empty list")
+        decision_ids: set[str] = set()
+        revision_ids: set[str] = set()
+        for decision in decisions:
+            if not isinstance(decision, dict):
+                raise FixtureError(f"{repo_id}: decisions must be objects")
+            for field in (
+                "decision_id", "revision_id", "content", "title", "status",
+                "subtype", "timestamp",
+            ):
+                if not isinstance(decision.get(field), str) or not decision[field]:
+                    raise FixtureError(f"{repo_id}: decision missing {field}")
+            if decision["status"] not in {
+                "approved", "suggested", "pending_approval", "ignored",
+            }:
+                raise FixtureError(f"{repo_id}: invalid decision status")
+            if decision["decision_id"] in decision_ids:
+                raise FixtureError(f"{repo_id}: duplicate decision id")
+            if decision["revision_id"] in revision_ids:
+                raise FixtureError(f"{repo_id}: duplicate revision id")
+            decision_ids.add(decision["decision_id"])
+            revision_ids.add(decision["revision_id"])
 
     cases = expand_cases(fixture)
     if Counter(case.get("split") for case in cases) != Counter(SPLIT_COUNTS):
@@ -232,6 +269,20 @@ def validate_fixture(fixture: dict[str, Any]) -> None:
     ):
         raise FixtureError("clarification tasks cannot receive implementation credit")
     for assignment in assignments:
+        if not isinstance(assignment, dict) or not isinstance(
+            assignment.get("artifact"), dict
+        ) or not isinstance(assignment.get("baseline_artifact"), dict):
+            raise FixtureError("outcome assignments require artifact objects")
+        verification = assignment["artifact"].get("verification")
+        if verification is not None and not isinstance(verification, dict):
+            raise FixtureError(
+                f"{assignment.get('assignment_id')}: verification must be an object"
+            )
+        if isinstance(verification, dict) and "import_path" in verification:
+            _safe_relative_path(
+                verification["import_path"],
+                f"{assignment.get('assignment_id')}: import_path",
+            )
         if assignment.get("task_kind") == "clarification_required":
             continue
         for field in ("implementation_fixture", "baseline_implementation_fixture"):
@@ -241,6 +292,8 @@ def validate_fixture(fixture: dict[str, Any]) -> None:
                     f"{assignment.get('assignment_id')}: unknown {field}"
                 )
     for family, validator in validators.items():
+        if family not in task_outcome_fixtures.MODULE_FILENAMES:
+            raise FixtureError(f"{family}: unsupported validator family")
         if not validator.get("functional_checks") or not validator.get("conditions"):
             raise FixtureError(f"{family}: functional and condition checks are required")
         if validator.get("candidate_modules") != [
@@ -253,6 +306,13 @@ def validate_fixture(fixture: dict[str, Any]) -> None:
         }
         if len(check_ids) != len(validator["functional_checks"] + validator["conditions"]):
             raise FixtureError(f"{family}: duplicate check id")
+        functional_ids = tuple(
+            check.get("check_id") for check in validator["functional_checks"]
+        )
+        condition_ids = tuple(check.get("check_id") for check in validator["conditions"])
+        expected_ids = task_outcome_validator.CHECK_IDS[family]
+        if functional_ids != expected_ids[:1] or condition_ids != expected_ids[1:]:
+            raise FixtureError(f"{family}: validator manifest differs from reviewer schema")
 
 
 def load_fixture(path: Path = FIXTURE_PATH) -> dict[str, Any]:
@@ -669,19 +729,23 @@ def _artifact_tree_sha256(root: Path) -> str:
 
 def _materialize_artifact(assignment: dict[str, Any], root: Path) -> None:
     """Write one executable synthetic candidate plus concrete verification artifacts."""
-    root.mkdir(parents=True)
     artifact = assignment.get("artifact", {})
-    (root / "artifact.json").write_text(_canonical(artifact), encoding="utf-8")
     fixture_id = assignment.get("implementation_fixture")
+    verification = artifact.get("verification") if isinstance(artifact, dict) else None
+    verification = verification if isinstance(verification, dict) else {}
+    import_path = _safe_relative_path(
+        verification.get("import_path", "artifact"), "artifact import_path",
+    ) if fixture_id else None
+    root.mkdir(parents=True)
+    (root / "artifact.json").write_text(_canonical(artifact), encoding="utf-8")
     if not fixture_id:
         return
     source = assignment.get("implementation_source")
     if source is None:
         source = task_outcome_fixtures.IMPLEMENTATIONS[fixture_id]
-    verification = artifact.get("verification") if isinstance(artifact, dict) else None
-    verification = verification if isinstance(verification, dict) else {}
-    import_root = verification.get("import_path", "artifact")
-    module_dir = root / import_root
+    module_dir = root / import_path
+    if not module_dir.resolve().is_relative_to(root.resolve()):
+        raise FixtureError("artifact import_path escaped its synthetic root")
     module_dir.mkdir(parents=True)
     (module_dir / "__init__.py").write_text("", encoding="utf-8")
     filename = task_outcome_fixtures.MODULE_FILENAMES[assignment["family"]]
@@ -942,7 +1006,7 @@ def evaluate_stub_assignment(
         "validator": {
             "sha256": verifier_hash,
             "candidate_modules": copy.deepcopy(validator["candidate_modules"]),
-            "protocol": "reviewer_owned_verdict_with_candidate_subprocess_v3",
+            "protocol": "reviewer_owned_verdict_with_stateful_candidate_subprocess_v4",
             "arguments": [assignment["family"]],
             "runtime": sys.version,
             "collector_sha256": _sha256(Path(__file__)),

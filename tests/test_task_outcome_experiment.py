@@ -81,6 +81,25 @@ def test_hollowed_or_cross_split_fixture_is_rejected(fixture_data):
     with pytest.raises(experiment.FixtureError, match="coverage cannot be empty"):
         experiment.validate_fixture(invalid)
 
+    invalid = copy.deepcopy(fixture_data)
+    del invalid["repositories"][0]["decisions"][0]["subtype"]
+    with pytest.raises(experiment.FixtureError, match="decision missing subtype"):
+        experiment.validate_fixture(invalid)
+
+    invalid = copy.deepcopy(fixture_data)
+    invalid["validators"]["payment_retry"]["conditions"][0]["check_id"] = (
+        "payment.renamed"
+    )
+    with pytest.raises(experiment.FixtureError, match="differs from reviewer schema"):
+        experiment.validate_fixture(invalid)
+
+    invalid = copy.deepcopy(fixture_data)
+    invalid["outcome_assignments"][0]["artifact"]["verification"]["import_path"] = (
+        "../../outside"
+    )
+    with pytest.raises(experiment.FixtureError, match="must stay within"):
+        experiment.validate_fixture(invalid)
+
 
 def test_default_off_baseline_is_silent_and_existing_routes_are_unchanged(report):
     positives = [
@@ -254,7 +273,7 @@ def retry_plan(operation_id, attempts):
     }
     assert row["aggregate"]["result"] == "failure"
     assert row["validator"]["protocol"] == (
-        "reviewer_owned_verdict_with_candidate_subprocess_v3"
+        "reviewer_owned_verdict_with_stateful_candidate_subprocess_v4"
     )
 
 
@@ -275,6 +294,48 @@ __main__.PROBES["payment_retry"] = lambda module: (True, True, True, True)
     }
     assert row["aggregate"]["result"] == "failure"
     assert row["evidence_valid"] is True
+
+
+def test_stateful_candidate_is_reused_for_idempotency_probe(fixture_data, tmp_path):
+    assignment = copy.deepcopy(fixture_data["outcome_assignments"][0])
+    assignment["assignment_id"] = "synthetic-stateful-non-idempotent"
+    assignment["implementation_source"] = '''
+REVISION = "v2"
+calls = 0
+
+def retry_plan(operation_id, attempts):
+    global calls
+    calls += 1
+    key = operation_id if calls == 1 else f"{operation_id}-{calls}"
+    return [
+        {"attempt": attempt, "delay": min(2 ** attempt, 8), "idempotency_key": key}
+        for attempt in range(attempts)
+    ]
+'''
+    assignment["expected_aggregate"] = "failure"
+
+    row = experiment.evaluate_stub_assignment(fixture_data, assignment, tmp_path)
+    checks = {check["check_id"]: check["status"] for check in row["checks"]}
+
+    assert checks["payment.functional"] == "pass"
+    assert checks["payment.idempotent"] == "fail"
+    assert row["aggregate"]["result"] == "failure"
+
+
+def test_fixture_import_path_is_rejected_before_any_out_of_root_write(
+    fixture_data, tmp_path
+):
+    assignment = copy.deepcopy(fixture_data["outcome_assignments"][0])
+    assignment["assignment_id"] = "synthetic-import-path-escape"
+    outside = tmp_path / "outside"
+    assignment["artifact"]["verification"]["import_path"] = str(outside)
+
+    with pytest.raises(experiment.FixtureError, match="must stay within"):
+        experiment.evaluate_stub_assignment(
+            fixture_data, assignment, tmp_path / "evaluation",
+        )
+
+    assert not outside.exists()
 
 
 def test_protected_boundary_detects_tampering_missing_results_and_evaluator_failure(report):
