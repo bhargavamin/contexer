@@ -322,6 +322,30 @@ def retry_plan(operation_id, attempts):
     assert row["aggregate"]["result"] == "failure"
 
 
+def test_stateful_batch_preserves_per_observation_timeout_budget(fixture_data, tmp_path):
+    assignment = copy.deepcopy(fixture_data["outcome_assignments"][0])
+    assignment["assignment_id"] = "synthetic-slow-valid-batch"
+    assignment["implementation_source"] = '''
+import time
+
+REVISION = "v2"
+
+def retry_plan(operation_id, attempts):
+    time.sleep(0.6)
+    return [
+        {"attempt": attempt, "delay": min(2 ** attempt, 8),
+         "idempotency_key": operation_id}
+        for attempt in range(attempts)
+    ]
+'''
+    assignment["expected_aggregate"] = "success"
+
+    row = experiment.evaluate_stub_assignment(fixture_data, assignment, tmp_path)
+
+    assert row["aggregate"]["result"] == "success"
+    assert all(check["status"] == "pass" for check in row["checks"])
+
+
 def test_fixture_import_path_is_rejected_before_any_out_of_root_write(
     fixture_data, tmp_path
 ):

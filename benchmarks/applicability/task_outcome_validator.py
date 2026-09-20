@@ -96,7 +96,7 @@ def _execute_candidate_batch(
             capture_output=True,
             text=True,
             check=False,
-            timeout=1,
+            timeout=max(1, len(requests)),
         )
     except (OSError, subprocess.TimeoutExpired):
         return [failure.copy() for _ in requests]

@@ -1013,7 +1013,8 @@ def evaluate_stub_assignment(
             "limits": {
                 "validator_timeout_seconds": 5,
                 "validator_stdout_bytes": 65_536,
-                "candidate_call_timeout_seconds": 1,
+                "candidate_timeout_seconds_per_observation": 1,
+                "candidate_batch_timeout": "max(1, observation_count)",
                 "candidate_stdout_bytes": 32_768,
             },
             "protection": "isolated Python mode and integrity detection; not an OS sandbox",
