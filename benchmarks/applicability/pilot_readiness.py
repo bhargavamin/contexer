@@ -1238,13 +1238,16 @@ def validate_approval(
         raise PilotError("approval is bound to a different canonical ledger")
     if approval.get("operator_approved") is not True:
         raise PilotError("fresh operator approval is required")
-    _parse_time(approval.get("approved_at"), "approved_at")
-    if require_current and _parse_time(
-        approval.get("expires_at"), "expires_at",
-    ) <= datetime.now(timezone.utc):
-        raise PilotError("approval has expired")
-    if not require_current:
-        _parse_time(approval.get("expires_at"), "expires_at")
+    approved_at = _parse_time(approval.get("approved_at"), "approved_at")
+    expires_at = _parse_time(approval.get("expires_at"), "expires_at")
+    if approved_at >= expires_at:
+        raise PilotError("approval validity interval is invalid")
+    if require_current:
+        now = datetime.now(timezone.utc)
+        if approved_at > now:
+            raise PilotError("approval is not yet valid")
+        if expires_at <= now:
+            raise PilotError("approval has expired")
     schedule_ids = {row["run_id"] for row in frozen_schedule(manifest)}
     approved_ids = approval.get("approved_run_ids")
     if not isinstance(approved_ids, list) or set(approved_ids) != schedule_ids \
@@ -1580,6 +1583,7 @@ def _load_authorized_ledger(ledger_path: Path) -> tuple[dict[str, Any], dict[str
         raise PilotError("ledger runs do not match the frozen schedule")
     immutable_fields = (
         "run_id", "kind", "arm", "repetition", "task_id", "family_id", "repo_id",
+        "prompt_sha256", "validator_sha256", "required_checks",
     )
     for run_id, frozen in expected.items():
         if any(ledger["runs"][run_id].get(field) != frozen.get(field)
@@ -1813,9 +1817,11 @@ def build_report(
         approval = validate_approval(
             approval_path, manifest_path, manifest, ledger_path, require_current=False,
         )
-        approval_current = _parse_time(
-            approval["expires_at"], "expires_at",
-        ) > datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
+        approval_current = (
+            _parse_time(approval["approved_at"], "approved_at") <= now
+            < _parse_time(approval["expires_at"], "expires_at")
+        )
         if ledger.get("approval_sha256") != sha256(approval_path) \
                 or ledger.get("approval_id") != approval["approval_id"]:
             raise PilotError("ledger approval identity does not match the report")

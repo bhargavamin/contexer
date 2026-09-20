@@ -987,10 +987,33 @@ def test_expired_and_forged_approval_are_rejected(tmp_path):
         pilot.validate_approval(approval_path, manifest_path, manifest, ledger_path)
 
     approval["manifest_sha256"] = pilot.sha256(manifest_path)
+    approval["approved_at"] = "2019-01-01T00:00:00+00:00"
     approval["expires_at"] = "2020-01-01T00:00:00+00:00"
     _write_json(approval_path, approval)
     with pytest.raises(pilot.PilotError, match="expired"):
         pilot.validate_approval(approval_path, manifest_path, manifest, ledger_path)
+
+
+def test_future_and_reversed_approval_intervals_are_rejected(tmp_path):
+    manifest_path, manifest = _manifest(tmp_path)
+    ledger_path = tmp_path / "ledger.json"
+    approval_path, approval = _approval(tmp_path, manifest_path, manifest, ledger_path)
+    approval["approved_at"] = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    approval["expires_at"] = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+    _write_json(approval_path, approval)
+
+    with pytest.raises(pilot.PilotError, match="not yet valid"):
+        pilot.validate_approval(approval_path, manifest_path, manifest, ledger_path)
+    with pytest.raises(pilot.PilotError, match="not yet valid"):
+        pilot.initialize_ledger(manifest_path, approval_path, ledger_path)
+
+    approval["approved_at"] = "2026-09-22T00:00:00+00:00"
+    approval["expires_at"] = "2026-09-21T00:00:00+00:00"
+    _write_json(approval_path, approval)
+    with pytest.raises(pilot.PilotError, match="validity interval"):
+        pilot.validate_approval(
+            approval_path, manifest_path, manifest, ledger_path, require_current=False,
+        )
 
 
 def test_ledger_initialization_is_idempotent_and_rejects_conflicting_identity(tmp_path):
@@ -1030,6 +1053,7 @@ def test_stale_or_changed_approval_stops_resume(tmp_path):
     ledger_path = tmp_path / "ledger.json"
     approval_path, approval = _approval(tmp_path, manifest_path, manifest, ledger_path)
     ledger = pilot.initialize_ledger(manifest_path, approval_path, ledger_path)
+    approval["approved_at"] = "2019-01-01T00:00:00+00:00"
     approval["expires_at"] = "2020-01-01T00:00:00+00:00"
     _write_json(approval_path, approval)
 
@@ -1091,6 +1115,33 @@ def test_tampered_or_added_ledger_assignment_cannot_launch(tmp_path):
             lambda row: {"invocation_id": "forged"},
             lambda row, inv: {"invocation_id": "forged", "actual_cost": 0},
         )
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("prompt_sha256", HASH_A),
+    ("validator_sha256", HASH_A),
+    ("required_checks", ["forged-check"]),
+])
+def test_tampered_executable_ledger_assignment_cannot_launch(tmp_path, field, value):
+    manifest_path, manifest = _manifest(tmp_path)
+    ledger_path = tmp_path / "ledger.json"
+    approval_path, _ = _approval(tmp_path, manifest_path, manifest, ledger_path)
+    ledger = pilot.initialize_ledger(manifest_path, approval_path, ledger_path)
+    run_id = next(
+        candidate for candidate, row in ledger["runs"].items() if row["kind"] == "task"
+    )
+    ledger["runs"][run_id][field] = value
+    _write_json(ledger_path, ledger)
+    calls = []
+
+    with pytest.raises(pilot.PilotError, match="assignment identity"):
+        pilot.launch_stubbed_run(
+            ledger_path, run_id,
+            lambda row: calls.append(row) or {"invocation_id": "forged"},
+            lambda row, inv: {"invocation_id": "forged", "actual_cost": 0},
+        )
+
+    assert calls == []
 
 
 def test_ledger_write_failure_before_intent_launches_nothing(tmp_path, monkeypatch):
