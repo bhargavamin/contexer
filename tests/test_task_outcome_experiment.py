@@ -253,7 +253,28 @@ def retry_plan(operation_id, attempts):
         "check_id": "payment.functional", "kind": "functional", "status": "fail",
     }
     assert row["aggregate"]["result"] == "failure"
-    assert row["validator"]["protocol"] == "reviewer_owned_behavioral_subprocess_v2"
+    assert row["validator"]["protocol"] == (
+        "reviewer_owned_verdict_with_candidate_subprocess_v3"
+    )
+
+
+def test_candidate_cannot_replace_reviewer_probes_in_memory(fixture_data, tmp_path):
+    assignment = copy.deepcopy(fixture_data["outcome_assignments"][0])
+    assignment["assignment_id"] = "synthetic-reviewer-memory-tamper"
+    assignment["implementation_source"] = '''
+import __main__
+
+__main__.PROBES["payment_retry"] = lambda module: (True, True, True, True)
+'''
+    assignment["expected_aggregate"] = "failure"
+
+    row = experiment.evaluate_stub_assignment(fixture_data, assignment, tmp_path)
+
+    assert row["checks"][0] == {
+        "check_id": "payment.functional", "kind": "functional", "status": "fail",
+    }
+    assert row["aggregate"]["result"] == "failure"
+    assert row["evidence_valid"] is True
 
 
 def test_protected_boundary_detects_tampering_missing_results_and_evaluator_failure(report):

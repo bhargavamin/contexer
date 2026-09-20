@@ -942,11 +942,16 @@ def evaluate_stub_assignment(
         "validator": {
             "sha256": verifier_hash,
             "candidate_modules": copy.deepcopy(validator["candidate_modules"]),
-            "protocol": "reviewer_owned_behavioral_subprocess_v2",
+            "protocol": "reviewer_owned_verdict_with_candidate_subprocess_v3",
             "arguments": [assignment["family"]],
             "runtime": sys.version,
             "collector_sha256": _sha256(Path(__file__)),
-            "limits": {"timeout_seconds": 5, "stdout_bytes": 65_536},
+            "limits": {
+                "validator_timeout_seconds": 5,
+                "validator_stdout_bytes": 65_536,
+                "candidate_call_timeout_seconds": 1,
+                "candidate_stdout_bytes": 32_768,
+            },
             "protection": "isolated Python mode and integrity detection; not an OS sandbox",
         },
         "expected_checks": [
