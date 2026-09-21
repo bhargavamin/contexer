@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from benchmarks.applicability import working_set_lookup as contract05_benchmark
+from benchmarks.applicability import working_set_lookup
 
 
 SCHEMA_VERSION = 1
@@ -60,8 +60,8 @@ ISOLATION_PROBES = {
     "symlink_escape_denied", "result_forgery_denied",
 }
 MAX_STUB_SESSIONS = 26
-CONTRACT05_BENCHMARK_PATH = Path(contract05_benchmark.__file__).resolve()
-CONTRACT05_MANIFEST_PATH = contract05_benchmark.MANIFEST_PATH.resolve()
+CONTRACT05_BENCHMARK_PATH = Path(working_set_lookup.__file__).resolve()
+CONTRACT05_MANIFEST_PATH = working_set_lookup.MANIFEST_PATH.resolve()
 
 
 class PilotError(ValueError):
@@ -698,8 +698,8 @@ def _validate_contract05_arm(
         )
         if len(samples) != frozen_manifest["samples_per_arm_per_batch"]:
             raise PilotError(f"contract05 {name} sample count mismatch")
-        median = contract05_benchmark.statistics.median(samples)
-        p95 = contract05_benchmark._nearest_rank_p95(samples)
+        median = working_set_lookup.statistics.median(samples)
+        p95 = working_set_lookup._nearest_rank_p95(samples)
         if not math.isclose(
             _finite_nonnegative(row.get("median_ms"), "contract05 median"), median,
             rel_tol=1e-12, abs_tol=1e-12,
@@ -718,7 +718,7 @@ def _contract05_campaign_status(
         return "inconclusive", ["contract05_campaign_missing"], {}
     try:
         frozen_manifest = load_json(CONTRACT05_MANIFEST_PATH)
-        contract05_benchmark._validate_manifest(frozen_manifest)
+        working_set_lookup._validate_manifest(frozen_manifest)
         settings = campaign.get("settings")
         if not isinstance(settings, dict) or (
             settings.get("warmup"), settings.get("samples_per_arm_per_batch"),
@@ -748,38 +748,38 @@ def _contract05_campaign_status(
                 _validate_contract05_arm(pair["a"], frozen_manifest, manifest, "base")
                 role_b = "candidate" if phase == "comparison" else "base"
                 _validate_contract05_arm(pair["b"], frozen_manifest, manifest, role_b)
-        contract05_benchmark._assert_role_sources_stable(phases)
+        working_set_lookup._assert_role_sources_stable(phases)
         all_reports = [
             pair[arm] for phase in phases.values() for pair in phase for arm in ("a", "b")
         ]
-        contract05_benchmark._assert_reports_compatible(all_reports)
-        calibration = contract05_benchmark._calibration(phases["calibration"])
-        comparison = contract05_benchmark._evaluate_comparison(
+        working_set_lookup._assert_reports_compatible(all_reports)
+        calibration = working_set_lookup._calibration(phases["calibration"])
+        comparison = working_set_lookup._evaluate_comparison(
             phases["comparison"], calibration,
         )
-        drift = contract05_benchmark._evaluate_drift(phases["drift"], calibration)
+        drift = working_set_lookup._evaluate_drift(phases["drift"], calibration)
     except (AssertionError, IndexError, KeyError, PilotError, TypeError, ValueError) as exc:
         return "inconclusive", [f"contract05_campaign_invalid:{exc}"], {}
 
     calibration_stable = all(
         row[stat]["stable"] for row in calibration.values()
-        for stat in contract05_benchmark.STATS
+        for stat in working_set_lookup.STATS
     )
     comparison_inconclusive = any(
         row[stat]["status"] == "inconclusive" for row in comparison.values()
-        for stat in contract05_benchmark.STATS
+        for stat in working_set_lookup.STATS
     )
     controls_pass = all(
         row[stat]["status"] == "pass" and not row[stat]["large_slowdown_alarm"]
-        for row in comparison.values() for stat in contract05_benchmark.STATS
+        for row in comparison.values() for stat in working_set_lookup.STATS
     )
     dense_pass = all(
         comparison["dense_full"][stat]["dense_target_met"]
-        for stat in contract05_benchmark.STATS
+        for stat in working_set_lookup.STATS
     )
     drift_pass = all(
         row[stat]["status"] == "pass" for row in drift.values()
-        for stat in contract05_benchmark.STATS
+        for stat in working_set_lookup.STATS
     )
     metrics = {
         "pairs_per_phase": frozen_manifest["pairs_per_phase"],
@@ -791,7 +791,7 @@ def _contract05_campaign_status(
         "post_run_drift_pass": drift_pass,
         "large_slowdown_alarms": sorted(
             f"{name}:{stat}" for name, row in comparison.items()
-            for stat in contract05_benchmark.STATS if row[stat]["large_slowdown_alarm"]
+            for stat in working_set_lookup.STATS if row[stat]["large_slowdown_alarm"]
         ),
     }
     if not calibration_stable:
