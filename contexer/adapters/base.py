@@ -88,6 +88,27 @@ def _load(path: Path) -> dict:
     return data
 
 
+def _section(parent: dict, key: str, kind: type = dict):
+    """setdefault for mutating paths that also survives a hand-edited JSON null:
+    a missing or null value becomes an empty `kind`. Any other wrong type is user
+    data, so it raises ValueError (a clean abort via cli._run_guarded) rather than
+    being clobbered."""
+    value = parent.get(key)
+    if value is None:
+        value = parent[key] = kind()
+    elif not isinstance(value, kind):
+        raise ValueError(f"'{key}' is a {type(value).__name__}, expected a "
+                         f"{kind.__name__} - fix or remove it")
+    return value
+
+
+def _read(parent: dict, key: str, kind: type = dict):
+    """Read-only counterpart of _section for uninstall/status: anything that is
+    not a `kind` (missing, null, wrong type) reads as empty and is never written."""
+    value = parent.get(key)
+    return value if isinstance(value, kind) else kind()
+
+
 def _load_safe(path: Path) -> dict:
     """Tolerant load for diagnostics: a malformed or non-object JSON file reads as
     empty instead of crashing. Mutating paths (install/uninstall) keep the strict

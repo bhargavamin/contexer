@@ -314,7 +314,7 @@ def install(home: Path) -> list[str]:
 
     mcp_path = cursor_dir / "mcp.json"
     mcp = base._load(mcp_path)
-    servers = mcp.setdefault("mcpServers", {})
+    servers = base._section(mcp, "mcpServers")
     servers["contexer"] = {"command": contexer_bin}
     # The native Teams MCP surface is retired. Team sync now goes exclusively through
     # the local Python client, so reinstall must remove the exact legacy key while
@@ -326,7 +326,7 @@ def install(home: Path) -> list[str]:
     hooks_path = cursor_dir / "hooks.json"
     cfg = base._load(hooks_path)
     cfg["version"] = 1
-    hk = cfg.setdefault("hooks", {})
+    hk = base._section(cfg, "hooks")
 
     # Converge each Contexer hook on its exact current command (`base._strip_stale_flat`,
     # the claude.py/codex.py `_strip_stale` rule for Cursor's FLAT hook shape - these lists
@@ -334,12 +334,12 @@ def install(home: Path) -> list[str]:
     # below don't know about - the -P flag (without which `python -c` prepends cwd to
     # sys.path and a checked-out contexer repo shadows the installed package) - would
     # otherwise leave an installed hook running the old command forever.
-    ss = hk.setdefault("sessionStart", [])
+    ss = base._section(hk, "sessionStart", list)
     base._strip_stale_flat(ss, _HOOK_MARKER_SS, _cmd("session_start"))
     if not _has(ss, _HOOK_MARKER_SS):
         ss.append({"type": "command", "command": _cmd("session_start")})
 
-    bsp = hk.setdefault("beforeSubmitPrompt", [])
+    bsp = base._section(hk, "beforeSubmitPrompt", list)
     # Retire any previously-installed task-capture hook (the feature was removed).
     bsp[:] = [h for h in bsp if _HOOK_MARKER_TASK not in base._hook_command(h)]
     base._strip_stale_flat(bsp, _HOOK_MARKER_CON, _cmd("capture_constraint"))
@@ -360,7 +360,7 @@ def uninstall(home: Path) -> list[str]:
     mcp_path = cursor_dir / "mcp.json"
     if mcp_path.exists():
         mcp = base._load(mcp_path)
-        servers = mcp.get("mcpServers", {})
+        servers = base._read(mcp, "mcpServers")
         removed = servers.pop("contexer", None)
         removed_teams = servers.pop("contexer-teams", None)
         if removed is not None or removed_teams is not None:
@@ -370,13 +370,13 @@ def uninstall(home: Path) -> list[str]:
     hooks_path = cursor_dir / "hooks.json"
     if hooks_path.exists():
         cfg = base._load(hooks_path)
-        hk = cfg.get("hooks", {})
+        hk = base._read(cfg, "hooks")
         changed = False
         for event, markers in {
             "sessionStart": [_HOOK_MARKER_SS],
             "beforeSubmitPrompt": [_HOOK_MARKER_TASK, _HOOK_MARKER_CON],
         }.items():
-            before = hk.get(event, [])
+            before = base._read(hk, event, list)
             after = [h for h in before
                      if not any(m in base._hook_command(h) for m in markers)]
             if after != before:
@@ -395,9 +395,9 @@ def _mcp_and_hooks_ok(home: Path) -> tuple:
     """Read the Cursor config (tolerant of corruption) and report (mcp_entry, hooks_ok).
     Shared by status_lines and is_installed."""
     cursor_dir = home / ".cursor"
-    mcp = base._load_safe(cursor_dir / "mcp.json").get("mcpServers", {}).get("contexer")
-    hk = base._load_safe(cursor_dir / "hooks.json").get("hooks", {})
-    ss = hk.get("sessionStart", []) if isinstance(hk, dict) else []
+    mcp = base._read(base._load_safe(cursor_dir / "mcp.json"), "mcpServers").get("contexer")
+    hk = base._read(base._load_safe(cursor_dir / "hooks.json"), "hooks")
+    ss = base._read(hk, "sessionStart", list)
     hooks_ok = any(_HOOK_MARKER_SS in base._hook_command(h) for h in ss)
     return mcp, hooks_ok
 
