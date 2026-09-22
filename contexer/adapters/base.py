@@ -71,10 +71,18 @@ def _load(path: Path) -> dict:
     # Strict load for mutating paths (install/uninstall): unparseable JSON raises
     # JSONDecodeError, and valid-but-non-object JSON ([], null, 42) raises ValueError —
     # both surface as a clean abort (see cli._run_guarded) instead of an AttributeError
-    # mid-install that could leave the config half-written.
+    # mid-install that could leave the config half-written. A missing or empty
+    # (whitespace-only) file holds nothing to lose, so it reads as {} - editors and
+    # other tools routinely leave a zero-byte config behind.
     if not path.exists():
         return {}
-    data = json.loads(path.read_text(encoding="utf-8"))
+    text = path.read_text(encoding="utf-8")
+    if not text.strip():
+        return {}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise json.JSONDecodeError(f"{path}: {e.msg}", e.doc, e.pos) from None
     if not isinstance(data, dict):
         raise ValueError(f"{path} is not a JSON object")
     return data

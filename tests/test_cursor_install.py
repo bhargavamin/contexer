@@ -132,3 +132,28 @@ class TestCursorUninstall:
         assert "contexer" not in servers
         assert "contexer-teams" not in servers
         assert servers["contexer-teams-custom"] == {"command": "user-owned"}
+
+
+class TestCursorInstallOnEmptyConfig:
+    """Regression: a user whose ~/.cursor/mcp.json existed but was empty got
+    `Corrupt config` and no install. An empty file holds nothing to lose."""
+
+    @pytest.mark.parametrize("name", ["mcp.json", "hooks.json"])
+    @pytest.mark.parametrize("body", ["", "\n  \n"])
+    def test_empty_file_installs(self, home, name, body):
+        (home / ".cursor").mkdir()
+        (home / ".cursor" / name).write_text(body)
+        cursor.install(home)
+        assert cursor.is_installed(home)
+
+    def test_missing_cursor_dir_installs(self, home):
+        cursor.install(home)
+        assert cursor.is_installed(home)
+
+    def test_corrupt_file_still_fails_loudly_and_names_the_file(self, home):
+        (home / ".cursor").mkdir()
+        path = home / ".cursor" / "mcp.json"
+        path.write_text('{"mcpServers": {')
+        with pytest.raises(json.JSONDecodeError, match="mcp.json"):
+            cursor.install(home)
+        assert path.read_text() == '{"mcpServers": {'
