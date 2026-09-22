@@ -17,8 +17,10 @@ from contexer.adapters.base import (
     _in_groups,
     _load,
     _load_safe,
+    _read,
     _save,
     _scan_automatic_proposals,
+    _section,
     _strip_stale,
 )
 
@@ -710,7 +712,7 @@ def install(home: Path) -> list[str]:
     # MCP server (~/.claude.json)
     claude_json = home / ".claude.json"
     claude = _load(claude_json)
-    claude.setdefault("mcpServers", {})["contexer"] = {
+    _section(claude, "mcpServers")["contexer"] = {
         "type": "stdio",
         "command": contexer_bin,
     }
@@ -725,9 +727,9 @@ def install(home: Path) -> list[str]:
     # Hooks and permissions (~/.claude/settings.json)
     settings_json = home / ".claude" / "settings.json"
     settings = _load(settings_json)
-    hooks = settings.setdefault("hooks", {})
+    hooks = _section(settings, "hooks")
 
-    ss = hooks.setdefault("SessionStart", [])
+    ss = _section(hooks, "SessionStart", list)
     # Migrate: replace any installed SessionStart hook whose command isn't byte-identical
     # to the current ss_code (_strip_stale, the gemini.py pattern). The previous gate
     # listed markers a CURRENT hook must carry and stripped only when one was missing —
@@ -745,7 +747,7 @@ def install(home: Path) -> list[str]:
             "command": _py(ss_code)}]})
 
     # SessionEnd: flush memory-tool facts on clean exit (deterministic — needs no model).
-    se = hooks.setdefault("SessionEnd", [])
+    se = _section(hooks, "SessionEnd", list)
     # Converge on the exact current command (see the SessionStart note above).
     se = _strip_stale(se, ["sync_memory"], sessionend_cmd)
     hooks["SessionEnd"] = se
@@ -759,7 +761,7 @@ def install(home: Path) -> list[str]:
     # start of the next prompt - a non-interrupting moment. No Stop hook: end-of-turn
     # prompting added latency + tokens and depended on model behavior for no functional
     # gain (the anchor already delivers the same reminder deterministically).
-    put = hooks.setdefault("PostToolUse", [])
+    put = _section(hooks, "PostToolUse", list)
     # Migrate: replace the old shell-only `.pending_capture` touch (pre- or post-#152) with
     # the Python post_write hook — it records edited files AND still touches
     # .pending_capture. Detected by the `.pending_capture` marker without `claude.post_write`
@@ -782,7 +784,7 @@ def install(home: Path) -> list[str]:
     # Retire any previously-installed Stop hook: end-of-turn prompting is replaced by the
     # deterministic PostToolUse flag + next-prompt anchor reminder. The Stop entry remains
     # in the uninstall marker table so reinstall strips an old Stop hook from settings.json.
-    st = hooks.get("Stop", [])
+    st = _read(hooks, "Stop", list)
     new_st = _filter_groups(st, [".pending_capture", _HOOK_SENTINEL])
     if new_st != st:
         if new_st:
@@ -790,7 +792,7 @@ def install(home: Path) -> list[str]:
         else:
             hooks.pop("Stop", None)
 
-    pc = hooks.setdefault("PreCompact", [])
+    pc = _section(hooks, "PreCompact", list)
     # Migrate: old PreCompact only echoed a reminder; replace with the sync variant
     # that flushes memory-tool facts before the context window collapses.
     if _in_groups(pc, "compaction starting") and not _in_groups(pc, "sync_memory"):
@@ -813,7 +815,7 @@ def install(home: Path) -> list[str]:
     # re-injects via additionalContext (session_start_payload's normal path), so that
     # event already owns post-compaction reload. Strip any previously-installed Contexer
     # PostCompact hook so an upgrade goes quiet; leave foreign PostCompact hooks intact.
-    poc = hooks.get("PostCompact", [])
+    poc = _read(hooks, "PostCompact", list)
     new_poc = _filter_groups(poc, [
         "get_post_compact_context", "reloaded after compaction",
         "decision(s) available", "uv run --directory", _HOOK_SENTINEL])
@@ -823,7 +825,7 @@ def install(home: Path) -> list[str]:
         else:
             hooks.pop("PostCompact", None)
 
-    ups = hooks.setdefault("UserPromptSubmit", [])
+    ups = _section(hooks, "UserPromptSubmit", list)
 
     # Replace old anchor hook (without .pending_capture logic) with new one
     if _in_groups(ups, ".current_repo") and not _in_groups(ups, ".pending_capture"):
@@ -928,7 +930,7 @@ def install(home: Path) -> list[str]:
         ups.append({"hooks": [{"type": "command",
             "statusMessage": "Checking for decisions pending review...", "command": review_cmd}]})
 
-    allow = settings.setdefault("permissions", {}).setdefault("allow", [])
+    allow = _section(_section(settings, "permissions"), "allow", list)
     for p in [
         "mcp__contexer__update_context",
         "mcp__contexer__get_context", "mcp__contexer__bootstrap_context",
@@ -1016,8 +1018,8 @@ def uninstall(home: Path) -> list[str]:
     claude_json = home / ".claude.json"
     if claude_json.exists():
         claude = _load(claude_json)
-        removed = claude.get("mcpServers", {}).pop("contexer", None)
-        removed_teams = claude.get("mcpServers", {}).pop("contexer-teams", None)
+        removed = _read(claude, "mcpServers").pop("contexer", None)
+        removed_teams = _read(claude, "mcpServers").pop("contexer-teams", None)
         if removed or removed_teams:
             _save(claude_json, claude)
             log.append("  ✓ MCP server removed from ~/.claude.json")
@@ -1027,7 +1029,7 @@ def uninstall(home: Path) -> list[str]:
     settings_json = home / ".claude" / "settings.json"
     if settings_json.exists():
         settings = _load(settings_json)
-        hooks = settings.get("hooks", {})
+        hooks = _read(settings, "hooks")
         changed = False
 
         # _HOOK_SENTINEL is a catch-all: every command we generate carries it, so even a
@@ -1052,7 +1054,7 @@ def uninstall(home: Path) -> list[str]:
                                  _HOOK_SENTINEL],
         }
         for event, markers in event_markers.items():
-            before = hooks.get(event, [])
+            before = _read(hooks, event, list)
             after = _filter_groups(before, markers)
             if event == "UserPromptSubmit":
                 # Also strip any legacy mcp_tool capture hooks (pre-migration installs).
@@ -1066,10 +1068,11 @@ def uninstall(home: Path) -> list[str]:
                 else:
                     hooks.pop(event, None)
 
-        allow = settings.get("permissions", {}).get("allow", [])
+        permissions = _read(settings, "permissions")
+        allow = _read(permissions, "allow", list)
         cleaned = [p for p in allow if "contexer" not in p]
         if cleaned != allow:
-            settings["permissions"]["allow"] = cleaned
+            permissions["allow"] = cleaned
             changed = True
 
         if changed:
@@ -1100,7 +1103,7 @@ def _mcp_and_hooks_ok(home: Path) -> tuple:
     """Read the Claude config (tolerant of corruption — this feeds diagnostics that
     must survive any state) and report (mcp_entry, hooks_ok). Shared by status_lines
     and is_installed."""
-    mcp = _load_safe(home / ".claude.json").get("mcpServers", {}).get("contexer")
+    mcp = _read(_load_safe(home / ".claude.json"), "mcpServers").get("contexer")
     raw_hooks = _load_safe(home / ".claude" / "settings.json").get("hooks", {})
     hooks = raw_hooks if isinstance(raw_hooks, dict) else {}
 
