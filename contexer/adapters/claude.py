@@ -1068,10 +1068,11 @@ def uninstall(home: Path) -> list[str]:
                 else:
                     hooks.pop(event, None)
 
-        allow = settings.get("permissions", {}).get("allow", [])
+        permissions = _read(settings, "permissions")
+        allow = _read(permissions, "allow", list)
         cleaned = [p for p in allow if "contexer" not in p]
         if cleaned != allow:
-            settings["permissions"]["allow"] = cleaned
+            permissions["allow"] = cleaned
             changed = True
 
         if changed:

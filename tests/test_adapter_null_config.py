@@ -64,3 +64,16 @@ def test_wrong_type_mcp_servers_aborts_and_leaves_file_untouched(home, name):
     with pytest.raises(ValueError, match="mcpServers"):
         adapter.install(home)
     assert path.read_text() == before
+
+
+@pytest.mark.parametrize("permissions", [None, {"allow": None}])
+def test_claude_null_permissions_do_not_crash_uninstall(home, permissions):
+    claude.install(home)
+    path = home / ".claude" / "settings.json"
+    settings = json.loads(path.read_text())
+    settings["permissions"] = permissions
+    path.write_text(json.dumps(settings))
+
+    claude.uninstall(home)
+    assert claude.is_installed(home) is False
+    assert json.loads(path.read_text())["permissions"] == permissions
