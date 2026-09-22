@@ -6097,21 +6097,6 @@ def _render_prompt_decisions_with_records(
     return "\n".join(lines), receipts
 
 
-def _render_prompt_decisions(repo_path: str, ids: list[str]) -> str:
-    """Render the given decisions in the same two-line format `get_context` uses: a bullet
-    line ending in the title, then a `    `-indented line with the current content. Skips
-    ignored / missing entries; empty string when nothing renders.
-
-    `ids` normally come from the repo's own BM25 index (repo-store-only by construction), but
-    the file route's anchor tier (#187, `_prompt_file_hits`) can hand back a
-    `decisions_for_files` hit scoped "global" - a decision that lives in the GLOBAL store, not
-    this repo's. So any id not found
-    in the repo store falls back to a global-store lookup, mirroring `get_context`'s own
-    `files=` two-store merge. The global snapshot is loaded lazily only when a requested id
-    is absent locally or its recorded scope is explicitly global."""
-    return _render_prompt_decisions_with_records(repo_path, ids)[0]
-
-
 # Structured classification of an injection, replacing the old startswith/regex scrape of
 # the rendered text (claude.rationale used to reverse-engineer this from the string; now the
 # router hands it over directly). "" kind means no injection.

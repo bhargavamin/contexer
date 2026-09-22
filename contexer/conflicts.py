@@ -4,7 +4,7 @@ between the two is recorded.
 
 Extracted out of store.py (same directive that produced `anchors.py`: one module per cohesive
 concern, store.py stays a thin call-site facade). store.py keeps only the seams — the four
-render loops (`get_context`, `_render_prompt_decisions`, `_local_session_start_payload`,
+render loops (`get_context`, `_render_prompt_decisions_with_records`, `_local_session_start_payload`,
 `_rehydrate_working_set`) call `_conflict_view`/`has_open_conflict` and append `_CONFLICT_GUIDE`,
 `format_pending_review` calls `_conflict_pair_key` for its memo lines, and the two lifecycle
 sites (`_promote_proposal`, `_apply_approval`'s dismiss branch) pop `conflict_memo` directly.

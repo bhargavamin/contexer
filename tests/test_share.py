@@ -330,7 +330,8 @@ def test_confirmed_atomic_reconciliation_queues_one_stable_operation(tmp_repo, m
 
     monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: Fake()))
     out = share.reconcile(tmp_repo, did, profile=TEAM)
-    queued = share._load_reconcile_outbox()
+    queued, error = share._read_reconcile_outbox()
+    assert error is None
     assert out.outcome == share_status.UNREACHABLE_QUEUED and len(queued) == 1
     assert queued[0]["decision_id"] == did
     assert queued[0]["expected_personal_head"] == "ph-1"
@@ -367,7 +368,9 @@ def test_heads_changed_is_not_blindly_queued(tmp_repo, monkeypatch):
     monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: Fake()))
     out = share.reconcile(tmp_repo, did, profile=TEAM)
     assert out.outcome == share_status.HEADS_CHANGED
-    assert share._load_reconcile_outbox() == []
+    queued, error = share._read_reconcile_outbox()
+    assert error is None
+    assert queued == []
 
 
 def test_reconcile_falls_back_for_server_without_capability_tool(tmp_repo, monkeypatch):
@@ -498,7 +501,9 @@ def test_reconciliation_drain_reuses_payload_and_idempotency_key(tmp_repo, monke
     assert fake.calls[0][3]["idempotency_key"] == "idem-stable"
     assert fake.calls[0][3]["expected_personal_head"] == "ph1"
     assert fake.calls[0][3]["content"] == "new"
-    assert share._load_reconcile_outbox() == []
+    queued, error = share._read_reconcile_outbox()
+    assert error is None
+    assert queued == []
 
 
 def _atomic_plan(monkeypatch, *, raises):
@@ -550,7 +555,8 @@ def test_rate_limited_reconciliation_stays_queued_for_retry(tmp_repo, monkeypatc
     retrying it; it is now decided by the error's TYPE."""
     _queue_one_confirmed_operation()
     assert _drain_refusing(monkeypatch, RemoteRateLimitError("Rate limit exceeded")) == 0
-    queued = share._load_reconcile_outbox()
+    queued, error = share._read_reconcile_outbox()
+    assert error is None
     assert len(queued) == 1
     assert queued[0]["stage"] == "confirmed"     # NOT "attention" - it will be retried
     assert queued[0]["attempts"] == 1
@@ -569,7 +575,9 @@ def test_every_transient_refusal_class_is_queued_by_submit_reconciliation(tmp_re
         plan = _atomic_plan(monkeypatch, raises=cls("nope"))
         status = share.submit_reconciliation(plan, profile=TEAM)
         assert status.outcome == queued_outcome, cls
-        assert len(share._load_reconcile_outbox()) == 1, cls
+        queued, error = share._read_reconcile_outbox()
+        assert error is None, cls
+        assert len(queued) == 1, cls
 
 
 def test_a_new_transient_class_needs_no_change_in_submit_reconciliation(tmp_repo, monkeypatch):
@@ -583,7 +591,9 @@ def test_a_new_transient_class_needs_no_change_in_submit_reconciliation(tmp_repo
     plan = _atomic_plan(monkeypatch, raises=NewlyTransient("brand new"))
     status = share.submit_reconciliation(plan, profile=TEAM)
     assert status.outcome == share_status.UNREACHABLE_QUEUED
-    assert len(share._load_reconcile_outbox()) == 1
+    queued, error = share._read_reconcile_outbox()
+    assert error is None
+    assert len(queued) == 1
 
 
 def test_terminal_refusal_moves_the_reconciliation_to_attention(tmp_repo, monkeypatch):
@@ -591,7 +601,8 @@ def test_terminal_refusal_moves_the_reconciliation_to_attention(tmp_repo, monkey
     records why, so the developer sees it in the queue instead of it looping forever."""
     _queue_one_confirmed_operation()
     assert _drain_refusing(monkeypatch, remote.RemoteStoreError("invalid revision")) == 0
-    queued = share._load_reconcile_outbox()
+    queued, error = share._read_reconcile_outbox()
+    assert error is None
     assert len(queued) == 1
     assert queued[0]["stage"] == "attention"
     assert queued[0]["reason"] == "invalid revision"
@@ -611,7 +622,9 @@ def test_reconciliation_outbox_full_refuses_new_distinct_operation(tmp_repo, mon
             "decision_id": "d3", "revision_id": "r-d3", "team_id": "t1",
             "team_name": "Platform", "payload": {"type": "constraint", "content": "d3"},
         })
-    assert [e["decision_id"] for e in share._load_reconcile_outbox()] == ["d1", "d2"]
+    queued, error = share._read_reconcile_outbox()
+    assert error is None
+    assert [e["decision_id"] for e in queued] == ["d1", "d2"]
 
 
 def test_reconciliation_enqueue_refuses_corrupt_queue_without_overwriting(tmp_repo):
@@ -633,7 +646,9 @@ def test_discard_outbox_also_clears_confirmed_reconciliations(tmp_repo):
         "decision_id": "d1", "team_id": "t1", "idempotency_key": "i1",
         "stage": "confirmed"})
     assert share.discard_outbox() == (1, 0)
-    assert share._load_reconcile_outbox() == []
+    queued, error = share._read_reconcile_outbox()
+    assert error is None
+    assert queued == []
 
 
 # ── share.share_all ──────────────────────────────────────────────────────────────
