@@ -53,6 +53,9 @@ EVIDENCE_PROTOCOLS = {
     "route_performance": ("route.fixed_machine_comparison", "route_timing_v1"),
     "isolation": ("isolation.os_boundary_probe", "os_isolation_probe_v1"),
 }
+QUALIFIED_EVIDENCE_PROTOCOL = (
+    "qualification.reviewed_measurements_v2", "qualification_review_v2",
+)
 ISOLATION_PROBES = {
     "checkout_write_allowed", "gold_read_denied", "reviewer_write_denied",
     "cross_arm_denied", "real_home_denied", "candidate_network_denied",
@@ -155,8 +158,9 @@ def load_json(path: Path) -> dict[str, Any]:
 
 
 def validate_manifest(manifest: dict[str, Any]) -> None:
-    if manifest.get("schema_version") != SCHEMA_VERSION:
-        raise PilotError("manifest schema_version must be 1")
+    schema_version = manifest.get("schema_version")
+    if schema_version not in {SCHEMA_VERSION, 2}:
+        raise PilotError("manifest schema_version must be 1 or 2")
     _nonempty(manifest.get("campaign_id"), "campaign_id")
     if manifest.get("candidate_variant") != CANDIDATE_VARIANT:
         raise PilotError("manifest must freeze ordinary_task_v1")
@@ -202,6 +206,16 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
             task.get("validator_sha256")
         ):
             raise PilotError(f"{task_id}: prompt and validator hashes are required")
+        if schema_version == 2 and (
+            not isinstance(task.get("snapshot_id"), str)
+            or not task["snapshot_id"]
+            or not _is_hash(task.get("snapshot_sha256"))
+            or not _is_hash(task.get("initial_context_sha256"))
+            or not _is_hash(task.get("check_spec_sha256"))
+        ):
+            raise PilotError(
+                f"{task_id}: qualified campaign tasks require snapshot and check identities"
+            )
         checks = task.get("required_checks")
         if not isinstance(checks, list) or not checks or len(checks) != len(set(checks)) \
                 or any(not isinstance(check, str) or not check for check in checks):
@@ -252,6 +266,15 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     _positive_int(analysis.get("sampling_seed"), "sampling_seed")
     if _positive_int(analysis.get("resamples"), "resamples") < 1000:
         raise PilotError("sampling analysis requires at least 1000 frozen resamples")
+    if schema_version == 2:
+        core = manifest.get("pilot_task_core")
+        if not isinstance(core, dict) or set(core) != {"path", "sha256"} \
+                or not isinstance(core["path"], str) or not _is_hash(core["sha256"]):
+            raise PilotError("qualified campaign must reference the complete pilot task core")
+        if not _is_hash(manifest.get("qualification_source_chain_sha256")):
+            raise PilotError(
+                "qualified campaign must bind the qualification execution source chain"
+            )
 
 
 def load_manifest(path: Path) -> dict[str, Any]:
@@ -260,6 +283,20 @@ def load_manifest(path: Path) -> dict[str, Any]:
     root = path.resolve().parent
     for kind, ref in manifest["evidence"].items():
         _safe_relative(root, ref["path"], f"{kind} evidence path")
+    if manifest.get("schema_version") == 2:
+        from benchmarks.applicability import qualification_preparation
+
+        ref = manifest["pilot_task_core"]
+        core_path = _safe_relative(root, ref["path"], "pilot task core path")
+        if not core_path.is_file() or sha256(core_path) != ref["sha256"]:
+            raise PilotError("pilot task core identity mismatch")
+        try:
+            expected = qualification_preparation.pilot_core_task_bindings(core_path)
+        except ValueError as exc:
+            raise PilotError(str(exc)) from exc
+        actual = [{key: row.get(key) for key in expected[0]} for row in manifest["tasks"]]
+        if actual != expected:
+            raise PilotError("campaign tasks differ from the frozen pilot task core")
     return manifest
 
 
@@ -403,7 +440,11 @@ def _verified_evidence_artifact(
     root: Path,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     reasons = []
-    expected_check, expected_producer = EVIDENCE_PROTOCOLS[kind]
+    expected_check, expected_producer = (
+        QUALIFIED_EVIDENCE_PROTOCOL
+        if kind == "qualification" and manifest.get("schema_version") == 2
+        else EVIDENCE_PROTOCOLS[kind]
+    )
     if document.get("schema_version") != SCHEMA_VERSION:
         reasons.append("schema_mismatch")
     if document.get("evidence_kind") != kind:
@@ -472,7 +513,31 @@ def _qualification_status(
     )
     if artifact is None:
         return "inconclusive", reasons, {}
-    measurements = artifact["measurements"]
+    fresh_qualification = manifest.get("schema_version") == 2
+    qualified_bindings: dict[str, Any] = {}
+    if fresh_qualification:
+        try:
+            from benchmarks.applicability import qualification_preparation
+
+            artifact_path = _safe_relative(
+                root,
+                document["checks"][0]["artifact_path"],
+                "qualification artifact path",
+            )
+            qualified = qualification_preparation.validate_qualified_artifact(
+                artifact_path, campaign_manifest=manifest,
+            )
+        except (PilotError, ValueError) as exc:
+            return "inconclusive", ["qualified_evidence_invalid", str(exc)], {}
+        if qualified["status"] != "pass":
+            return "inconclusive", qualified["reasons"], {
+                "fresh_qualification": False,
+                "qualified_bindings": qualified.get("bindings", {}),
+            }
+        measurements = qualified["measurements"]
+        qualified_bindings = qualified["bindings"]
+    else:
+        measurements = artifact["measurements"]
     observations = measurements.get("relevance_observations")
     reviews = measurements.get("review_records")
     if not isinstance(observations, list) or not observations \
@@ -540,13 +605,37 @@ def _qualification_status(
     equal_prompt_precision = sum(emitting_precision) / len(emitting_precision) \
         if emitting_precision else 0.0
     coverage_gains = []
+    required_total = 0
+    baseline_required_covered = 0
+    candidate_required_covered = 0
+    baseline_whole_tasks = 0
+    candidate_whole_tasks = 0
+    standing_required_covered = 0
+    candidate_new_required_covered = 0
     for row in positive_rows:
         expected = set(row["expected_revisions"])
         if not expected:
             return "inconclusive", ["positive_case_without_required_revision"], {}
-        baseline = len(expected & set(row["baseline_revisions"])) / len(expected)
-        candidate = len(expected & set(row["candidate_revisions"])) / len(expected)
+        baseline_set = set(
+            row.get("baseline_coverage_revisions", row["baseline_revisions"])
+        )
+        candidate_set = set(
+            row.get("candidate_coverage_revisions", row["candidate_revisions"])
+        )
+        standing_set = set(row.get("standing_revisions", []))
+        candidate_new_set = set(row["candidate_revisions"])
+        baseline_count = len(expected & baseline_set)
+        candidate_count = len(expected & candidate_set)
+        baseline = baseline_count / len(expected)
+        candidate = candidate_count / len(expected)
         coverage_gains.append(candidate - baseline)
+        required_total += len(expected)
+        baseline_required_covered += baseline_count
+        candidate_required_covered += candidate_count
+        baseline_whole_tasks += baseline_count == len(expected)
+        candidate_whole_tasks += candidate_count == len(expected)
+        standing_required_covered += len(expected & standing_set)
+        candidate_new_required_covered += len(expected & candidate_new_set)
     equal_task_coverage_gain = sum(coverage_gains) / len(coverage_gains)
 
     negative_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -594,18 +683,44 @@ def _qualification_status(
     regressions_valid = all(isinstance(rows, list) for rows in regression_lists)
     regressions_absent = regressions_valid and all(not rows for rows in regression_lists)
     metrics = {
+        "fresh_qualification": fresh_qualification,
+        "qualified_bindings": qualified_bindings,
         "independent_review_complete": reviewed,
         "full_precision_pooled": pooled_precision,
         "full_precision_equal_prompt": equal_prompt_precision,
         "paired_coverage_gain_equal_task": equal_task_coverage_gain,
+        "required_revision_coverage": {
+            "baseline": baseline_required_covered / required_total,
+            "candidate": candidate_required_covered / required_total,
+            "gain": (
+                candidate_required_covered - baseline_required_covered
+            ) / required_total,
+        },
+        "whole_task_coverage": {
+            "baseline": baseline_whole_tasks / len(positive_rows),
+            "candidate": candidate_whole_tasks / len(positive_rows),
+            "gain": (
+                candidate_whole_tasks - baseline_whole_tasks
+            ) / len(positive_rows),
+        },
+        "standing_required_revision_coverage": (
+            standing_required_covered / required_total
+        ),
+        "candidate_new_emission_required_revision_coverage": (
+            candidate_new_required_covered / required_total
+        ),
         "negative_evidence": negative,
         "source_and_label_identity_pass": identity_pass,
         "reported_pilot_families_match_manifest": reported_families_match,
         "qualification_pilot_family_overlap": sorted(pilot_family_overlap),
         "regressions_absent": regressions_absent,
     }
+    if not fresh_qualification:
+        reasons.append("legacy_qualification_evidence_diagnostic_only")
     if not reviewed:
         reasons.append("independent_review_incomplete")
+    if fresh_qualification and measurements.get("unknown_case_ids"):
+        reasons.append("qualification_observations_unknown")
     if measurements.get("label_manifest_sha256") != manifest["label_manifest_sha256"]:
         reasons.append("qualification_identity_mismatch")
     if not reported_families_match:
@@ -1697,8 +1812,25 @@ def reconcile_incomplete_launch(
             run["reservation_released_by"] = _nonempty(
                 evidence.get("evidence_id"), "no-launch evidence id"
             )
-        elif evidence.get("invocation_id") and evidence.get("campaign_owned") is True:
-            run["invocation_id"] = evidence["invocation_id"]
+        elif evidence.get("invocation_id"):
+            invocation_id = _nonempty(
+                evidence.get("invocation_id"), "reconciliation invocation id"
+            )
+            existing_invocation_id = run.get("invocation_id")
+            if existing_invocation_id is not None:
+                _nonempty(existing_invocation_id, "persisted invocation id")
+                if invocation_id != existing_invocation_id:
+                    raise PilotError("reconciliation invocation identity does not match")
+            if existing_invocation_id is None and (
+                evidence.get("campaign_owned") is not True
+                or evidence.get("campaign_id") != ledger["campaign_id"]
+                or evidence.get("run_id") != run_id
+            ):
+                raise PilotError(
+                    "new reconciliation invocation evidence is not campaign-bound"
+                )
+            if existing_invocation_id is None:
+                run["invocation_id"] = invocation_id
             run["state"] = "launch_unknown"
             run["history"].append("launch_unknown")
         else:
@@ -1843,7 +1975,8 @@ def build_report(
     outcome_metrics["ledger_binding"] = outcome_binding
     readiness_pass = all(gate["status"] == "pass" for gate in gates.values())
     engineering_ready = (
-        len(schedule) == manifest["budget"]["max_sessions"]
+        readiness_pass
+        and len(schedule) == manifest["budget"]["max_sessions"]
         and len({row["run_id"] for row in schedule}) == len(schedule)
     )
     ready_for_authorized_canaries = (

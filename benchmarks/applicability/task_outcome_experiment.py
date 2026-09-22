@@ -334,6 +334,7 @@ def _prompt_output(repo: str, case: dict[str, Any], arm: str) -> dict[str, Any]:
     session_id = f"{case['case_id']}:{arm}"
     observed_meta: dict[str, Any] = {"kind": "", "count": 0, "topics": []}
     observed_text = ""
+    ranked_candidates: list[tuple[Any, ...]] = []
 
     def lookup_meta(*args, **kwargs):
         nonlocal observed_meta, observed_text
@@ -348,6 +349,7 @@ def _prompt_output(repo: str, case: dict[str, Any], arm: str) -> dict[str, Any]:
         return observed_text
 
     raw = json.dumps({"prompt": prompt, "session_id": session_id})
+    before_records = working_set.records(repo, session_id)
     if case["host"] == "gemini":
         # The comparison is a per-prompt route experiment, not a first-session bootstrap
         # experiment. Freeze the already-started session state outside the measured request.
@@ -355,36 +357,76 @@ def _prompt_output(repo: str, case: dict[str, Any], arm: str) -> dict[str, Any]:
         marker = store.sidecar_path("gemini_first", slug=marker_slug)
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text("1", encoding="utf-8")
+    original_prompt_rank = retrieval.prompt_rank
+
+    def traced_prompt_rank(*args, **kwargs):
+        nonlocal ranked_candidates
+        ranked_candidates = list(original_prompt_rank(*args, **kwargs))
+        return ranked_candidates
+
     started = time.perf_counter_ns()
-    if case["host"] in {"claude", "codex"}:
-        payload = claude._recall_payload(
-            repo, raw, case["host"], prompt_lookup=lookup_meta)
-        user_notice = bool(payload.get("systemMessage"))
-        supported = True
-    elif case["host"] == "gemini":
-        payload = json.loads(gemini.before_agent(repo, raw, prompt_lookup=lookup_text))
-        user_notice = bool(payload.get("systemMessage"))
-        supported = True
-    else:
-        payload = cursor.format_prompt_passthrough()
-        text = ""
-        user_notice = False
-        supported = False
+    retrieval.prompt_rank = traced_prompt_rank
+    try:
+        if case["host"] in {"claude", "codex"}:
+            payload = claude._recall_payload(
+                repo, raw, case["host"], prompt_lookup=lookup_meta)
+            user_notice = bool(payload.get("systemMessage"))
+            supported = True
+        elif case["host"] == "gemini":
+            payload = json.loads(gemini.before_agent(repo, raw, prompt_lookup=lookup_text))
+            user_notice = bool(payload.get("systemMessage"))
+            supported = True
+        else:
+            payload = cursor.format_prompt_passthrough()
+            text = ""
+            user_notice = False
+            supported = False
+    finally:
+        retrieval.prompt_rank = original_prompt_rank
     elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000
     payload_context = payload.get("hookSpecificOutput", {}).get("additionalContext", "")
     text = observed_text
 
     records = working_set.records(repo, session_id) if supported else []
-    entries = {entry["id"]: entry for entry in store.load(repo).get("entries", [])}
+    before_keys = {
+        (row.get("scope"), row.get("id"), row.get("fingerprint"))
+        for row in before_records
+    }
+    new_records = [
+        row for row in records
+        if (row.get("scope"), row.get("id"), row.get("fingerprint")) not in before_keys
+    ]
+    local_entries = {entry["id"]: entry for entry in store.load(repo).get("entries", [])}
+    global_entries = {entry["id"]: entry for entry in store.load_global().get("entries", [])}
     full = []
-    for record in records:
-        entry = entries.get(record["id"])
+    for record in new_records:
+        entry = (
+            global_entries if record.get("scope") == "global" else local_entries
+        ).get(record["id"])
         if entry is not None:
             full.append({
+                "scope": record.get("scope", "personal"),
                 "decision_id": entry["id"],
                 "revision_id": entry.get("current_revision_id"),
                 "tier": "prompt_full",
             })
+    found = [{
+        "scope": "personal",
+        "decision_id": decision_id,
+        "revision_id": local_entries.get(decision_id, {}).get("current_revision_id"),
+        "score": score,
+        "hits": hits,
+        "discriminative_hits": discriminative_hits,
+        "source": "ranked",
+    } for decision_id, score, hits, discriminative_hits, *_ in ranked_candidates]
+    found_identities = {
+        (row["scope"], row["decision_id"], row["revision_id"]) for row in found
+    }
+    for row in full:
+        identity = (row["scope"], row["decision_id"], row["revision_id"])
+        if identity not in found_identities:
+            found.append({**row, "source": "selected_non_ranked"})
+            found_identities.add(identity)
     # The callback records metadata from the exact router call made by the adapter. The
     # adapter payload remains the authority for emitted text; no second lookup can consume
     # working-set credit or infer an experiment origin from prompt shape.
@@ -398,6 +440,8 @@ def _prompt_output(repo: str, case: dict[str, Any], arm: str) -> dict[str, Any]:
         "router_context_in_payload": not text or text in payload_context,
         "user_notice": user_notice,
         "meta": meta,
+        "found_revisions": found,
+        "initial_working_set_records": copy.deepcopy(before_records),
         "full_emissions": full,
         "output_bytes": len(text.encode("utf-8")),
         "output_tokens_estimated": max(0, len(text.encode("utf-8")) // 4),
@@ -407,6 +451,8 @@ def _prompt_output(repo: str, case: dict[str, Any], arm: str) -> dict[str, Any]:
 
 def run_retrieval_case(fixture: dict[str, Any], case: dict[str, Any], root: Path) -> dict[str, Any]:
     repo_spec = _repo_spec(fixture, case["repo_id"])
+    safe_repo_id = _safe_relative_path(case["repo_id"], "repository id")
+    resolved_root = root.resolve()
     arms = {}
     original_store_dir = store.store_dir
     original_home = os.environ.get("HOME")
@@ -416,19 +462,48 @@ def run_retrieval_case(fixture: dict[str, Any], case: dict[str, Any], root: Path
     sentinel_before = _sha256(sentinel)
     try:
         for arm in ("baseline", "candidate"):
-            arm_root = root / arm
+            arm_root = resolved_root / arm
             isolated_home = arm_root / "home"
             isolated_store = isolated_home / ".contexer"
-            repo = arm_root / case["repo_id"]
+            repo = (arm_root / safe_repo_id).resolve()
+            if arm_root.resolve() not in repo.parents:
+                raise FixtureError("repository id escaped the isolated arm root")
             repo.mkdir(parents=True, exist_ok=True)
             isolated_home.mkdir(parents=True, exist_ok=True)
             os.environ["HOME"] = str(isolated_home)
             store.store_dir = lambda isolated_store=isolated_store: isolated_store
             isolated_store.parent.mkdir(parents=True, exist_ok=True)
             store.ensure_store_dir()
-            entries = [relevance_baseline._entry(item) for item in repo_spec["decisions"]]
+            entries = [
+                relevance_baseline._entry(item) for item in repo_spec["decisions"]
+                if item.get("scope", "personal") != "global"
+            ]
+            global_entries = [
+                relevance_baseline._entry(item)
+                for item in repo_spec.get("global_decisions", []) + repo_spec["decisions"]
+                if item.get("scope") == "global"
+            ]
             store.save(str(repo), {"repo_path": str(repo), "entries": entries})
-            store.save_global({"entries": []})
+            store.save_global({"entries": global_entries})
+            initial_records = []
+            for initial in case.get("initial_working_set", []):
+                if not isinstance(initial, dict):
+                    continue
+                decision_id = initial.get("decision_id")
+                scope = initial.get("scope", "personal")
+                source = global_entries if scope == "global" else entries
+                entry = next((row for row in source if row.get("id") == decision_id), None)
+                if entry is None:
+                    continue
+                initial_records.append({
+                    "scope": scope,
+                    "id": decision_id,
+                    "fingerprint": store._guidance_fingerprint(entry),
+                })
+            if initial_records:
+                working_set.write(
+                    str(repo), f"{case['case_id']}:{arm}", initial_records,
+                )
             arms[arm] = _prompt_output(str(repo), case, arm)
     finally:
         store.store_dir = original_store_dir
