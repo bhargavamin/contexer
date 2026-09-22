@@ -12,7 +12,6 @@ from benchmarks.applicability import qualification_preparation as qualification
 
 
 HASH_A = "a" * 64
-HASH_B = "b" * 64
 HEAD = "c" * 40
 
 
@@ -213,8 +212,17 @@ def _manifest(tmp_path: Path, *, origin: str = "development") -> tuple[Path, dic
             _case(root, snapshots, 3, "control", origin=origin),
         ]
     support = {}
-    for name in ("base.patch", "base.untracked", "candidate.patch", "candidate.untracked"):
+    for name in ("base.patch", "base.untracked"):
         support[name] = _write(root / "source" / name, f"frozen {name}\n")
+    executed_source = qualification._executed_checkout_source()
+    for name, content in (
+        ("candidate.patch", executed_source["patch"]),
+        ("candidate.untracked", executed_source["untracked"]),
+    ):
+        path = root / "source" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        support[name] = path
     support["uv.lock"] = _write(
         root / "source" / "uv.lock",
         (Path(qualification.__file__).resolve().parents[2] / "uv.lock").read_text(
@@ -233,6 +241,12 @@ def _manifest(tmp_path: Path, *, origin: str = "development") -> tuple[Path, dic
     qualification.append_exposure(history, f"dataset-{origin}", "draft")
     counts = {category: sum(row["category"] == category for row in cases)
               for category in qualification.CASE_CATEGORIES}
+    base_patch_sha256 = qualification.sha256(support["base.patch"])
+    base_untracked_sha256 = qualification.sha256(support["base.untracked"])
+    base_source_sha256 = qualification._source_state_digest(
+        HEAD, base_patch_sha256, base_untracked_sha256,
+    )
+    candidate_source = executed_source["identity"]
     manifest = {
         "schema_version": 1,
         "artifact_kind": "qualification_manifest",
@@ -243,13 +257,13 @@ def _manifest(tmp_path: Path, *, origin: str = "development") -> tuple[Path, dic
         "sources": {
             "baseline": {
                 "head": HEAD,
-                "diff_sha256": HASH_A,
+                "diff_sha256": base_source_sha256,
                 "patch_ref": _ref(root, support["base.patch"]),
                 "untracked_ref": _ref(root, support["base.untracked"]),
             },
             "candidate": {
-                "head": HEAD,
-                "diff_sha256": HASH_B,
+                "head": candidate_source["head"],
+                "diff_sha256": candidate_source["diff_sha256"],
                 "patch_ref": _ref(root, support["candidate.patch"]),
                 "untracked_ref": _ref(root, support["candidate.untracked"]),
             },
@@ -280,8 +294,11 @@ def _manifest(tmp_path: Path, *, origin: str = "development") -> tuple[Path, dic
     if origin == "qualification":
         manifest["final_evaluation_binding"] = {
             "campaign_id": "contract08-final-test",
-            "integration_source_sha256": HASH_B,
-            "integration_source": {"head": HEAD, "diff_sha256": HASH_B},
+            "integration_source_sha256": candidate_source["diff_sha256"],
+            "integration_source": {
+                "head": candidate_source["head"],
+                "diff_sha256": candidate_source["diff_sha256"],
+            },
         }
     path = _write(root / "qualification-manifest.json", manifest)
     return path, manifest
@@ -419,13 +436,17 @@ def _campaign(manifest_path: Path) -> dict:
     root = manifest_path.parent
     core_path = root / qualification_manifest["pilot_core_ref"]["path"]
     tasks = qualification.pilot_core_task_bindings(core_path)
+    candidate_source = qualification_manifest["sources"]["candidate"]
     return {
         "schema_version": 2,
         "campaign_id": "contract08-final-test",
         "candidate_variant": "ordinary_task_v1",
         "development_only": True,
-        "integration_source": {"head": HEAD, "diff_sha256": HASH_B},
-        "candidate_source_sha256": HASH_B,
+        "integration_source": {
+            "head": candidate_source["head"],
+            "diff_sha256": candidate_source["diff_sha256"],
+        },
+        "candidate_source_sha256": candidate_source["diff_sha256"],
         "qualification_source_chain_sha256": qualification.digest(
             qualification._source_chain(manifest_path, qualification_manifest)
         ),
@@ -753,6 +774,30 @@ def test_behavior_dependency_change_invalidates_observations(
 
     with pytest.raises(qualification.QualificationError, match="source chain mismatch"):
         qualification.build_projection(manifest_path, observations_path)
+
+
+@pytest.mark.parametrize("component", ["head", "patch", "untracked"])
+def test_candidate_source_must_match_executed_checkout(
+    tmp_path, component,
+):
+    manifest_path, manifest = _manifest(tmp_path)
+    candidate = manifest["sources"]["candidate"]
+    if component == "head":
+        candidate["head"] = "d" * 40
+    else:
+        ref_name = f"{component}_ref"
+        source_path = tmp_path / candidate[ref_name]["path"]
+        source_path.write_bytes(source_path.read_bytes() + b"forged source state\n")
+        candidate[ref_name] = _ref(tmp_path, source_path)
+    candidate["diff_sha256"] = qualification._source_state_digest(
+        candidate["head"],
+        candidate["patch_ref"]["sha256"],
+        candidate["untracked_ref"]["sha256"],
+    )
+    _write(manifest_path, manifest)
+
+    with pytest.raises(qualification.QualificationError, match="executed retrieval"):
+        qualification.validate_manifest(manifest_path)
 
 
 def test_real_legacy_control_emission_is_validated_outside_task_metrics(tmp_path):

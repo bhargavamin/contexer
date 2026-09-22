@@ -17,6 +17,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -75,6 +76,89 @@ def manifest_definition_digest(manifest: dict[str, Any]) -> str:
     return digest(reviewed)
 
 
+def _git_output(
+    root: Path, arguments: list[str], *, expected: tuple[int, ...] = (0,),
+) -> bytes:
+    """Read deterministic local Git state without invoking repository-owned code."""
+    try:
+        result = subprocess.run(
+            ["git", *arguments],
+            cwd=root,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise QualificationError("executed checkout source is unavailable") from exc
+    if result.returncode not in expected:
+        raise QualificationError("executed checkout source cannot be reconstructed")
+    return result.stdout
+
+
+def _source_state_digest(
+    head: str, patch_sha256: str, untracked_sha256: str,
+) -> str:
+    return digest({
+        "head": head,
+        "patch_sha256": patch_sha256,
+        "untracked_sha256": untracked_sha256,
+    })
+
+
+def _executed_checkout_source() -> dict[str, Any]:
+    """Capture the exact Git state containing the retrieval code imported above."""
+    root = Path(__file__).resolve().parents[2]
+    try:
+        head = _git_output(root, ["rev-parse", "--verify", "HEAD"]).decode(
+            "ascii", errors="strict"
+        ).strip()
+    except UnicodeDecodeError as exc:
+        raise QualificationError("executed checkout head is invalid") from exc
+    if len(head) not in {40, 64} or any(
+        character not in "0123456789abcdef" for character in head
+    ):
+        raise QualificationError("executed checkout head is invalid")
+    patch = _git_output(root, [
+        "diff", "--binary", "--no-color", "--no-ext-diff", "--no-textconv",
+        "HEAD", "--", ".",
+    ])
+    if len(patch) > MAX_REFERENCE_BYTES:
+        raise QualificationError("executed checkout patch exceeds the source limit")
+    untracked_paths = _git_output(
+        root, ["ls-files", "--others", "--exclude-standard", "-z"]
+    ).split(b"\0")
+    untracked_parts = []
+    for encoded in sorted(path for path in untracked_paths if path):
+        try:
+            relative = encoded.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise QualificationError("untracked source path is not UTF-8") from exc
+        _safe_relative_identifier(relative, "untracked source path")
+        untracked_parts.append(_git_output(root, [
+            "diff", "--binary", "--no-color", "--no-ext-diff", "--no-textconv",
+            "--no-index", "--", "/dev/null", relative,
+        ], expected=(0, 1)))
+    untracked = b"".join(untracked_parts)
+    if len(untracked) > MAX_REFERENCE_BYTES:
+        raise QualificationError("executed untracked inputs exceed the source limit")
+    patch_sha256 = hashlib.sha256(patch).hexdigest()
+    untracked_sha256 = hashlib.sha256(untracked).hexdigest()
+    return {
+        "identity": {
+            "head": head,
+            "diff_sha256": _source_state_digest(
+                head, patch_sha256, untracked_sha256,
+            ),
+            "patch_sha256": patch_sha256,
+            "untracked_sha256": untracked_sha256,
+        },
+        "patch": patch,
+        "untracked": untracked,
+    }
+
+
 def _runtime_source_chain() -> dict[str, str]:
     """Hash the code and lock file that execute a qualification retrieval."""
     root = Path(__file__).resolve().parents[2]
@@ -100,13 +184,17 @@ def _source_chain(manifest_path: Path, manifest: dict[str, Any]) -> dict[str, An
     evaluated_sources = {}
     for arm in ("baseline", "candidate"):
         source = manifest["sources"][arm]
+        patch_sha256 = sha256(
+            resolve_ref(root, source["patch_ref"], f"{arm} patch")
+        )
+        untracked_sha256 = sha256(
+            resolve_ref(root, source["untracked_ref"], f"{arm} untracked")
+        )
         evaluated_sources[arm] = {
             "head": source["head"],
             "diff_sha256": source["diff_sha256"],
-            "patch_sha256": sha256(resolve_ref(root, source["patch_ref"], f"{arm} patch")),
-            "untracked_sha256": sha256(
-                resolve_ref(root, source["untracked_ref"], f"{arm} untracked")
-            ),
+            "patch_sha256": patch_sha256,
+            "untracked_sha256": untracked_sha256,
         }
     case_inputs = [{
         "case_id": case["case_id"],
@@ -798,14 +886,35 @@ def validate_manifest(path: Path) -> dict[str, Any]:
         "baseline", "candidate", "dependency_lock", "collector", "formatter"
     }:
         raise QualificationError("manifest must freeze every evaluated source identity")
+    declared_sources = {}
     for arm in ("baseline", "candidate"):
         source = sources[arm]
         if not isinstance(source, dict):
             raise QualificationError(f"{arm} source must be an object")
-        _text(source.get("head"), f"{arm} head")
-        _hash(source.get("diff_sha256"), f"{arm} diff")
-        for name in ("patch_ref", "untracked_ref"):
-            resolve_ref(root, source.get(name), f"{arm} {name}")
+        head = _text(source.get("head"), f"{arm} head")
+        if len(head) not in {40, 64} or any(
+            character not in "0123456789abcdef" for character in head
+        ):
+            raise QualificationError(f"{arm} head must be a Git object identity")
+        source_digest = _hash(source.get("diff_sha256"), f"{arm} diff")
+        patch = resolve_ref(root, source.get("patch_ref"), f"{arm} patch_ref")
+        untracked = resolve_ref(
+            root, source.get("untracked_ref"), f"{arm} untracked_ref"
+        )
+        patch_sha256 = sha256(patch)
+        untracked_sha256 = sha256(untracked)
+        if source_digest != _source_state_digest(
+            head, patch_sha256, untracked_sha256,
+        ):
+            raise QualificationError(
+                f"{arm} source digest does not match its reconstruction inputs"
+            )
+        declared_sources[arm] = {
+            "head": head,
+            "diff_sha256": source_digest,
+            "patch_sha256": patch_sha256,
+            "untracked_sha256": untracked_sha256,
+        }
     for name in ("dependency_lock", "collector", "formatter"):
         resolve_ref(root, sources[name], name)
     if sources["collector"]["sha256"] != sha256(Path(__file__).resolve()):
@@ -818,6 +927,10 @@ def validate_manifest(path: Path) -> dict[str, Any]:
         "dependency_lock"
     ]:
         raise QualificationError("dependency lock differs from the executed environment")
+    if declared_sources["candidate"] != _executed_checkout_source()["identity"]:
+        raise QualificationError(
+            "candidate source does not match the executed retrieval checkout"
+        )
 
     grants = manifest.get("source_grants")
     if not isinstance(grants, list) or not grants:
