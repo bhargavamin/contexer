@@ -999,6 +999,23 @@ def test_qualified_artifact_recomputes_references_and_rejects_later_mutation(tmp
     assert "qualified_reference_invalid" in changed["reasons"]
 
 
+def test_qualified_validator_does_not_reread_validated_exposure_history(
+    tmp_path, monkeypatch,
+):
+    manifest_path, _ = _manifest(tmp_path, origin="qualification")
+    _attach_review(manifest_path)
+    observations = _synthetic_observations(manifest_path)
+    artifact_path = tmp_path / "qualified-evidence.json"
+    qualification.build_qualified_artifact(manifest_path, observations, artifact_path)
+
+    def unexpected_second_read(*_args, **_kwargs):
+        raise AssertionError("exposure history was read twice")
+
+    monkeypatch.setattr(qualification, "exposure_state", unexpected_second_read)
+
+    assert qualification.validate_qualified_artifact(artifact_path)["status"] == "pass"
+
+
 def test_qualified_artifact_rejects_failed_then_completed_attempt(tmp_path):
     manifest_path, _ = _manifest(tmp_path, origin="qualification")
     _attach_review(manifest_path)

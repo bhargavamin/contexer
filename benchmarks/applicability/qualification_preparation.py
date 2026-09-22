@@ -1834,9 +1834,10 @@ def validate_qualified_artifact(
         history_rows = []
         run_rows = []
         reasons.append("qualified_history_invalid")
-    if not history_rows or exposure_state(
-        history_path, manifest["dataset_id"]
-    ) != "consumed":
+    if not any(
+        row["event"] in {"opening_intent", "consumed", "exposure_uncertain"}
+        for row in history_rows
+    ):
         reasons.append("qualified_exposure_invalid")
     if not any(
         row["event"] == "opening_intent"
