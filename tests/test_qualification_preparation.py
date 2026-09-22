@@ -800,6 +800,62 @@ def test_candidate_source_must_match_executed_checkout(
         qualification.validate_manifest(manifest_path)
 
 
+def test_source_witness_detects_source_replaced_with_identical_bytes(tmp_path):
+    source = _write(tmp_path / "source.py", "stable source\n")
+    replacement = _write(tmp_path / "replacement.py", "stable source\n")
+    expected_sha256 = qualification.sha256(source)
+    witness = qualification._source_witness_for_paths(
+        tmp_path, ["source.py"], ["."],
+    )
+
+    replacement.replace(source)
+
+    assert qualification.sha256(source) == expected_sha256
+    assert qualification._source_witness_for_paths(
+        tmp_path, ["source.py"], ["."],
+    ) != witness
+
+
+def test_collection_aborts_when_checkout_changes_between_case_checks(
+    tmp_path, monkeypatch,
+):
+    manifest_path, _ = _manifest(tmp_path)
+    output_path = tmp_path / "raced-observations.json"
+    collected = False
+    witness = {"files": [], "directories": [], "entries": []}
+
+    def collect_then_change(root, case, destination):
+        nonlocal collected
+        row = qualification._collect_case(root, case, destination)
+        collected = True
+        return row
+
+    def require_unchanged(_expected):
+        if collected:
+            raise qualification.QualificationError(
+                "executed checkout changed during collection"
+            )
+
+    monkeypatch.setattr(qualification, "_checkout_source_witness", lambda: witness)
+    monkeypatch.setattr(qualification, "_require_checkout_witness", require_unchanged)
+
+    with pytest.raises(
+        qualification.QualificationError,
+        match="executed checkout changed during collection",
+    ):
+        qualification.collect(
+            manifest_path,
+            output_path,
+            case_collector=collect_then_change,
+        )
+
+    history = qualification._run_history_rows(
+        tmp_path / "runs.jsonl", "dataset-development",
+    )
+    assert [row["event"] for row in history] == ["started", "failed_or_interrupted"]
+    assert not output_path.exists()
+
+
 def test_real_legacy_control_emission_is_validated_outside_task_metrics(tmp_path):
     manifest_path, manifest = _manifest(tmp_path)
     control = next(case for case in manifest["cases"] if case["category"] == "control")

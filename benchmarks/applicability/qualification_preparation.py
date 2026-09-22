@@ -159,6 +159,61 @@ def _executed_checkout_source() -> dict[str, Any]:
     }
 
 
+def _checkout_source_witness() -> dict[str, Any]:
+    """Record monotonic file metadata so edit-and-revert races remain observable."""
+    root = Path(__file__).resolve().parents[2]
+    encoded_paths = _git_output(root, [
+        "ls-files", "--cached", "--others", "--exclude-standard", "-z",
+    ]).split(b"\0")
+    files = []
+    for encoded in sorted(path for path in encoded_paths if path):
+        try:
+            relative = encoded.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise QualificationError("checkout source path is not UTF-8") from exc
+        files.append(_safe_relative_identifier(relative, "checkout source path"))
+    directories = {"."}
+    for relative in files:
+        parent = Path(relative).parent
+        while parent != Path("."):
+            directories.add(parent.as_posix())
+            parent = parent.parent
+    return _source_witness_for_paths(root, files, sorted(directories))
+
+
+def _source_witness_for_paths(
+    root: Path, files: list[str], directories: list[str],
+) -> dict[str, Any]:
+    entries = []
+    try:
+        for kind, paths in (("directory", directories), ("file", files)):
+            for relative in paths:
+                path = root if relative == "." else root / relative
+                metadata = path.lstat()
+                entries.append({
+                    "kind": kind,
+                    "path": relative,
+                    "device": metadata.st_dev,
+                    "inode": metadata.st_ino,
+                    "mode": metadata.st_mode,
+                    "size": metadata.st_size,
+                    "mtime_ns": metadata.st_mtime_ns,
+                    "ctime_ns": metadata.st_ctime_ns,
+                })
+    except OSError as exc:
+        raise QualificationError("executed checkout changed during collection") from exc
+    return {"files": files, "directories": directories, "entries": entries}
+
+
+def _require_checkout_witness(expected: dict[str, Any]) -> None:
+    root = Path(__file__).resolve().parents[2]
+    current = _source_witness_for_paths(
+        root, expected["files"], expected["directories"],
+    )
+    if current != expected:
+        raise QualificationError("executed checkout changed during collection")
+
+
 def _runtime_source_chain() -> dict[str, str]:
     """Hash the code and lock file that execute a qualification retrieval."""
     root = Path(__file__).resolve().parents[2]
@@ -1490,7 +1545,9 @@ def collect(
 ) -> dict[str, Any]:
     if output_path.exists():
         raise QualificationError("refusing to overwrite immutable observation output")
+    checkout_witness = _checkout_source_witness()
     manifest = validate_manifest(manifest_path)
+    _require_checkout_witness(checkout_witness)
     manifest_sha256_before = sha256(manifest_path)
     root = manifest_path.resolve().parent
     history = _contained(root, manifest["exposure_history_path"], "exposure history")
@@ -1559,6 +1616,7 @@ def collect(
                 case_directory = (temporary_root / f"case-{index:04d}").resolve()
                 if temporary_root.resolve() not in case_directory.parents:
                     raise QualificationError("generated case directory escaped temporary root")
+                _require_checkout_witness(checkout_witness)
                 try:
                     observations.append(collector(root, case, case_directory))
                 except Exception as exc:
@@ -1573,7 +1631,10 @@ def collect(
                         "initial_standing_revisions": [],
                         "arms": {},
                     })
+                _require_checkout_witness(checkout_witness)
+        _require_checkout_witness(checkout_witness)
         validate_manifest(manifest_path)
+        _require_checkout_witness(checkout_witness)
         if sha256(manifest_path) != manifest_sha256_before:
             raise QualificationError("qualification sources changed during measurement")
         document = {
