@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.49.0](https://github.com/bhargavamin/contexer/compare/v0.48.2...v0.49.0) (2026-09-22)
+
+
+### Features
+
+* **benchmarks:** add Contract 07 pilot readiness ([#320](https://github.com/bhargavamin/contexer/issues/320)) ([dcfabbd](https://github.com/bhargavamin/contexer/commit/dcfabbd35e3828ec4ba479ae294a88e3f3569861))
+* **retrieval:** add ordinary-task outcome experiment ([#318](https://github.com/bhargavamin/contexer/issues/318)) ([3728554](https://github.com/bhargavamin/contexer/commit/37285546bea637792dfe3d9ddac9487a2b8c0bbb))
+
+
+### Bug Fixes
+
+* **install:** tolerate null config sections in every adapter ([#326](https://github.com/bhargavamin/contexer/issues/326)) ([07d6471](https://github.com/bhargavamin/contexer/commit/07d64711626d1d544e2fbcf987708801f3211970))
+* **install:** treat empty assistant config as missing ([#325](https://github.com/bhargavamin/contexer/issues/325)) ([2dc79f9](https://github.com/bhargavamin/contexer/commit/2dc79f969c59efbc9e4c2f82e15b9fdb46b1a49e)), closes [#324](https://github.com/bhargavamin/contexer/issues/324)
+
 ## [0.48.2](https://github.com/bhargavamin/contexer/compare/v0.48.1...v0.48.2) (2026-09-19)
 
 
