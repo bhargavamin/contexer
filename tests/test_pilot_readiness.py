@@ -16,6 +16,15 @@ HASH_B = "b" * 64
 HEAD = "c" * 40
 
 
+@pytest.fixture
+def _qualified_readiness_for_coordinator(monkeypatch):
+    """Isolate coordinator state-machine tests from the evidence-gate fixture."""
+    monkeypatch.setattr(pilot, "evaluate_readiness", lambda _path: {
+        kind: {"status": "pass", "reasons": [], "metrics": {"test_fixture": True}}
+        for kind in pilot.GATE_KINDS
+    })
+
+
 def _write_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -493,14 +502,32 @@ def test_evidence_path_escape_is_rejected(tmp_path):
         pilot.load_manifest(path)
 
 
-def test_all_source_bound_readiness_gates_pass(tmp_path):
+def test_legacy_schema_one_qualification_is_diagnostic_and_cannot_pass_readiness(
+    tmp_path,
+):
     path, _ = _manifest(tmp_path)
 
     gates = pilot.evaluate_readiness(path)
 
-    assert {name: gate["status"] for name, gate in gates.items()} == {
-        name: "pass" for name in pilot.GATE_KINDS
-    }
+    assert gates["qualification"]["status"] == "inconclusive"
+    assert gates["qualification"]["reasons"] == [
+        "legacy_qualification_evidence_diagnostic_only"
+    ]
+    assert all(
+        gate["status"] == "pass" for name, gate in gates.items()
+        if name != "qualification"
+    )
+    manifest = pilot.load_manifest(path)
+    ledger_path = tmp_path / "legacy-ledger.json"
+    approval_path, _ = _approval(tmp_path, path, manifest, ledger_path)
+    ledger = pilot.initialize_ledger(path, approval_path, ledger_path)
+    with pytest.raises(pilot.PilotError, match="readiness gates"):
+        pilot.launch_stubbed_run(
+            ledger_path,
+            next(iter(ledger["runs"])),
+            lambda _row: {"invocation_id": "must-not-launch"},
+            lambda _row, _invocation: {"actual_cost": 0},
+        )
 
 
 def test_qualification_accepts_manifest_derived_disjoint_pilot_families(tmp_path):
@@ -508,7 +535,8 @@ def test_qualification_accepts_manifest_derived_disjoint_pilot_families(tmp_path
 
     gate = pilot.evaluate_readiness(path)["qualification"]
 
-    assert gate["status"] == "pass"
+    assert gate["status"] == "inconclusive"
+    assert gate["reasons"] == ["legacy_qualification_evidence_diagnostic_only"]
     assert gate["metrics"]["source_and_label_identity_pass"] is True
     assert gate["metrics"]["reported_pilot_families_match_manifest"] is True
     assert gate["metrics"]["qualification_pilot_family_overlap"] == []
@@ -557,7 +585,10 @@ def test_qualification_rejects_stale_reported_pilot_family_list(tmp_path):
     gate = pilot.evaluate_readiness(path)["qualification"]
 
     assert gate["status"] == "inconclusive"
-    assert gate["reasons"] == ["qualification_live_task_families_mismatch"]
+    assert gate["reasons"] == [
+        "legacy_qualification_evidence_diagnostic_only",
+        "qualification_live_task_families_mismatch",
+    ]
     assert gate["metrics"]["reported_pilot_families_match_manifest"] is False
     assert gate["metrics"]["qualification_pilot_family_overlap"] == []
     assert gate["metrics"]["source_and_label_identity_pass"] is False
@@ -1032,7 +1063,9 @@ def test_ledger_initialization_is_idempotent_and_rejects_conflicting_identity(tm
         pilot.initialize_ledger(manifest_path, approval_path, ledger_path)
 
 
-def test_task_launch_is_blocked_until_differential_canaries_are_recorded(tmp_path):
+def test_task_launch_is_blocked_until_differential_canaries_are_recorded(
+    tmp_path, _qualified_readiness_for_coordinator,
+):
     manifest_path, manifest = _manifest(tmp_path)
     ledger_path = tmp_path / "ledger.json"
     approval_path, _ = _approval(tmp_path, manifest_path, manifest, ledger_path)
@@ -1099,7 +1132,9 @@ def test_tampered_ledger_budget_cannot_expand_approved_allowance(tmp_path):
     assert calls == []
 
 
-def test_tampered_or_added_ledger_assignment_cannot_launch(tmp_path):
+def test_tampered_or_added_ledger_assignment_cannot_launch(
+    tmp_path, _qualified_readiness_for_coordinator,
+):
     manifest_path, manifest = _manifest(tmp_path)
     ledger_path = tmp_path / "ledger.json"
     approval_path, _ = _approval(tmp_path, manifest_path, manifest, ledger_path)
@@ -1122,7 +1157,9 @@ def test_tampered_or_added_ledger_assignment_cannot_launch(tmp_path):
     ("validator_sha256", HASH_A),
     ("required_checks", ["forged-check"]),
 ])
-def test_tampered_executable_ledger_assignment_cannot_launch(tmp_path, field, value):
+def test_tampered_executable_ledger_assignment_cannot_launch(
+    tmp_path, field, value, _qualified_readiness_for_coordinator,
+):
     manifest_path, manifest = _manifest(tmp_path)
     ledger_path = tmp_path / "ledger.json"
     approval_path, _ = _approval(tmp_path, manifest_path, manifest, ledger_path)
@@ -1144,7 +1181,9 @@ def test_tampered_executable_ledger_assignment_cannot_launch(tmp_path, field, va
     assert calls == []
 
 
-def test_ledger_write_failure_before_intent_launches_nothing(tmp_path, monkeypatch):
+def test_ledger_write_failure_before_intent_launches_nothing(
+    tmp_path, monkeypatch, _qualified_readiness_for_coordinator,
+):
     manifest_path, manifest = _manifest(tmp_path)
     ledger_path = tmp_path / "ledger.json"
     approval_path, _ = _approval(tmp_path, manifest_path, manifest, ledger_path)
@@ -1170,7 +1209,9 @@ def test_ledger_write_failure_before_intent_launches_nothing(tmp_path, monkeypat
     assert pilot.load_json(ledger_path)["runs"][run_id]["state"] == "planned"
 
 
-def test_launch_reserves_before_start_and_reconciles_actual_cost(tmp_path):
+def test_launch_reserves_before_start_and_reconciles_actual_cost(
+    tmp_path, _qualified_readiness_for_coordinator,
+):
     manifest_path, manifest = _manifest(tmp_path)
     ledger_path = tmp_path / "ledger.json"
     approval_path, _ = _approval(tmp_path, manifest_path, manifest, ledger_path)
@@ -1204,7 +1245,7 @@ def test_launch_reserves_before_start_and_reconciles_actual_cost(tmp_path):
     ("after_result", "started", 1),
 ])
 def test_launch_crash_windows_never_auto_release_or_duplicate(
-    tmp_path, failpoint, expected_state, starts,
+    tmp_path, failpoint, expected_state, starts, _qualified_readiness_for_coordinator,
 ):
     manifest_path, manifest = _manifest(tmp_path)
     ledger_path = tmp_path / "ledger.json"
@@ -1234,7 +1275,9 @@ def test_launch_crash_windows_never_auto_release_or_duplicate(
         assert stored["reserved_cost"] == 2.0
 
 
-def test_unknown_launch_keeps_reservation_until_authoritative_reconciliation(tmp_path):
+def test_unknown_launch_keeps_reservation_until_authoritative_reconciliation(
+    tmp_path, _qualified_readiness_for_coordinator,
+):
     manifest_path, manifest = _manifest(tmp_path)
     ledger_path = tmp_path / "ledger.json"
     approval_path, _ = _approval(tmp_path, manifest_path, manifest, ledger_path)
@@ -1253,7 +1296,9 @@ def test_unknown_launch_keeps_reservation_until_authoritative_reconciliation(tmp
     assert stored["reserved_cost"] == 2.0
 
 
-def test_unresolved_launch_blocks_every_subsequent_session(tmp_path):
+def test_unresolved_launch_blocks_every_subsequent_session(
+    tmp_path, _qualified_readiness_for_coordinator,
+):
     manifest_path, manifest = _manifest(tmp_path)
     ledger_path = tmp_path / "ledger.json"
     approval_path, _ = _approval(tmp_path, manifest_path, manifest, ledger_path)
@@ -1278,7 +1323,9 @@ def test_unresolved_launch_blocks_every_subsequent_session(tmp_path):
     assert starts == []
 
 
-def test_authoritative_no_launch_can_release_but_started_invocation_cannot(tmp_path):
+def test_authoritative_no_launch_can_release_but_started_invocation_cannot(
+    tmp_path, _qualified_readiness_for_coordinator,
+):
     manifest_path, manifest = _manifest(tmp_path)
     ledger_path = tmp_path / "ledger.json"
     approval_path, _ = _approval(tmp_path, manifest_path, manifest, ledger_path)
@@ -1309,7 +1356,9 @@ def test_authoritative_no_launch_can_release_but_started_invocation_cannot(tmp_p
         )
 
 
-def test_usage_over_reservation_is_rejected_and_reservation_stays_held(tmp_path):
+def test_usage_over_reservation_is_rejected_and_reservation_stays_held(
+    tmp_path, _qualified_readiness_for_coordinator,
+):
     manifest_path, manifest = _manifest(tmp_path)
     ledger_path = tmp_path / "ledger.json"
     approval_path, _ = _approval(tmp_path, manifest_path, manifest, ledger_path)
@@ -1359,13 +1408,15 @@ def test_report_is_read_only_and_never_claims_release(tmp_path):
         "real_home_mutations": 0,
         "contract06_fixtures_used_as_effectiveness_evidence": False,
     }
-    assert report["statuses"]["engineering_ready"] is True
+    assert report["statuses"]["engineering_ready"] is False
     assert report["statuses"]["ready_for_authorized_canaries"] is False
     assert report["statuses"]["measured_pilot_permitted"] is False
     assert report["statuses"]["release_candidate"] is False
 
 
-def test_stub_canaries_only_qualify_offline_simulation(tmp_path):
+def test_stub_canaries_only_qualify_offline_simulation(
+    tmp_path, _qualified_readiness_for_coordinator,
+):
     manifest_path, manifest = _manifest(tmp_path)
     ledger_path = tmp_path / "ledger.json"
     approval_path, _ = _approval(tmp_path, manifest_path, manifest, ledger_path)
@@ -1392,7 +1443,9 @@ def test_stub_canaries_only_qualify_offline_simulation(tmp_path):
     assert report["statuses"]["release_candidate"] is False
 
 
-def test_mutable_ledger_claims_cannot_promote_stub_canaries_to_live(tmp_path):
+def test_mutable_ledger_claims_cannot_promote_stub_canaries_to_live(
+    tmp_path, _qualified_readiness_for_coordinator,
+):
     manifest_path, manifest = _manifest(tmp_path)
     ledger_path = tmp_path / "ledger.json"
     approval_path, _ = _approval(tmp_path, manifest_path, manifest, ledger_path)
@@ -1446,7 +1499,9 @@ def test_expired_approval_is_historical_not_current_launch_authority(
     assert report["statuses"]["measured_pilot_permitted"] is False
 
 
-def test_reconciled_diagnostic_pilot_can_complete_but_never_accept_release(tmp_path):
+def test_reconciled_diagnostic_pilot_can_complete_but_never_accept_release(
+    tmp_path, _qualified_readiness_for_coordinator,
+):
     manifest_path, manifest = _manifest(tmp_path)
     ledger_path = tmp_path / "ledger.json"
     approval_path, _ = _approval(tmp_path, manifest_path, manifest, ledger_path)
@@ -1520,7 +1575,9 @@ def test_text_report_exposes_gates_bounds_cost_and_no_live_invocations(tmp_path)
     assert "verified live agent invocations: 0" in rendered
 
 
-def test_text_report_matches_json_for_two_recorded_stub_sessions(tmp_path):
+def test_text_report_matches_json_for_two_recorded_stub_sessions(
+    tmp_path, _qualified_readiness_for_coordinator,
+):
     manifest_path, manifest = _manifest(tmp_path)
     ledger_path = tmp_path / "ledger.json"
     approval_path, _ = _approval(tmp_path, manifest_path, manifest, ledger_path)
