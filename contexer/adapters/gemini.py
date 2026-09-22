@@ -375,9 +375,9 @@ def install(home: Path) -> list[str]:
     settings_path = gemini_dir / "settings.json"
     settings = base._load(settings_path)
     contexer_bin = shutil.which("contexer") or "contexer"
-    settings.setdefault("mcpServers", {})["contexer"] = {"command": contexer_bin}
+    base._section(settings, "mcpServers")["contexer"] = {"command": contexer_bin}
 
-    hooks = settings.setdefault("hooks", {})
+    hooks = base._section(settings, "hooks")
     desired = {
         "SessionStart": _group("session_start", "contexer-session-start"),
         "BeforeAgent": _group("before_agent", "contexer-before-agent", "*"),
@@ -386,7 +386,7 @@ def install(home: Path) -> list[str]:
         "SessionEnd": _group("session_end", "contexer-session-end"),
     }
     for event, group in desired.items():
-        groups = hooks.setdefault(event, [])
+        groups = base._section(hooks, event, list)
         markers = _EVENT_MARKERS[event]
         current_cmd = group["hooks"][0]["command"]
         # Fix 2: strip stale hooks (e.g. after a Python path change) before checking
@@ -409,14 +409,14 @@ def uninstall(home: Path) -> list[str]:
         return []
     settings = base._load(settings_path)
     log: list[str] = []
-    mcp_removed = bool(settings.get("mcpServers", {}).pop("contexer", None))
+    mcp_removed = bool(base._read(settings, "mcpServers").pop("contexer", None))
     if mcp_removed:
         log.append("  ✓ MCP server removed from ~/.gemini/settings.json")
-    hooks = settings.get("hooks", {})
+    hooks = base._read(settings, "hooks")
     hooks_changed = False
     if isinstance(hooks, dict):
         for event, markers in _EVENT_MARKERS.items():
-            before = hooks.get(event, [])
+            before = base._read(hooks, event, list)
             after = base._filter_groups(before, markers)
             if after != before:
                 hooks_changed = True
@@ -435,8 +435,8 @@ def uninstall(home: Path) -> list[str]:
 
 def _mcp_and_hooks_ok(home: Path) -> tuple:
     settings = base._load_safe(home / ".gemini" / "settings.json")
-    mcp = settings.get("mcpServers", {}).get("contexer")
-    raw_hooks = settings.get("hooks", {})
+    mcp = base._read(settings, "mcpServers").get("contexer")
+    raw_hooks = base._read(settings, "hooks")
     hooks = raw_hooks if isinstance(raw_hooks, dict) else {}
 
     def groups(event: str) -> list:

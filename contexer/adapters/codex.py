@@ -271,9 +271,9 @@ def install(home: Path) -> list[str]:
     # Hooks (~/.codex/hooks.json) — same JSON schema and event names as Claude Code.
     hooks_path = home / ".codex" / "hooks.json"
     cfg = base._load(hooks_path)
-    hooks = cfg.setdefault("hooks", {})
+    hooks = base._section(cfg, "hooks")
 
-    ss = hooks.setdefault("SessionStart", [])
+    ss = base._section(hooks, "SessionStart", list)
     # Migrate: replace any installed SessionStart group whose command isn't byte-identical
     # to the current ss_code (_strip_stale). Mirrors claude.py's SessionStart gate — see
     # its comment for why marker-missing checks can't catch a NEWER/sibling-branch hook
@@ -289,7 +289,7 @@ def install(home: Path) -> list[str]:
     # .pending_capture flag; the next UserPromptSubmit (anchor_cmd) consumes it and injects
     # the capture reminder. No Stop hook - end-of-turn prompting added latency/tokens with
     # no functional gain over the next-prompt anchor.
-    put = hooks.setdefault("PostToolUse", [])
+    put = base._section(hooks, "PostToolUse", list)
     # Migrate: replace the old shell-only `.pending_capture` touch (pre- or post-#152) with
     # claude.post_write. Detected by the `.pending_capture` marker without `claude.post_write`.
     if base._in_groups(put, ".pending_capture") and not base._in_groups(put, "claude.post_write"):
@@ -304,7 +304,7 @@ def install(home: Path) -> list[str]:
 
     # Retire any previously-installed Stop hook. The Stop entry stays in _EVENT_MARKERS so
     # uninstall/reinstall strips an old Stop hook from hooks.json.
-    st = hooks.get("Stop", [])
+    st = base._read(hooks, "Stop", list)
     new_st = base._filter_groups(st, [".pending_capture"])
     if new_st != st:
         if new_st:
@@ -312,7 +312,7 @@ def install(home: Path) -> list[str]:
         else:
             hooks.pop("Stop", None)
 
-    pc = hooks.setdefault("PreCompact", [])
+    pc = base._section(hooks, "PreCompact", list)
     pc = base._strip_stale(pc, ["compaction starting"], precompact_cmd)
     hooks["PreCompact"] = pc
     if not base._in_groups(pc, "compaction starting"):
@@ -320,7 +320,7 @@ def install(home: Path) -> list[str]:
             "statusMessage": "Saving decisions before compact...",
             "command": precompact_cmd}]})
 
-    poc = hooks.setdefault("PostCompact", [])
+    poc = base._section(hooks, "PostCompact", list)
     # Migrate: replace any installed PostCompact group whose command isn't byte-identical
     # to the current post_code (_strip_stale) — same skew class as the SessionStart gate.
     poc = base._strip_stale(poc, ["get_post_compact_context"], _py(post_code))
@@ -329,7 +329,7 @@ def install(home: Path) -> list[str]:
         poc.append({"hooks": [{"type": "command",
             "statusMessage": "Reloading context after compact...", "command": _py(post_code)}]})
 
-    ups = hooks.setdefault("UserPromptSubmit", [])
+    ups = base._section(hooks, "UserPromptSubmit", list)
     # Migrate: replace the old capture-only anchor text with the reconciliation-framed one
     # (settle checkpoint: promote / revise / drop provisional decisions). Mirrors claude.py.
     if base._in_groups(ups, "you wrote or edited files") and not base._in_groups(ups, "last turn settled"):
@@ -450,10 +450,10 @@ def uninstall(home: Path) -> list[str]:
     hooks_path = home / ".codex" / "hooks.json"
     if hooks_path.exists():
         cfg = base._load(hooks_path)
-        hooks = cfg.get("hooks", {})
+        hooks = base._read(cfg, "hooks")
         changed = False
         for event, markers in _EVENT_MARKERS.items():
-            before = hooks.get(event, [])
+            before = base._read(hooks, event, list)
             after = base._filter_groups(before, markers)
             if after != before:
                 changed = True

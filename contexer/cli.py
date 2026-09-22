@@ -1201,7 +1201,7 @@ def _run_guarded(fn) -> None:
         # A corrupt or non-object assistant config. Abort cleanly
         # and leave the file untouched for the user to fix - never overwrite it.
         print(f"Corrupt config: {e}", file=sys.stderr)
-        print("An assistant config file is not valid JSON (or not a JSON object). "
+        print("An assistant config file is not valid JSON, or holds a value of the wrong type. "
               "contexer won't overwrite it.", file=sys.stderr)
         print("Fix or remove the offending file, then re-run this command.", file=sys.stderr)
         sys.exit(1)
