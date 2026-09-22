@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -219,38 +220,62 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def atomic_create_json(path: Path, value: dict[str, Any]) -> None:
-    """Create one immutable JSON artifact; never replace an earlier revision."""
+def _atomic_create_bytes(path: Path, raw: bytes) -> None:
+    """Publish fully durable bytes without replacing an existing artifact."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        raise QualificationError(f"refusing to overwrite immutable artifact: {path}")
-    raw = json.dumps(value, indent=2, sort_keys=True) + "\n"
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    temporary = Path(temporary_name)
     try:
-        with temporary.open("x", encoding="utf-8") as target:
+        with os.fdopen(descriptor, "wb") as target:
             target.write(raw)
             target.flush()
             os.fsync(target.fileno())
-        os.replace(temporary, path)
+        try:
+            os.link(temporary, path)
+        except FileExistsError as exc:
+            raise QualificationError(
+                f"refusing to overwrite immutable artifact: {path}"
+            ) from exc
         _fsync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def atomic_create_json(path: Path, value: dict[str, Any]) -> None:
+    """Create one immutable JSON artifact; never replace an earlier revision."""
+    raw = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    _atomic_create_bytes(path, raw)
 
 
 def atomic_create_text(path: Path, value: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        raise QualificationError(f"refusing to overwrite immutable artifact: {path}")
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    _atomic_create_bytes(path, value.encode("utf-8"))
+
+
+def _open_snapshot_source(root_descriptor: int, relative: str) -> tuple[int, os.stat_result]:
+    """Open a regular file below an already-open root without following symlinks."""
+    parts = Path(relative).parts
+    directory = os.dup(root_descriptor)
     try:
-        with temporary.open("x", encoding="utf-8") as target:
-            target.write(value)
-            target.flush()
-            os.fsync(target.fileno())
-        os.replace(temporary, path)
-        _fsync_directory(path.parent)
+        for part in parts[:-1]:
+            child = os.open(
+                part,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=directory,
+            )
+            os.close(directory)
+            directory = child
+        descriptor = os.open(
+            parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory
+        )
     finally:
-        temporary.unlink(missing_ok=True)
+        os.close(directory)
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode):
+        os.close(descriptor)
+        raise QualificationError("snapshot imports only regular non-symlink files")
+    return descriptor, metadata
 
 
 def materialize_snapshot(
@@ -267,46 +292,89 @@ def materialize_snapshot(
     """Copy bounded explicit files as inert bytes and return the snapshot manifest path."""
     _text(grant_id, "grant_id")
     _text(consent_record, "consent_record")
-    if destination.exists():
+    if destination.exists() or destination.is_symlink():
         raise QualificationError("snapshot destination already exists")
     if not relative_paths or len(relative_paths) > max_files:
         raise QualificationError("snapshot file count is outside the configured bound")
     source_root = source_root.resolve()
     if not source_root.is_dir():
         raise QualificationError("source_root must be an existing directory")
-    selected: list[tuple[str, Path, int]] = []
+    selected: list[str] = []
     seen: set[str] = set()
-    total = 0
     for relative in relative_paths:
-        path = _contained(source_root, relative, "import path")
-        normalized = path.relative_to(source_root).as_posix()
+        normalized = Path(
+            _safe_relative_identifier(relative, "import path")
+        ).as_posix()
         if normalized in seen:
             raise QualificationError("snapshot paths must be unique")
         seen.add(normalized)
-        if path.is_symlink() or not path.is_file():
-            raise QualificationError("snapshot imports only regular non-symlink files")
-        if path.name.lower() in SENSITIVE_NAMES:
+        if Path(normalized).name.lower() in SENSITIVE_NAMES:
             raise QualificationError("sensitive file requires a separately approved data scope")
-        size = path.stat().st_size
-        if size > max_file_bytes:
-            raise QualificationError("snapshot file exceeds the per-file byte limit")
-        total += size
-        if total > max_total_bytes:
-            raise QualificationError("snapshot exceeds the total byte limit")
-        selected.append((normalized, path, size))
+        selected.append(normalized)
 
-    destination.mkdir(parents=True, mode=0o700)
-    files_root = destination / "files"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(
+        dir=destination.parent, prefix=f".{destination.name}.snapshot."
+    ))
+    staging.chmod(0o700)
+    files_root = staging / "files"
     rows = []
+    total = 0
+    root_descriptor: int | None = None
+    published = False
     try:
-        for relative, source, size in selected:
+        try:
+            root_descriptor = os.open(
+                source_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            )
+        except OSError as exc:
+            raise QualificationError("source_root must remain an existing directory") from exc
+        for relative in selected:
             target = files_root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
-            with source.open("rb") as reader, target.open("xb") as writer:
-                shutil.copyfileobj(reader, writer, length=64 * 1024)
+            try:
+                source_descriptor, before = _open_snapshot_source(
+                    root_descriptor, relative
+                )
+            except OSError as exc:
+                raise QualificationError(
+                    "snapshot imports only regular non-symlink files"
+                ) from exc
+            if before.st_size > max_file_bytes:
+                os.close(source_descriptor)
+                raise QualificationError("snapshot file exceeds the per-file byte limit")
+            if total + before.st_size > max_total_bytes:
+                os.close(source_descriptor)
+                raise QualificationError("snapshot exceeds the total byte limit")
+            copied = 0
+            copied_hash = hashlib.sha256()
+            with os.fdopen(source_descriptor, "rb") as reader, target.open("xb") as writer:
+                while True:
+                    chunk = reader.read(min(64 * 1024, before.st_size - copied + 1))
+                    if not chunk:
+                        break
+                    copied += len(chunk)
+                    if copied > before.st_size:
+                        raise QualificationError("snapshot source changed during import")
+                    writer.write(chunk)
+                    copied_hash.update(chunk)
                 writer.flush()
                 os.fsync(writer.fileno())
-            rows.append({"path": relative, "bytes": size, "sha256": sha256(target)})
+                after = os.fstat(reader.fileno())
+            identity_before = (
+                before.st_dev, before.st_ino, before.st_size,
+                before.st_mtime_ns, before.st_ctime_ns,
+            )
+            identity_after = (
+                after.st_dev, after.st_ino, after.st_size,
+                after.st_mtime_ns, after.st_ctime_ns,
+            )
+            if copied != before.st_size or identity_after != identity_before:
+                raise QualificationError("snapshot source changed during import")
+            total += copied
+            rows.append({
+                "path": relative, "bytes": copied, "sha256": copied_hash.hexdigest(),
+            })
         snapshot = {
             "schema_version": SCHEMA_VERSION,
             "artifact_kind": "materialized_snapshot",
@@ -320,12 +388,26 @@ def materialize_snapshot(
             "files": rows,
             "total_bytes": total,
         }
-        manifest_path = destination / "snapshot.json"
+        manifest_path = staging / "snapshot.json"
         atomic_create_json(manifest_path, snapshot)
-        return manifest_path
-    except Exception:
-        shutil.rmtree(destination, ignore_errors=True)
-        raise
+        lock_path = destination.with_name(f".{destination.name}.import.lock")
+        lock_descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+            if destination.exists() or destination.is_symlink():
+                raise QualificationError("snapshot destination already exists")
+            os.rename(staging, destination)
+            published = True
+            _fsync_directory(destination.parent)
+        finally:
+            fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
+            os.close(lock_descriptor)
+        return destination / "snapshot.json"
+    finally:
+        if root_descriptor is not None:
+            os.close(root_descriptor)
+        if not published:
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 def _history_rows(path: Path, dataset_id: str) -> list[dict[str, Any]]:
@@ -424,6 +506,7 @@ def _run_history_rows(path: Path, dataset_id: str) -> list[dict[str, Any]]:
         raise QualificationError("run history is unsafe or too large")
     previous = "0" * 64
     rows = []
+    attempt_states: dict[str, str] = {}
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError) as exc:
@@ -442,6 +525,14 @@ def _run_history_rows(path: Path, dataset_id: str) -> list[dict[str, Any]]:
         expected = digest({key: value for key, value in row.items() if key != "record_hash"})
         if row.get("record_hash") != expected:
             raise QualificationError("run history record hash mismatch")
+        attempt_id = row["attempt_id"]
+        prior_state = attempt_states.get(attempt_id)
+        if row["event"] == "started":
+            if prior_state is not None:
+                raise QualificationError("run history transition is invalid")
+        elif prior_state != "started":
+            raise QualificationError("run history transition is invalid")
+        attempt_states[attempt_id] = row["event"]
         previous = expected
         rows.append(row)
     return rows
@@ -462,11 +553,12 @@ def append_run_history(
     try:
         fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
         rows = _run_history_rows(path, dataset_id)
-        if event != "started" and not any(
-            row["event"] == "started" and row["attempt_id"] == attempt_id for row in rows
-        ):
+        attempt_events = [
+            row["event"] for row in rows if row["attempt_id"] == attempt_id
+        ]
+        if event != "started" and attempt_events != ["started"]:
             raise QualificationError("run completion has no durable start record")
-        if event == "started" and any(row["attempt_id"] == attempt_id for row in rows):
+        if event == "started" and attempt_events:
             raise QualificationError("run attempt identity already exists")
         row = {
             "dataset_id": dataset_id,
@@ -605,6 +697,36 @@ def validate_pilot_core(path: Path) -> dict[str, Any]:
     if len(repo_ids) < 3 or len(family_ids) < 3:
         raise QualificationError("pilot core needs six tasks across at least three snapshots")
     return core
+
+
+def pilot_core_task_bindings(path: Path) -> list[dict[str, Any]]:
+    """Return the executable task identities derived from the frozen pilot core."""
+    core = validate_pilot_core(path)
+    root = path.resolve().parent
+    bindings = []
+    for task in core["tasks"]:
+        checks_path = resolve_ref(
+            root, task["check_spec_ref"], f"{task['task_id']}: checks"
+        )
+        checks = load_json(checks_path)
+        required_checks = [
+            row["check_id"]
+            for group in ("functional_checks", "mandatory_conditions")
+            for row in checks[group]
+        ]
+        bindings.append({
+            "task_id": task["task_id"],
+            "repo_id": task["repo_id"],
+            "family_id": task["family_id"],
+            "prompt_sha256": task["prompt_sha256"],
+            "validator_sha256": task["check_spec_sha256"],
+            "required_checks": required_checks,
+            "snapshot_id": task["snapshot_id"],
+            "snapshot_sha256": task["snapshot_sha256"],
+            "initial_context_sha256": task["initial_context_sha256"],
+            "check_spec_sha256": task["check_spec_sha256"],
+        })
+    return bindings
 
 
 def _validate_label(path: Path, case: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -1705,8 +1827,16 @@ def validate_qualified_artifact(
             ]["candidate"]["diff_sha256"] \
             or provenance.get("run_id") != binding.get("campaign_id"):
         reasons.append("qualified_provenance_invalid")
-    history_rows = _history_rows(history_path, manifest["dataset_id"])
-    if exposure_state(history_path, manifest["dataset_id"]) != "consumed":
+    try:
+        history_rows = _history_rows(history_path, manifest["dataset_id"])
+        run_rows = _run_history_rows(run_history_path, manifest["dataset_id"])
+    except QualificationError:
+        history_rows = []
+        run_rows = []
+        reasons.append("qualified_history_invalid")
+    if not history_rows or exposure_state(
+        history_path, manifest["dataset_id"]
+    ) != "consumed":
         reasons.append("qualified_exposure_invalid")
     if not any(
         row["event"] == "opening_intent"
@@ -1717,7 +1847,6 @@ def validate_qualified_artifact(
         for row in history_rows
     ):
         reasons.append("qualified_opening_source_binding_missing")
-    run_rows = _run_history_rows(run_history_path, manifest["dataset_id"])
     if not any(
         row["event"] == "completed"
         and row.get("details", {}).get("output_sha256") == refs["observations"]["sha256"]
@@ -1733,17 +1862,7 @@ def validate_qualified_artifact(
         if not isinstance(campaign_ref, dict) \
                 or campaign_ref.get("sha256") != refs["pilot_core"]["sha256"]:
             reasons.append("campaign_pilot_core_mismatch")
-        core = validate_pilot_core(pilot_path)
-        expected_tasks = [{
-            "task_id": row["task_id"],
-            "repo_id": row["repo_id"],
-            "family_id": row["family_id"],
-            "prompt_sha256": row["prompt_sha256"],
-            "snapshot_id": row["snapshot_id"],
-            "snapshot_sha256": row["snapshot_sha256"],
-            "initial_context_sha256": row["initial_context_sha256"],
-            "check_spec_sha256": row["check_spec_sha256"],
-        } for row in core["tasks"]]
+        expected_tasks = pilot_core_task_bindings(pilot_path)
         actual_tasks = [{
             key: row.get(key) for key in expected_tasks[0]
         } for row in campaign_manifest.get("tasks", [])]

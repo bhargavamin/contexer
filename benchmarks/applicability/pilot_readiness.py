@@ -291,19 +291,9 @@ def load_manifest(path: Path) -> dict[str, Any]:
         if not core_path.is_file() or sha256(core_path) != ref["sha256"]:
             raise PilotError("pilot task core identity mismatch")
         try:
-            core = qualification_preparation.validate_pilot_core(core_path)
+            expected = qualification_preparation.pilot_core_task_bindings(core_path)
         except ValueError as exc:
             raise PilotError(str(exc)) from exc
-        expected = [{
-            "task_id": row["task_id"],
-            "repo_id": row["repo_id"],
-            "family_id": row["family_id"],
-            "prompt_sha256": row["prompt_sha256"],
-            "snapshot_id": row["snapshot_id"],
-            "snapshot_sha256": row["snapshot_sha256"],
-            "initial_context_sha256": row["initial_context_sha256"],
-            "check_spec_sha256": row["check_spec_sha256"],
-        } for row in core["tasks"]]
         actual = [{key: row.get(key) for key in expected[0]} for row in manifest["tasks"]]
         if actual != expected:
             raise PilotError("campaign tasks differ from the frozen pilot task core")
@@ -1822,8 +1812,25 @@ def reconcile_incomplete_launch(
             run["reservation_released_by"] = _nonempty(
                 evidence.get("evidence_id"), "no-launch evidence id"
             )
-        elif evidence.get("invocation_id") and evidence.get("campaign_owned") is True:
-            run["invocation_id"] = evidence["invocation_id"]
+        elif evidence.get("invocation_id"):
+            invocation_id = _nonempty(
+                evidence.get("invocation_id"), "reconciliation invocation id"
+            )
+            existing_invocation_id = run.get("invocation_id")
+            if existing_invocation_id is not None:
+                _nonempty(existing_invocation_id, "persisted invocation id")
+                if invocation_id != existing_invocation_id:
+                    raise PilotError("reconciliation invocation identity does not match")
+            if existing_invocation_id is None and (
+                evidence.get("campaign_owned") is not True
+                or evidence.get("campaign_id") != ledger["campaign_id"]
+                or evidence.get("run_id") != run_id
+            ):
+                raise PilotError(
+                    "new reconciliation invocation evidence is not campaign-bound"
+                )
+            if existing_invocation_id is None:
+                run["invocation_id"] = invocation_id
             run["state"] = "launch_unknown"
             run["history"].append("launch_unknown")
         else:

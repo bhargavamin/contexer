@@ -418,19 +418,7 @@ def _campaign(manifest_path: Path) -> dict:
     qualification_manifest = qualification.load_json(manifest_path)
     root = manifest_path.parent
     core_path = root / qualification_manifest["pilot_core_ref"]["path"]
-    core = qualification.validate_pilot_core(core_path)
-    tasks = [{
-        "task_id": row["task_id"],
-        "repo_id": row["repo_id"],
-        "family_id": row["family_id"],
-        "prompt_sha256": row["prompt_sha256"],
-        "validator_sha256": row["check_spec_sha256"],
-        "snapshot_id": row["snapshot_id"],
-        "snapshot_sha256": row["snapshot_sha256"],
-        "initial_context_sha256": row["initial_context_sha256"],
-        "check_spec_sha256": row["check_spec_sha256"],
-        "required_checks": ["functional", "condition"],
-    } for row in core["tasks"]]
+    tasks = qualification.pilot_core_task_bindings(core_path)
     return {
         "schema_version": 2,
         "campaign_id": "contract08-final-test",
@@ -525,6 +513,156 @@ def test_snapshot_import_is_bounded_inert_and_rejects_escape_symlink_and_overwri
             grant_id="grant", consent_record="local synthetic evaluation",
             max_file_bytes=1,
         )
+
+
+@pytest.mark.parametrize("writer", [
+    lambda path: qualification.atomic_create_text(path, "challenger\n"),
+    lambda path: qualification.atomic_create_json(path, {"writer": "challenger"}),
+])
+def test_immutable_artifact_publication_cannot_replace_concurrent_winner(
+    tmp_path, monkeypatch, writer,
+):
+    destination = tmp_path / "artifact"
+    original_link = qualification.os.link
+
+    def publish_competing_winner(source, target):
+        Path(target).write_text("winner\n", encoding="utf-8")
+        return original_link(source, target)
+
+    monkeypatch.setattr(qualification.os, "link", publish_competing_winner)
+
+    with pytest.raises(qualification.QualificationError, match="overwrite"):
+        writer(destination)
+
+    assert destination.read_text(encoding="utf-8") == "winner\n"
+
+
+def test_snapshot_source_replacement_cannot_import_symlink_target(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    safe = _write(source / "safe.txt", "approved")
+    outside = _write(tmp_path / "outside.txt", "unauthorized")
+    destination = tmp_path / "snapshot"
+    original_path_open = Path.open
+    original_os_open = qualification.os.open
+    replaced = False
+
+    def replace_source():
+        nonlocal replaced
+        if not replaced:
+            replaced = True
+            safe.unlink()
+            safe.symlink_to(outside)
+
+    def racing_path_open(path, *args, **kwargs):
+        if path == safe and args and args[0] == "rb":
+            replace_source()
+        return original_path_open(path, *args, **kwargs)
+
+    def racing_os_open(path, flags, *args, **kwargs):
+        if path == "safe.txt" and kwargs.get("dir_fd") is not None:
+            replace_source()
+        return original_os_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", racing_path_open)
+    monkeypatch.setattr(qualification.os, "open", racing_os_open)
+
+    with pytest.raises(qualification.QualificationError, match="non-symlink"):
+        qualification.materialize_snapshot(
+            source, ["safe.txt"], destination,
+            grant_id="grant", consent_record="local synthetic evaluation",
+        )
+
+    assert not destination.exists()
+
+
+def test_snapshot_source_growth_cannot_bypass_byte_limit(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    selected = _write(source / "selected.txt", "1234")
+    destination = tmp_path / "snapshot"
+    original_path_open = Path.open
+    original_os_open = qualification.os.open
+    grown = False
+
+    def grow_source():
+        nonlocal grown
+        if not grown:
+            grown = True
+            with original_path_open(selected, "ab") as target:
+                target.write(b"5678")
+
+    def racing_path_open(path, *args, **kwargs):
+        if path == selected and args and args[0] == "rb":
+            grow_source()
+        return original_path_open(path, *args, **kwargs)
+
+    def racing_os_open(path, flags, *args, **kwargs):
+        if path == "selected.txt" and kwargs.get("dir_fd") is not None:
+            grow_source()
+        return original_os_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", racing_path_open)
+    monkeypatch.setattr(qualification.os, "open", racing_os_open)
+
+    with pytest.raises(qualification.QualificationError, match="per-file"):
+        qualification.materialize_snapshot(
+            source, ["selected.txt"], destination,
+            grant_id="grant", consent_record="local synthetic evaluation",
+            max_file_bytes=4,
+        )
+
+    assert not destination.exists()
+
+
+def test_failed_snapshot_import_never_deletes_concurrent_winner(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    _write(source / "safe.txt", "approved")
+    destination = tmp_path / "snapshot"
+
+    def concurrent_publish(_path, _value):
+        destination.mkdir()
+        _write(destination / "winner.txt", "published elsewhere")
+        raise qualification.QualificationError("concurrent publication")
+
+    monkeypatch.setattr(qualification, "atomic_create_json", concurrent_publish)
+
+    with pytest.raises(qualification.QualificationError, match="concurrent publication"):
+        qualification.materialize_snapshot(
+            source, ["safe.txt"], destination,
+            grant_id="grant", consent_record="local synthetic evaluation",
+        )
+
+    assert (destination / "winner.txt").read_text() == "published elsewhere"
+
+
+def test_run_attempt_cannot_transition_between_terminal_states(tmp_path):
+    history = tmp_path / "runs.jsonl"
+    dataset_id = "dataset-terminal"
+    attempt_id = "attempt-1"
+    qualification.append_run_history(history, dataset_id, "started", attempt_id)
+    qualification.append_run_history(
+        history, dataset_id, "failed_or_interrupted", attempt_id,
+    )
+
+    with pytest.raises(qualification.QualificationError, match="durable start"):
+        qualification.append_run_history(
+            history, dataset_id, "completed", attempt_id, output_sha256=HASH_A,
+        )
+
+    rows = qualification._run_history_rows(history, dataset_id)
+    forged = {
+        "dataset_id": dataset_id,
+        "event": "completed",
+        "attempt_id": attempt_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "previous_hash": rows[-1]["record_hash"],
+        "details": {"output_sha256": HASH_A},
+    }
+    forged["record_hash"] = qualification.digest(forged)
+    with history.open("a", encoding="utf-8") as target:
+        target.write(qualification.canonical(forged) + "\n")
+
+    with pytest.raises(qualification.QualificationError, match="transition"):
+        qualification._run_history_rows(history, dataset_id)
 
 
 def test_pilot_core_is_complete_and_family_overlap_or_core_edit_is_rejected(tmp_path):
@@ -861,6 +999,50 @@ def test_qualified_artifact_recomputes_references_and_rejects_later_mutation(tmp
     assert "qualified_reference_invalid" in changed["reasons"]
 
 
+def test_qualified_artifact_rejects_failed_then_completed_attempt(tmp_path):
+    manifest_path, _ = _manifest(tmp_path, origin="qualification")
+    _attach_review(manifest_path)
+    observations = _synthetic_observations(manifest_path)
+    artifact_path = tmp_path / "qualified-evidence.json"
+    qualification.build_qualified_artifact(manifest_path, observations, artifact_path)
+    manifest = qualification.load_json(manifest_path)
+    history = tmp_path / manifest["run_history_path"]
+    rows = qualification._run_history_rows(history, manifest["dataset_id"])
+    failed = {
+        "dataset_id": manifest["dataset_id"],
+        "event": "failed_or_interrupted",
+        "attempt_id": rows[-1]["attempt_id"],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "previous_hash": rows[0]["record_hash"],
+        "details": {"error": "forged earlier terminal"},
+    }
+    failed["record_hash"] = qualification.digest(failed)
+    completed = {
+        "dataset_id": manifest["dataset_id"],
+        "event": "completed",
+        "attempt_id": rows[-1]["attempt_id"],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "previous_hash": failed["record_hash"],
+        "details": {"output_sha256": qualification.sha256(observations)},
+    }
+    completed["record_hash"] = qualification.digest(completed)
+    history.write_text(
+        "\n".join(qualification.canonical(row) for row in [
+            rows[0], failed, completed,
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    artifact = qualification.load_json(artifact_path)
+    artifact["references"]["run_history"]["sha256"] = qualification.sha256(history)
+    _write(artifact_path, artifact)
+
+    result = qualification.validate_qualified_artifact(artifact_path)
+
+    assert result["status"] == "inconclusive"
+    assert "qualified_reference_invalid" in result["reasons"]
+    assert "run history transition is invalid" in result["reasons"]
+
+
 def test_qualified_artifact_cannot_be_relabelled_for_another_source(tmp_path):
     manifest_path, _ = _manifest(tmp_path, origin="qualification")
     _attach_review(manifest_path)
@@ -969,7 +1151,12 @@ def test_contract07_schema_two_consumes_the_shared_qualified_validator(tmp_path)
     assert metrics["paired_coverage_gain_equal_task"] == 1.0
 
 
-def test_campaign_schema_two_requires_complete_core_identity(tmp_path):
+@pytest.mark.parametrize(("field", "value"), [
+    ("snapshot_id", "changed"),
+    ("validator_sha256", "f" * 64),
+    ("required_checks", ["forged-check"]),
+])
+def test_campaign_schema_two_requires_complete_core_identity(tmp_path, field, value):
     manifest_path, _ = _manifest(tmp_path)
     campaign = _campaign(manifest_path)
     campaign_path = _write(tmp_path / "campaign.json", campaign)
@@ -983,7 +1170,30 @@ def test_campaign_schema_two_requires_complete_core_identity(tmp_path):
     loaded = pilot_readiness.load_manifest(campaign_path)
     assert loaded["schema_version"] == 2
 
-    campaign["tasks"][0]["snapshot_id"] = "changed"
+    campaign["tasks"][0][field] = value
     _write(campaign_path, campaign)
     with pytest.raises(pilot_readiness.PilotError, match="differ"):
         pilot_readiness.load_manifest(campaign_path)
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("validator_sha256", "f" * 64),
+    ("required_checks", ["forged-check"]),
+])
+def test_qualified_artifact_rejects_campaign_outcome_substitution(
+    tmp_path, field, value,
+):
+    manifest_path, _ = _manifest(tmp_path, origin="qualification")
+    _attach_review(manifest_path)
+    observations = _synthetic_observations(manifest_path)
+    artifact_path = tmp_path / "qualified-evidence.json"
+    qualification.build_qualified_artifact(manifest_path, observations, artifact_path)
+    campaign = _campaign(manifest_path)
+    campaign["tasks"][0][field] = value
+
+    result = qualification.validate_qualified_artifact(
+        artifact_path, campaign_manifest=campaign,
+    )
+
+    assert result["status"] == "inconclusive"
+    assert "campaign_pilot_task_core_mismatch" in result["reasons"]

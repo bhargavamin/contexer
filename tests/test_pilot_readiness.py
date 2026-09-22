@@ -1356,6 +1356,79 @@ def test_authoritative_no_launch_can_release_but_started_invocation_cannot(
         )
 
 
+def test_reconciliation_preserves_started_invocation_identity(
+    tmp_path, _qualified_readiness_for_coordinator,
+):
+    manifest_path, manifest = _manifest(tmp_path)
+    ledger_path = tmp_path / "ledger.json"
+    approval_path, _ = _approval(tmp_path, manifest_path, manifest, ledger_path)
+    ledger = pilot.initialize_ledger(manifest_path, approval_path, ledger_path)
+    run_id = next(iter(ledger["runs"]))
+    with pytest.raises(pilot.SimulatedCrash):
+        pilot.launch_stubbed_run(
+            ledger_path, run_id,
+            lambda row: {"invocation_id": "inv-started"},
+            lambda row, invocation: {
+                "invocation_id": invocation["invocation_id"], "actual_cost": 0,
+            },
+            failpoint="after_result",
+        )
+
+    with pytest.raises(pilot.PilotError, match="does not match"):
+        pilot.reconcile_incomplete_launch(ledger_path, run_id, {
+            "invocation_id": "inv-relabelled",
+            "campaign_owned": True,
+            "campaign_id": manifest["campaign_id"],
+            "run_id": run_id,
+        })
+
+    stored = pilot.load_json(ledger_path)["runs"][run_id]
+    assert stored["state"] == "started"
+    assert stored["invocation_id"] == "inv-started"
+    reconciled = pilot.reconcile_incomplete_launch(ledger_path, run_id, {
+        "invocation_id": "inv-started",
+        "campaign_owned": True,
+        "campaign_id": manifest["campaign_id"],
+        "run_id": run_id,
+    })
+    assert reconciled["invocation_id"] == "inv-started"
+    assert reconciled["state"] == "launch_unknown"
+
+
+def test_new_reconciliation_invocation_requires_campaign_binding(
+    tmp_path, _qualified_readiness_for_coordinator,
+):
+    manifest_path, manifest = _manifest(tmp_path)
+    ledger_path = tmp_path / "ledger.json"
+    approval_path, _ = _approval(tmp_path, manifest_path, manifest, ledger_path)
+    ledger = pilot.initialize_ledger(manifest_path, approval_path, ledger_path)
+    run_id = next(iter(ledger["runs"]))
+    with pytest.raises(pilot.SimulatedCrash):
+        pilot.launch_stubbed_run(
+            ledger_path, run_id,
+            lambda row: {"invocation_id": "inv-unpersisted"},
+            lambda row, invocation: {},
+            failpoint="after_spawn",
+        )
+
+    with pytest.raises(pilot.PilotError, match="campaign-bound"):
+        pilot.reconcile_incomplete_launch(ledger_path, run_id, {
+            "invocation_id": "inv-unpersisted",
+            "campaign_owned": True,
+            "campaign_id": "another-campaign",
+            "run_id": run_id,
+        })
+
+    reconciled = pilot.reconcile_incomplete_launch(ledger_path, run_id, {
+        "invocation_id": "inv-unpersisted",
+        "campaign_owned": True,
+        "campaign_id": manifest["campaign_id"],
+        "run_id": run_id,
+    })
+    assert reconciled["invocation_id"] == "inv-unpersisted"
+    assert reconciled["state"] == "launch_unknown"
+
+
 def test_usage_over_reservation_is_rejected_and_reservation_stays_held(
     tmp_path, _qualified_readiness_for_coordinator,
 ):
