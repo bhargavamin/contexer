@@ -13,7 +13,7 @@ import time
 
 import pytest
 
-from contexer import guard_engine, revisions, store
+from contexer import guard_engine, policy, revisions, store
 from tests.conftest import redirect_store_dir
 from tests.conftest import _git, _seed_entry, _write
 
@@ -264,61 +264,80 @@ class TestPathlikeArtifact:
         assert guard_engine._pathlike_artifact(artifact) is False
 
 
-# ── _artifact_path_match ─────────────────────────────────────────────────────
+def _paired(artifact, staged):
+    """Staged paths the production matcher pairs with one content artifact."""
+    staged_set = {staged} if isinstance(staged, str) else set(staged)
+    staged_set.discard("")
+    by_base: dict[str, list[str]] = {}
+    for path in staged_set:
+        by_base.setdefault(path.rsplit("/", 1)[-1], []).append(path)
+    return guard_engine._guard_artifact_matches(artifact, staged_set, by_base)
+
+
+# ── _guard_artifact_matches ──────────────────────────────────────────────────
 
 class TestArtifactPathMatch:
     def test_exact_relpath_equality(self):
-        assert guard_engine._artifact_path_match("contexer/store.py", "contexer/store.py") is True
+        assert _paired("contexer/store.py", "contexer/store.py") == ["contexer/store.py"]
 
     def test_exact_bare_name_equality_at_root(self):
-        assert guard_engine._artifact_path_match("store.py", "store.py") is True
+        assert _paired("store.py", "store.py") == ["store.py"]
 
     def test_dotted_module_maps_to_py_file(self):
-        assert guard_engine._artifact_path_match("contexer.store", "contexer/store.py") is True
+        assert _paired("contexer.store", "contexer/store.py") == ["contexer/store.py"]
 
     def test_dotted_module_maps_to_package_init(self):
-        assert guard_engine._artifact_path_match("contexer.store", "contexer/store/__init__.py") is True
+        assert _paired("contexer.store", "contexer/store/__init__.py") == [
+            "contexer/store/__init__.py"]
 
     def test_dotted_module_no_match_wrong_file(self):
-        assert guard_engine._artifact_path_match("contexer.store", "contexer/other.py") is False
+        assert _paired("contexer.store", "contexer/other.py") == []
 
     def test_multisegment_suffix_match_at_boundary(self):
-        assert guard_engine._artifact_path_match("a/utils.py", "x/a/utils.py") is True
+        assert _paired("a/utils.py", "x/a/utils.py") == ["x/a/utils.py"]
 
     def test_multisegment_suffix_requires_path_boundary(self):
         # "za/utils.py" ends with "a/utils.py" as raw characters but NOT at a "/"
         # boundary — must not match.
-        assert guard_engine._artifact_path_match("a/utils.py", "za/utils.py") is False
+        assert _paired("a/utils.py", "za/utils.py") == []
 
     def test_bare_basename_never_matches_nested_file(self):
-        assert guard_engine._artifact_path_match("utils.py", "a/utils.py") is False
+        assert _paired("utils.py", "a/utils.py") == []
 
     def test_bare_basename_never_matches_nested_file_config(self):
-        assert guard_engine._artifact_path_match("config.json", "a/config.json") is False
+        assert _paired("config.json", "a/config.json") == []
 
     def test_symbol_artifact_never_matches(self):
-        assert guard_engine._artifact_path_match("FooError", "contexer/foo.py") is False
+        assert _paired("FooError", "contexer/foo.py") == []
 
     def test_route_shaped_artifact_never_matches(self):
-        assert guard_engine._artifact_path_match("/api/users", "api/users.py") is False
+        assert _paired("/api/users", "api/users.py") == []
 
     def test_unrelated_paths_no_match(self):
-        assert guard_engine._artifact_path_match("contexer/store.py", "contexer/miner.py") is False
+        assert _paired("contexer/store.py", "contexer/miner.py") == []
 
-    def test_directory_prefix_matches_descendant(self):
-        assert guard_engine._artifact_path_match("contexer/", "contexer/store.py") is True
+    def test_trailing_slash_is_not_a_directory_prefix(self):
+        # Content artifacts never end in "/"; a slash-suffixed string must not
+        # pair every descendant the way a source anchor does.
+        assert _paired("contexer/", {"contexer/store.py", "contexer_extra/store.py"}) == []
 
-    def test_directory_prefix_requires_path_boundary(self):
-        assert guard_engine._artifact_path_match("contexer/", "contexer_extra/store.py") is False
+    def test_content_artifacts_never_end_in_a_slash(self):
+        artifacts = guard_engine._guard_content_artifacts(
+            "See contexer/ and contexer/store.py, contexer/server.py, contexer.cli.")
+        assert "contexer/store.py" in artifacts
+        assert all(not artifact.endswith("/") for artifact in artifacts)
+
+    def test_separate_artifact_path_matcher_stays_removed(self):
+        assert not hasattr(guard_engine, "_artifact_path_match")
 
     def test_source_anchor_hits_ignore_malformed_legacy_values(self):
-        assert guard_engine._source_anchor_hits(
+        assert policy.source_anchor_hits(
             [None, 7, "contexer/"], [None, "contexer/store.py"]
         ) == {"contexer/store.py"}
 
     def test_empty_inputs_fail_soft(self):
-        assert guard_engine._artifact_path_match("", "contexer/store.py") is False
-        assert guard_engine._artifact_path_match("contexer/store.py", "") is False
+        assert _paired("", "contexer/store.py") == []
+        assert _paired("contexer/store.py", "") == []
 
 
 # ── Task 2: Tier-1 advisory engine — pairing, throttle, dismissals ──────────

@@ -44,6 +44,35 @@ LEAVES = frozenset({
 })
 
 
+def _forwards_owner_call(func: ast.FunctionDef, owners: set[str]) -> bool:
+    """True when `func` is only `return owner.same_name(same positional args)`."""
+    if func.decorator_list or func.args.vararg or func.args.kwarg or func.args.kwonlyargs \
+            or func.args.defaults or func.args.kw_defaults:
+        return False
+    params = [arg.arg for arg in func.args.args]
+    body = []
+    for stmt in func.body:
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) \
+                and isinstance(stmt.value.value, str):
+            continue
+        body.append(stmt)
+    if len(body) != 1 or not isinstance(body[0], ast.Return):
+        return False
+    call = body[0].value
+    if not isinstance(call, ast.Call) or call.keywords or len(call.args) != len(params):
+        return False
+    if not all(isinstance(arg, ast.Name) and arg.id == name
+               for arg, name in zip(call.args, params)):
+        return False
+    target = call.func
+    if not isinstance(target, ast.Attribute) or not isinstance(target.value, ast.Name):
+        return False
+    if target.value.id not in owners:
+        return False
+    local = func.name[1:] if func.name.startswith("_") else func.name
+    return local == target.attr
+
+
 def _py_files(roots=("contexer",)):
     """Every .py under the named repo-relative roots, plus server.py at the repo root.
 
@@ -253,6 +282,25 @@ class TestRuleThreeNoLeafReExportsAnotherLeaf:
             if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) \
                     and target.value.id in (owners | LEAVES):
                 offenders.append(f"store.py:{node.lineno} {ast.unparse(node)}")
+        assert offenders == [], offenders
+
+    def test_no_package_module_forwards_a_leaf_call_under_its_own_name(self):
+        """Rule 3 covers a `def` whose body only returns the same call on an owner.
+
+        An assignment alias (`_x = leaf.x`) was the shape the store-only check caught.
+        A one-line function with the same name forwards the same way and used to hide
+        in guard_engine. A wrapper that transforms arguments, adds a keyword, or exists
+        as a decorated public tool is a different function and stays out of this check.
+        """
+        offenders = []
+        for path, tree in _py_files(("contexer",)):
+            owners = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module == "contexer":
+                    owners |= {alias.asname or alias.name for alias in node.names}
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef) and _forwards_owner_call(node, owners):
+                    offenders.append(f"{path.relative_to(REPO)}:{node.lineno} {node.name}")
         assert offenders == [], offenders
 
     def test_no_module_imports_store_with_from_imports(self):

@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from contexer import (  # pure stdlib leaves (no cycles)
+    policy,
     prompt_capture,
     reconciliation,
     sidecars,
@@ -6183,7 +6184,7 @@ def _index_file_lookup(repo_path: str, index: dict, file_artifacts: list[str]) -
     hits: list[dict] = []
     for did, doc in index.get("docs", {}).items():
         source_files = set(doc.get("source_files") or [])
-        if guard_engine._source_anchor_hits(source_files, canon_set):
+        if policy.source_anchor_hits(source_files, canon_set):
             hits.append({"decision_id": did, "reason": "source_files match",
                         "title": doc.get("title", ""), "scope": "personal",
                         "guidance_fingerprint": doc.get("guidance_fingerprint")})
