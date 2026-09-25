@@ -1,19 +1,18 @@
 """Tests for the commit-time guard's Task-1 plumbing (staged-file reading and
 path-matching helpers), Task-2 Tier-1 advisory engine (pairing, throttle,
 dismissals), and Task-3 Tier-2 armed rules (arm/disarm, regex + secret checks,
-blocking violations) in contexer/guard_engine.py. `store` is still imported
-directly for the store-owned pieces the guard engine reads through it
-(STORE_DIR, _load, _save, ...) and for the five public entrypoints it
-re-exports at its own bottom for backward compatibility."""
+blocking violations) in contexer/guard_engine.py. `store` is imported for the
+store-owned pieces the guard reads through it (persistence, approval, anchors).
+Guard behavior is called on guard_engine. The facade re-export contract lives in
+tests/test_module_boundaries.py."""
 import copy
 import os
 import subprocess
-import sys
 import time
 
 import pytest
 
-from contexer import guard_engine, policy, revisions, store
+from contexer import guard_engine, revisions, store
 from tests.conftest import redirect_store_dir
 from tests.conftest import _git, _seed_entry, _write
 
@@ -331,6 +330,7 @@ class TestArtifactPathMatch:
         assert not hasattr(guard_engine, "_artifact_path_match")
 
     def test_source_anchor_hits_ignore_malformed_legacy_values(self):
+        from contexer import policy
         assert policy.source_anchor_hits(
             [None, 7, "contexer/"], [None, "contexer/store.py"]
         ) == {"contexer/store.py"}
@@ -2669,53 +2669,3 @@ class TestWireSafety:
         assert "anchor_commit" not in projected
 
 
-# ── Task 4: store.py backward-compat re-export ────────────────────────────────
-
-class TestStoreReexportIdentity:
-    """store.py re-exports guard_engine's five public entrypoints for backward
-    compatibility (any caller still holding `store.guard_staged` etc. must keep
-    working, byte-identically, after the extraction). Pinned as object identity,
-    not just equal behavior, so a future accidental re-wrap or re-def in either
-    module would fail this test immediately."""
-
-    def test_guard_staged_is_the_same_object(self):
-        assert store.guard_staged is guard_engine.guard_staged
-
-    def test_guard_candidates_is_the_same_object(self):
-        assert store.guard_candidates is guard_engine.guard_candidates
-
-    def test_arm_guard_is_the_same_object(self):
-        assert store.arm_guard is guard_engine.arm_guard
-
-    def test_disarm_guard_is_the_same_object(self):
-        assert store.disarm_guard is guard_engine.disarm_guard
-
-    def test_dismiss_guard_is_the_same_object(self):
-        assert store.dismiss_guard is guard_engine.dismiss_guard
-
-
-class TestImportOrderRegression:
-    """store.py's guard re-export used to be an eager `from contexer.guard_engine
-    import ...` at the bottom of the file — a real cycle with guard_engine's own
-    top-level `from contexer import store`, which only resolved when store.py
-    happened to be the module that started loading first. `import
-    contexer.guard_engine` (or `from contexer import guard_engine`) as the very
-    first touch of the package used to raise ImportError: cannot import name
-    'guard_staged' from partially initialized module 'contexer.guard_engine'.
-    A fresh subprocess (pytest has already imported both modules in this
-    process, in the safe order, so an in-process check would prove nothing)
-    with guard_engine imported BEFORE store is the exact previously-broken
-    order; store.py's module `__getattr__` (PEP 562) fixes it by resolving the
-    re-export lazily instead of at store.py's own load time."""
-
-    def test_guard_engine_first_import_order_does_not_raise(self):
-        probe = (
-            "import contexer.guard_engine\n"
-            "import contexer.store\n"
-            "assert contexer.store.guard_staged is contexer.guard_engine.guard_staged\n"
-            "print('OK')\n"
-        )
-        result = subprocess.run([sys.executable, "-c", probe],
-                                 capture_output=True, text=True, timeout=30)
-        assert result.returncode == 0, result.stderr
-        assert result.stdout.strip() == "OK"

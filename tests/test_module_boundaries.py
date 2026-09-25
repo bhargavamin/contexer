@@ -12,8 +12,10 @@ does not hold.
 """
 import ast
 import pathlib
+import subprocess
+import sys
 
-from contexer import candidates, share, store
+from contexer import candidates, guard_engine, share, store
 
 SRC = pathlib.Path(store.__file__).parent
 STORE_PY = SRC / "store.py"
@@ -252,6 +254,22 @@ class TestRuleOneFacadeIsBackCompatOnly:
         for name in (store._GUARD_EXPORTS | store._CONFLICT_EXPORTS | store._CONSOLE_EXPORTS
                      | store._LIFECYCLE_EXPORTS):
             assert getattr(store, name) is not None, name
+
+    def test_guard_exports_are_the_owner_objects(self):
+        for name in store._GUARD_EXPORTS:
+            assert getattr(store, name) is getattr(guard_engine, name)
+
+    def test_guard_engine_imported_before_store_still_resolves(self):
+        probe = (
+            "import contexer.guard_engine\n"
+            "import contexer.store\n"
+            "assert contexer.store.guard_staged is contexer.guard_engine.guard_staged\n"
+            "print('OK')\n"
+        )
+        result = subprocess.run([sys.executable, "-c", probe],
+                                 capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "OK"
 
 
 class TestRuleTwoTwoReadersMakeAnInterface:
