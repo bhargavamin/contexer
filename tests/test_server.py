@@ -654,6 +654,38 @@ def test_bootstrap_preview_does_not_apply(monkeypatch, source_paths):
 
 # ── capture_lint: bounce narrative-shaped AI captures ───────────────────────
 
+def test_update_context_refuses_a_task_scoped_operational_instruction(tmp_repo, monkeypatch):
+    monkeypatch.setattr(store, "resolve_repo_verbose", lambda p: (tmp_repo, "argument"))
+    prompt = (
+        "Make sure you are not changing anything on the live Kubernetes environment. "
+        "Strictly work only with staging, where you have autonomy and approval to "
+        "achieve the task I gave you."
+    )
+    out = server.update_context(content=prompt, subtype="constraint")
+    assert out.startswith("Not stored.")
+    assert store.load(tmp_repo)["entries"] == []
+    mixed = (
+        "From now on, never change the live Kubernetes environment. "
+        "For this task, work only with staging."
+    )
+    assert server.update_context(content=mixed, subtype="constraint").startswith("Not stored.")
+    assert store.load(tmp_repo)["entries"] == []
+    stored = server.update_context(
+        content="From now on, never change the live Kubernetes environment.",
+        subtype="constraint",
+    )
+    assert not stored.startswith("Not stored.")
+    saved = store.load(tmp_repo)["entries"]
+    assert len(saved) == 1
+    assert "staging" not in saved[0]["content"].lower()
+    assert "never change the live" in saved[0]["content"].lower()
+
+
+def test_capture_guidance_names_the_local_scopes_prompt_capture_ignores():
+    for phrase in ("for this task", "the task I gave you", "in this session", "while you do this"):
+        assert phrase in server._INSTRUCTIONS
+
+
 def test_update_context_bounces_narrative(tmp_repo, monkeypatch):
     # The WRITE path resolves verbosely (it stamps repo_source onto the new entry), so the
     # double has to mirror that - patching _resolve_repo alone no longer intercepts it.

@@ -1770,8 +1770,11 @@ _DIRECTIVE_WRAPPER_ONLY = re.compile(
 # This stays deliberately structural: guessing whether an arbitrary sentence is "important"
 # would be a second semantic model in a prompt hook.
 _TASK_SCOPE_MARKER = re.compile(
-    r"\b(?:for|during|in)\s+(?:this|the)\s+(?:run|pass|task|review|test|turn|request|bootstrap)\b"
-    r"|\b(?:this\s+time|right\s+now)\b",
+    r"\b(?:for|during|in)\s+(?:this|the)\s+"
+    r"(?:run|pass|task|review|test|turn|request|bootstrap|session)\b"
+    r"|\b(?:this\s+time|right\s+now)\b"
+    r"|\bthe\s+task\s+I\s+gave\s+you\b"
+    r"|\bwhile\s+you\s+do\s+this\b",
     re.IGNORECASE,
 )
 _DURABLE_DIRECTIVE = re.compile(
@@ -1826,6 +1829,17 @@ def _directive_policy_text(text: str) -> str:
     durable = [part for part in fragments if _DURABLE_DIRECTIVE.search(part)
                and not _TASK_SCOPE_MARKER.search(part)]
     return ". ".join(durable)
+
+
+def explicitly_local_directive(text: str) -> bool:
+    """True when text is a directive that also names this task or session."""
+    candidate = _directive_candidate_text(text).strip()
+    if not candidate or len(candidate) > _MAX_DIRECTIVE_LEN:
+        return False
+    if not _TASK_SCOPE_MARKER.search(candidate):
+        return False
+    return bool(_CONSTRAINT_TRIGGER.search(candidate))
+
 
 # Deictic referents point at an object only this conversation can resolve - a strong
 # signal the directive is session-scoped intent, not a standing rule. Still stored

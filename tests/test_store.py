@@ -847,6 +847,51 @@ class TestIsPrescriptiveConstraint:
         )
         assert is_c is True
 
+    def test_task_scoped_operational_instruction_is_not_stored(self, tmp_repo):
+        # Issue 317: a one-task environment grant must not become a standing constraint.
+        prompt = (
+            "Make sure you are not changing anything on the live Kubernetes environment. "
+            "Strictly work only with staging, where you have autonomy and approval to "
+            "achieve the task I gave you."
+        )
+        assert store.capture_user_constraint(tmp_repo, prompt, "s1") == (None, None, None)
+        assert store.load(tmp_repo)["entries"] == []
+
+    @pytest.mark.parametrize("prompt", [
+        "In this session, do not change the live Kubernetes environment.",
+        "While you do this, never touch production.",
+        "For this task, do not change the live cluster.",
+    ])
+    def test_explicit_local_scope_is_ignored(self, tmp_repo, prompt):
+        assert store.capture_user_constraint(tmp_repo, prompt, "s1") == (None, None, None)
+        assert store.load(tmp_repo)["entries"] == []
+
+    def test_durable_environment_rule_still_stores(self, tmp_repo):
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo, "From now on, never change the live Kubernetes environment.", "s1")
+        assert status == "approved"
+        assert entry_id
+        assert "never change the live" in content.lower()
+        saved = store.load(tmp_repo)["entries"]
+        assert len(saved) == 1
+        assert saved[0]["status"] == "approved"
+        assert "staging" not in saved[0]["content"].lower()
+
+    def test_durable_sibling_survives_a_task_scoped_grant(self, tmp_repo):
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo,
+            "From now on, never change the live Kubernetes environment. "
+            "For this task, work only with staging.",
+            "s1",
+        )
+        assert status == "approved"
+        assert entry_id
+        assert "staging" not in content.lower()
+        assert "never change the live" in content.lower()
+        saved = store.load(tmp_repo)["entries"]
+        assert len(saved) == 1
+        assert "staging" not in saved[0]["content"].lower()
+
     def test_ensure_you_with_object_quantifier_not_detected(self):
         # Greptile #216 P1: "any"/"all" quantify WHAT to act on, not HOW OFTEN — they
         # carry no recurrence, so they must not satisfy the durability requirement.
