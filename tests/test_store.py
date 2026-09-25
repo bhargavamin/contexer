@@ -895,6 +895,8 @@ class TestIsPrescriptiveConstraint:
     @pytest.mark.parametrize("prompt", [
         "For this task, use staging.",
         "In this session, work in the sandbox.",
+        "For this task never touch production.",
+        "For this task use staging.",
     ])
     def test_local_operation_without_a_constraint_word_is_not_stored(self, tmp_repo, prompt):
         assert store.capture_user_constraint(tmp_repo, prompt, "s1") == (None, None, None)
@@ -924,6 +926,19 @@ class TestIsPrescriptiveConstraint:
         assert "never commit credentials" in content.lower()
         assert "run the tests" not in content.lower()
         assert "while you do this" not in content.lower()
+
+    def test_and_keeps_later_clauses_of_the_lasting_rule(self, tmp_repo):
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo,
+            "For this task, run tests and from now on never commit credentials "
+            "and always encrypt backups.",
+            "s1",
+        )
+        assert status == "approved"
+        assert entry_id
+        assert "never commit credentials" in content.lower()
+        assert "always encrypt backups" in content.lower()
+        assert "run tests" not in content.lower()
 
     def test_ensure_you_with_object_quantifier_not_detected(self):
         # Greptile #216 P1: "any"/"all" quantify WHAT to act on, not HOW OFTEN — they

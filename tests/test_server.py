@@ -664,7 +664,12 @@ def test_update_context_refuses_a_task_scoped_operational_instruction(tmp_repo, 
     out = server.update_context(content=prompt, subtype="constraint")
     assert out.startswith("Not stored.")
     assert store.load(tmp_repo)["entries"] == []
-    for local in ("For this task, use staging.", "In this session, work in the sandbox."):
+    for local in (
+        "For this task, use staging.",
+        "In this session, work in the sandbox.",
+        "For this task never touch production.",
+        "For this task use staging.",
+    ):
         assert server.update_context(content=local, subtype="constraint").startswith("Not stored.")
     assert store.load(tmp_repo)["entries"] == []
     fact = server.update_context(content="The cache warmed for this task.", subtype="architecture")
@@ -687,6 +692,19 @@ def test_update_context_refuses_a_task_scoped_operational_instruction(tmp_repo, 
     lasting = [body for body in bodies if "never change the live" in body]
     assert len(lasting) == 1
     assert "staging" not in lasting[0]
+    chain = (
+        "For this task, run tests and from now on never commit credentials "
+        "and always encrypt backups."
+    )
+    chain_out = server.update_context(content=chain, subtype="constraint")
+    assert not chain_out.startswith("Not stored.")
+    chain_bodies = [
+        entry["content"].lower() for entry in store.load(tmp_repo)["entries"]
+        if "encrypt backups" in entry["content"].lower()
+    ]
+    assert len(chain_bodies) == 1
+    assert "never commit credentials" in chain_bodies[0]
+    assert "run tests" not in chain_bodies[0]
 
 
 def test_capture_guidance_names_the_local_scopes_prompt_capture_ignores():

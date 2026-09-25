@@ -1769,9 +1769,15 @@ _DIRECTIVE_WRAPPER_ONLY = re.compile(
 # remove task-bounded clauses before the ordinary directive detector assigns human authority.
 # This stays deliberately structural: guessing whether an arbitrary sentence is "important"
 # would be a second semantic model in a prompt hook.
-# The scope noun ends the adjunct. A following word is part of a component name
+# The scope noun ends the adjunct, or is followed by the instruction itself
+# ("for this task never ..."). A different following word is a component name
 # ("task runner", "session handler"), not a bound on this run.
-_SCOPE_ADJUNCT_END = r"(?!\s+[A-Za-z])"
+_SCOPE_FOLLOWER = (
+    r"never|always|do|use|work|run|stay|keep|stick|operate|deploy|change|edit|"
+    r"modify|touch|write|switch|limit|restrict|please|ensure|make|from|avoid|"
+    r"stop|must|should"
+)
+_SCOPE_ADJUNCT_END = rf"(?!\s+(?!(?:{_SCOPE_FOLLOWER})\b)[A-Za-z])"
 _TASK_SCOPE_MARKER = re.compile(
     r"\b(?:for|during|in)\s+(?:this|the)\s+"
     r"(?:run|pass|task|review|test|turn|request|bootstrap|session)\b"
@@ -1802,7 +1808,11 @@ _TASK_IMPERATIVE = re.compile(
 # Clause-initial operations that are instructions even without always/never/do not.
 # "For this task, use staging" is local; "The cache warmed for this task" is not.
 _LOCAL_OPERATION = re.compile(
-    r"(?:^|[,:]\s*)(?:please\s+)?(?:use|work|run|stay|keep|stick|operate|deploy|"
+    r"(?:^|[,:]\s*|"
+    r"(?:for|during|in)\s+(?:this|the)\s+"
+    r"(?:run|pass|task|review|test|turn|request|bootstrap|session)\s+|"
+    r"while\s+you\s+do\s+this\s+)"
+    r"(?:please\s+)?(?:use|work|run|stay|keep|stick|operate|deploy|"
     r"change|edit|modify|touch|write|switch|limit|restrict)\b",
     re.IGNORECASE,
 )
@@ -1831,23 +1841,32 @@ def _directive_policy_text(text: str) -> str:
         # Explicit task scope governs sibling actions too. "Always" alone can describe
         # how to perform this run; only an independently declared lasting-policy clause
         # escapes that scope. A lasting clause joined by a bare "and" is its own piece:
-        # the sentence split does not break on "and" without a comma.
+        # the sentence split does not break on "and" without a comma. Once that lasting
+        # clause has started, a later always/never piece in the same chain stays with it.
         durable = []
         for part in fragments:
             pieces = [part]
             if _TASK_SCOPE_MARKER.search(part) and re.search(r"\s+and\s+", part, re.IGNORECASE):
                 pieces = [piece.strip(" ,") for piece in re.split(r"\s+and\s+", part, flags=re.IGNORECASE)
                           if piece.strip(" ,")]
+            lasting = False
             for piece in pieces:
                 if _EXPLICIT_DURABLE_SCOPE.search(piece) and not _TASK_SCOPE_MARKER.search(piece):
                     durable.append(piece)
+                    lasting = True
                     continue
+                if (lasting and durable and _DURABLE_DIRECTIVE.search(piece)
+                        and not _TASK_SCOPE_MARKER.search(piece)):
+                    durable[-1] = f"{durable[-1]} and {piece}"
+                    continue
+                lasting = False
                 if not (_TASK_SCOPE_MARKER.search(piece) and _EXPLICIT_DURABLE_SCOPE.search(piece)):
                     continue
                 stripped = re.sub(r"\s{2,}", " ", _TASK_SCOPE_MARKER.sub(" ", piece)).strip(" ,")
                 if (stripped and _EXPLICIT_DURABLE_SCOPE.search(stripped)
                         and not _TASK_SCOPE_MARKER.search(stripped)):
                     durable.append(stripped)
+                    lasting = True
         return ". ".join(durable)
     task_actions = sum(bool(_TASK_IMPERATIVE.search(part)) for part in fragments)
     if task_actions < 2:
