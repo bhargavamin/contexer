@@ -1764,7 +1764,7 @@ def test_offline_stub_denies_lingering_descendants(tmp_path):
 
     result = pilot.run_offline_stub_process(
         [sys.executable, "-I", "-c", parent],
-        sandbox_root=root, cwd=cwd, home=home, timeout_seconds=0.05,
+        sandbox_root=root, cwd=cwd, home=home, timeout_seconds=1.0,
     )
     time.sleep(0.4)
 

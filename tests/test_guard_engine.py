@@ -1,14 +1,13 @@
 """Tests for the commit-time guard's Task-1 plumbing (staged-file reading and
 path-matching helpers), Task-2 Tier-1 advisory engine (pairing, throttle,
 dismissals), and Task-3 Tier-2 armed rules (arm/disarm, regex + secret checks,
-blocking violations) in contexer/guard_engine.py. `store` is still imported
-directly for the store-owned pieces the guard engine reads through it
-(STORE_DIR, _load, _save, ...) and for the five public entrypoints it
-re-exports at its own bottom for backward compatibility."""
+blocking violations) in contexer/guard_engine.py. `store` is imported for the
+store-owned pieces the guard reads through it (persistence, approval, anchors).
+Guard behavior is called on guard_engine. The facade re-export contract lives in
+tests/test_module_boundaries.py."""
 import copy
 import os
 import subprocess
-import sys
 import time
 
 import pytest
@@ -264,61 +263,81 @@ class TestPathlikeArtifact:
         assert guard_engine._pathlike_artifact(artifact) is False
 
 
-# ── _artifact_path_match ─────────────────────────────────────────────────────
+def _paired(artifact, staged):
+    """Staged paths the production matcher pairs with one content artifact."""
+    staged_set = {staged} if isinstance(staged, str) else set(staged)
+    staged_set.discard("")
+    by_base: dict[str, list[str]] = {}
+    for path in staged_set:
+        by_base.setdefault(path.rsplit("/", 1)[-1], []).append(path)
+    return guard_engine._guard_artifact_matches(artifact, staged_set, by_base)
+
+
+# ── _guard_artifact_matches ──────────────────────────────────────────────────
 
 class TestArtifactPathMatch:
     def test_exact_relpath_equality(self):
-        assert guard_engine._artifact_path_match("contexer/store.py", "contexer/store.py") is True
+        assert _paired("contexer/store.py", "contexer/store.py") == ["contexer/store.py"]
 
     def test_exact_bare_name_equality_at_root(self):
-        assert guard_engine._artifact_path_match("store.py", "store.py") is True
+        assert _paired("store.py", "store.py") == ["store.py"]
 
     def test_dotted_module_maps_to_py_file(self):
-        assert guard_engine._artifact_path_match("contexer.store", "contexer/store.py") is True
+        assert _paired("contexer.store", "contexer/store.py") == ["contexer/store.py"]
 
     def test_dotted_module_maps_to_package_init(self):
-        assert guard_engine._artifact_path_match("contexer.store", "contexer/store/__init__.py") is True
+        assert _paired("contexer.store", "contexer/store/__init__.py") == [
+            "contexer/store/__init__.py"]
 
     def test_dotted_module_no_match_wrong_file(self):
-        assert guard_engine._artifact_path_match("contexer.store", "contexer/other.py") is False
+        assert _paired("contexer.store", "contexer/other.py") == []
 
     def test_multisegment_suffix_match_at_boundary(self):
-        assert guard_engine._artifact_path_match("a/utils.py", "x/a/utils.py") is True
+        assert _paired("a/utils.py", "x/a/utils.py") == ["x/a/utils.py"]
 
     def test_multisegment_suffix_requires_path_boundary(self):
         # "za/utils.py" ends with "a/utils.py" as raw characters but NOT at a "/"
         # boundary — must not match.
-        assert guard_engine._artifact_path_match("a/utils.py", "za/utils.py") is False
+        assert _paired("a/utils.py", "za/utils.py") == []
 
     def test_bare_basename_never_matches_nested_file(self):
-        assert guard_engine._artifact_path_match("utils.py", "a/utils.py") is False
+        assert _paired("utils.py", "a/utils.py") == []
 
     def test_bare_basename_never_matches_nested_file_config(self):
-        assert guard_engine._artifact_path_match("config.json", "a/config.json") is False
+        assert _paired("config.json", "a/config.json") == []
 
     def test_symbol_artifact_never_matches(self):
-        assert guard_engine._artifact_path_match("FooError", "contexer/foo.py") is False
+        assert _paired("FooError", "contexer/foo.py") == []
 
     def test_route_shaped_artifact_never_matches(self):
-        assert guard_engine._artifact_path_match("/api/users", "api/users.py") is False
+        assert _paired("/api/users", "api/users.py") == []
 
     def test_unrelated_paths_no_match(self):
-        assert guard_engine._artifact_path_match("contexer/store.py", "contexer/miner.py") is False
+        assert _paired("contexer/store.py", "contexer/miner.py") == []
 
-    def test_directory_prefix_matches_descendant(self):
-        assert guard_engine._artifact_path_match("contexer/", "contexer/store.py") is True
+    def test_trailing_slash_is_not_a_directory_prefix(self):
+        # Content artifacts never end in "/"; a slash-suffixed string must not
+        # pair every descendant the way a source anchor does.
+        assert _paired("contexer/", {"contexer/store.py", "contexer_extra/store.py"}) == []
 
-    def test_directory_prefix_requires_path_boundary(self):
-        assert guard_engine._artifact_path_match("contexer/", "contexer_extra/store.py") is False
+    def test_content_artifacts_never_end_in_a_slash(self):
+        artifacts = guard_engine._guard_content_artifacts(
+            "See contexer/ and contexer/store.py, contexer/server.py, contexer.cli.")
+        assert "contexer/store.py" in artifacts
+        assert all(not artifact.endswith("/") for artifact in artifacts)
+
+    def test_separate_artifact_path_matcher_stays_removed(self):
+        assert not hasattr(guard_engine, "_artifact_path_match")
 
     def test_source_anchor_hits_ignore_malformed_legacy_values(self):
-        assert guard_engine._source_anchor_hits(
+        from contexer import policy
+        assert policy.source_anchor_hits(
             [None, 7, "contexer/"], [None, "contexer/store.py"]
         ) == {"contexer/store.py"}
 
     def test_empty_inputs_fail_soft(self):
-        assert guard_engine._artifact_path_match("", "contexer/store.py") is False
-        assert guard_engine._artifact_path_match("contexer/store.py", "") is False
+        assert _paired("", "contexer/store.py") == []
+        assert _paired("contexer/store.py", "") == []
 
 
 # ── Task 2: Tier-1 advisory engine — pairing, throttle, dismissals ──────────
@@ -2650,53 +2669,3 @@ class TestWireSafety:
         assert "anchor_commit" not in projected
 
 
-# ── Task 4: store.py backward-compat re-export ────────────────────────────────
-
-class TestStoreReexportIdentity:
-    """store.py re-exports guard_engine's five public entrypoints for backward
-    compatibility (any caller still holding `store.guard_staged` etc. must keep
-    working, byte-identically, after the extraction). Pinned as object identity,
-    not just equal behavior, so a future accidental re-wrap or re-def in either
-    module would fail this test immediately."""
-
-    def test_guard_staged_is_the_same_object(self):
-        assert store.guard_staged is guard_engine.guard_staged
-
-    def test_guard_candidates_is_the_same_object(self):
-        assert store.guard_candidates is guard_engine.guard_candidates
-
-    def test_arm_guard_is_the_same_object(self):
-        assert store.arm_guard is guard_engine.arm_guard
-
-    def test_disarm_guard_is_the_same_object(self):
-        assert store.disarm_guard is guard_engine.disarm_guard
-
-    def test_dismiss_guard_is_the_same_object(self):
-        assert store.dismiss_guard is guard_engine.dismiss_guard
-
-
-class TestImportOrderRegression:
-    """store.py's guard re-export used to be an eager `from contexer.guard_engine
-    import ...` at the bottom of the file — a real cycle with guard_engine's own
-    top-level `from contexer import store`, which only resolved when store.py
-    happened to be the module that started loading first. `import
-    contexer.guard_engine` (or `from contexer import guard_engine`) as the very
-    first touch of the package used to raise ImportError: cannot import name
-    'guard_staged' from partially initialized module 'contexer.guard_engine'.
-    A fresh subprocess (pytest has already imported both modules in this
-    process, in the safe order, so an in-process check would prove nothing)
-    with guard_engine imported BEFORE store is the exact previously-broken
-    order; store.py's module `__getattr__` (PEP 562) fixes it by resolving the
-    re-export lazily instead of at store.py's own load time."""
-
-    def test_guard_engine_first_import_order_does_not_raise(self):
-        probe = (
-            "import contexer.guard_engine\n"
-            "import contexer.store\n"
-            "assert contexer.store.guard_staged is contexer.guard_engine.guard_staged\n"
-            "print('OK')\n"
-        )
-        result = subprocess.run([sys.executable, "-c", probe],
-                                 capture_output=True, text=True, timeout=30)
-        assert result.returncode == 0, result.stderr
-        assert result.stdout.strip() == "OK"

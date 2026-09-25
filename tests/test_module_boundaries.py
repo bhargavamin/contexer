@@ -12,8 +12,10 @@ does not hold.
 """
 import ast
 import pathlib
+import subprocess
+import sys
 
-from contexer import candidates, share, store
+from contexer import candidates, guard_engine, share, store
 
 SRC = pathlib.Path(store.__file__).parent
 STORE_PY = SRC / "store.py"
@@ -42,6 +44,59 @@ LEAVES = frozenset({
     "sidecars", "share_status", "evidence", "spool", "candidates", "reconcile", "lifecycle",
     "policy", "policy_api", "review_impact", "working_set",
 })
+
+
+def _imported_owners(tree: ast.AST) -> set[str]:
+    """Names a module uses for a contexer owner: `from contexer import policy`,
+    `import contexer.policy as policy`, or `import contexer.policy`."""
+    owners: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "contexer":
+            owners |= {alias.asname or alias.name for alias in node.names}
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith("contexer."):
+                    owners.add(alias.asname or alias.name)
+    return owners
+
+
+def _called_owner(call: ast.Call) -> tuple[str, str] | None:
+    func = call.func
+    if not isinstance(func, ast.Attribute):
+        return None
+    if isinstance(func.value, ast.Name):
+        return func.value.id, func.attr
+    inner = func.value
+    if isinstance(inner, ast.Attribute) and isinstance(inner.value, ast.Name):
+        return f"{inner.value.id}.{inner.attr}", func.attr
+    return None
+
+
+def _forwards_owner_call(func: ast.FunctionDef, owners: set[str]) -> bool:
+    """True when `func` is only `return owner.same_name(same positional args)`."""
+    if func.decorator_list or func.args.vararg or func.args.kwarg or func.args.kwonlyargs \
+            or func.args.defaults or func.args.kw_defaults:
+        return False
+    params = [arg.arg for arg in (*func.args.posonlyargs, *func.args.args)]
+    body = []
+    for stmt in func.body:
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) \
+                and isinstance(stmt.value.value, str):
+            continue
+        body.append(stmt)
+    if len(body) != 1 or not isinstance(body[0], ast.Return):
+        return False
+    call = body[0].value
+    if not isinstance(call, ast.Call) or call.keywords or len(call.args) != len(params):
+        return False
+    if not all(isinstance(arg, ast.Name) and arg.id == name
+               for arg, name in zip(call.args, params)):
+        return False
+    called = _called_owner(call)
+    if called is None or called[0] not in owners:
+        return False
+    local = func.name[1:] if func.name.startswith("_") else func.name
+    return local == called[1]
 
 
 def _py_files(roots=("contexer",)):
@@ -200,6 +255,26 @@ class TestRuleOneFacadeIsBackCompatOnly:
                      | store._LIFECYCLE_EXPORTS):
             assert getattr(store, name) is not None, name
 
+    def test_guard_exports_are_the_owner_objects(self):
+        names = (
+            "guard_staged", "guard_candidates", "arm_guard", "disarm_guard", "dismiss_guard",
+        )
+        assert store._GUARD_EXPORTS == frozenset(names)
+        for name in names:
+            assert getattr(store, name) is getattr(guard_engine, name)
+
+    def test_guard_engine_imported_before_store_still_resolves(self):
+        probe = (
+            "import contexer.guard_engine\n"
+            "import contexer.store\n"
+            "assert contexer.store.guard_staged is contexer.guard_engine.guard_staged\n"
+            "print('OK')\n"
+        )
+        result = subprocess.run([sys.executable, "-c", probe],
+                                 capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "OK"
+
 
 class TestRuleTwoTwoReadersMakeAnInterface:
     """One module reading a private store name is coupling. Two is an undeclared interface:
@@ -254,6 +329,52 @@ class TestRuleThreeNoLeafReExportsAnotherLeaf:
                     and target.value.id in (owners | LEAVES):
                 offenders.append(f"store.py:{node.lineno} {ast.unparse(node)}")
         assert offenders == [], offenders
+
+    def test_no_package_module_forwards_a_leaf_call_under_its_own_name(self):
+        """Rule 3 covers a `def` whose body only returns the same call on an owner.
+
+        An assignment alias (`_x = leaf.x`) was the shape the store-only check caught.
+        A one-line function with the same name forwards the same way and used to hide
+        in guard_engine. A wrapper that transforms arguments, adds a keyword, or exists
+        as a decorated public tool is a different function and stays out of this check.
+        """
+        offenders = []
+        for path, tree in _py_files(("contexer",)):
+            owners = _imported_owners(tree)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef) and _forwards_owner_call(node, owners):
+                    offenders.append(f"{path.relative_to(REPO)}:{node.lineno} {node.name}")
+        assert offenders == [], offenders
+
+    def test_store_does_not_publish_policy(self):
+        assert not hasattr(store, "policy")
+
+    def test_positional_only_forward_is_an_alias(self):
+        tree = ast.parse(
+            "from contexer import policy\n"
+            "def _source_anchor_hits(anchors, relpaths, /):\n"
+            "    return policy.source_anchor_hits(anchors, relpaths)\n"
+        )
+        func = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef))
+        assert _forwards_owner_call(func, _imported_owners(tree))
+
+    def test_aliased_import_forward_is_an_alias(self):
+        tree = ast.parse(
+            "import contexer.policy as policy\n"
+            "def _source_anchor_hits(anchors, relpaths):\n"
+            "    return policy.source_anchor_hits(anchors, relpaths)\n"
+        )
+        func = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef))
+        assert _forwards_owner_call(func, _imported_owners(tree))
+
+    def test_qualified_import_forward_is_an_alias(self):
+        tree = ast.parse(
+            "import contexer.policy\n"
+            "def _source_anchor_hits(anchors, relpaths):\n"
+            "    return contexer.policy.source_anchor_hits(anchors, relpaths)\n"
+        )
+        func = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef))
+        assert _forwards_owner_call(func, _imported_owners(tree))
 
     def test_no_module_imports_store_with_from_imports(self):
         # Any module that reaches the store must import the MODULE OBJECT, so a value patched on

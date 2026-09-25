@@ -249,42 +249,6 @@ def _pathlike_artifact(artifact: str) -> bool:
                 or _GUARD_MODULE_ARTIFACT_RE.match(artifact))
 
 
-def _artifact_path_match(artifact: str, staged: str) -> bool:
-    """Pure — no I/O. `staged` is assumed already canonical (see _guard_relpath).
-    True iff: exact relpath equality; OR `artifact` is a dotted module that maps
-    onto `staged` ("contexer.store" -> "contexer/store.py" or
-    "contexer/store/__init__.py"); OR `artifact` contains "/" and `staged` ends
-    with "/" + artifact (a multi-segment suffix match at a path boundary, so
-    "za/utils.py" does NOT match artifact "a/utils.py").
-
-    Bare basename matching is forbidden by construction: a slashless artifact
-    that isn't an exact match and isn't a mapping dotted module (e.g. "utils.py"
-    against staged "a/utils.py") falls through to the final `return False` —
-    it never reaches the suffix-match branch, which requires "/" in `artifact`."""
-    if not artifact or not staged:
-        return False
-    if artifact.endswith("/"):
-        return _source_anchor_matches(artifact, staged)
-    if artifact == staged:
-        return True
-    if "/" not in artifact and _GUARD_MODULE_ARTIFACT_RE.match(artifact):
-        as_path = artifact.replace(".", "/")
-        return staged == f"{as_path}.py" or staged == f"{as_path}/__init__.py"
-    if "/" in artifact:
-        return staged.endswith("/" + artifact)
-    return False
-
-
-def _source_anchor_matches(anchor: str, relpath: str) -> bool:
-    """Whether one canonical source anchor governs one canonical file path."""
-    return policy.source_anchor_matches(anchor, relpath)
-
-
-def _source_anchor_hits(anchors, relpaths) -> set[str]:
-    """Canonical queried paths governed by any exact-file or directory-prefix anchor."""
-    return policy.source_anchor_hits(anchors, relpaths)
-
-
 # ── Commit-time guard: Tier-1 advisory engine (Task 2) — pairing, throttle, ──
 # dismissals. Builds on Task 1's plumbing above. The whole engine is READ-ONLY
 # against the decision store (never calls save/save_global) and its public
@@ -457,7 +421,7 @@ def _guard_stamp_advised(repo_path: str, pairs: dict[str, str]) -> None:
 
 def _guard_content_artifacts(content: str) -> list[str]:
     """Path/module-shaped artifacts pulled from decision content, for exact-path
-    pairing against a staged file via _artifact_path_match. Deliberately reuses
+    pairing against a staged file via _guard_artifact_matches. Deliberately reuses
     the same path/module shapes as retrieval.extract_artifacts, via the primitive
     both share (retrieval.raw_path_artifacts), but WITHOUT that function's word-
     segmentation post-processing step: extract_artifacts is built for BM25/topic
@@ -485,21 +449,18 @@ class _GuardBudgetExceeded(Exception):
 def _guard_artifact_matches(artifact: str, staged_set: set[str],
                              staged_by_base: dict[str, list[str]]) -> list[str]:
     """Every staged path `artifact` pairs with, resolved by LOOKUP rather than a
-    scan over the whole staged list — semantically identical to filtering
-    staged paths through _artifact_path_match, but O(1) for the two cases that
-    demand exact equality:
+    scan over the whole staged list, O(1) for the two cases that demand exact
+    equality:
 
       * exact relpath equality -> one set membership test;
       * a dotted module -> its two possible spellings, two membership tests.
 
-    Only the "/"-suffix case genuinely needs a scan (any staged path may END
-    with the artifact), and even there a suffix match at a path boundary
-    REQUIRES the last segment to be equal — so the scan runs over just the
-    staged paths sharing the artifact's basename, never the full list. The
-    endswith test is still applied, so the semantics are exactly
-    _artifact_path_match's ("za/utils.py" still doesn't match "a/utils.py")."""
-    if artifact.endswith("/"):
-        return [p for p in staged_set if p.startswith(artifact)]
+    Only a multi-segment artifact genuinely needs a scan (any staged path may END
+    with it), and a suffix match at a path boundary REQUIRES the last segment to
+    be equal — so the scan runs over just the staged paths sharing the artifact's
+    basename, never the full list. The endswith test is still applied
+    ("za/utils.py" still doesn't match "a/utils.py"). A trailing slash is not
+    treated as a directory prefix."""
     if "/" not in artifact:
         if artifact in staged_set:
             return [artifact]
@@ -527,7 +488,7 @@ def _guard_pairs(repo_path: str, staged: list[str], decisions: list[dict] | None
     staged file is one of the decision's `source_files` (repo-store entries
     only — global entries never carry source_files and pair via artifact match
     only), or a path/module-shaped artifact extracted from the decision's
-    content matches the staged path (_artifact_path_match). No signal -> no
+    content matches the staged path (_guard_artifact_matches). No signal -> no
     candidate at all (not even a rejected one). When a signal exists, the
     decision must ALSO pass _guard_trusted or the candidate is emitted=False
     with reason="rejected: untrusted provenance" — trust is checked AFTER
@@ -575,7 +536,7 @@ def _guard_pairs(repo_path: str, staged: list[str], decisions: list[dict] | None
             # relpath -> reason, source_files winning over artifacts (as before),
             # and the FIRST matching artifact winning among artifacts.
             matched: dict[str, str] = {p: "source_files match"
-                                       for p in _source_anchor_hits(source_files, staged_set)}
+                                       for p in policy.source_anchor_hits(source_files, staged_set)}
             for artifact in _guard_content_artifacts(content):
                 reason = _guard_artifact_reason(artifact)
                 for relpath in _guard_artifact_matches(artifact, staged_set, staged_by_base):
@@ -680,7 +641,7 @@ def _artifact_path_spellings(artifact: str) -> list[str]:
     lowercase-dotted-segments shape, so treating module-mapping as exclusive of
     the literal spelling would mistake it for a "config/yaml.py" module and
     never try the real file. When the artifact is ALSO dotted-module-shaped
-    (mirrors _artifact_path_match's / _guard_artifact_matches's module-mapping),
+    (mirrors _guard_artifact_matches's module-mapping),
     its two possible file spellings are appended as further guesses. The caller's
     existence check is what actually decides which spelling (if any) is real."""
     candidates = [artifact]
@@ -1213,8 +1174,8 @@ def decisions_for_files(repo_path: str, files: list[str],
     `source_files` (repo-store entries only — global entries never carry
     `source_files` and pair via artifact match only), OR a path/module-shaped
     artifact extracted from its content (`_guard_content_artifacts`) matching one
-    of the given files (`_artifact_path_match`, via the same O(1)
-    `_guard_artifact_matches` lookup `_guard_pairs` uses). No signal -> the
+    of the given files (`_guard_artifact_matches`, the same lookup `_guard_pairs`
+    uses). No signal -> the
     decision is simply absent from the result, not emitted-false — there is no
     rejected-candidate concept here, only hits.
 
@@ -1275,7 +1236,7 @@ def decisions_for_files(repo_path: str, files: list[str],
                 # relpath -> reason, source_files winning over artifacts — same
                 # setdefault order _guard_pairs uses for its per-file matched dict.
                 matched: dict[str, str] = {p: "source_files match"
-                                           for p in _source_anchor_hits(source_files, canon_set)}
+                                           for p in policy.source_anchor_hits(source_files, canon_set)}
                 for artifact in _guard_content_artifacts(content):
                     reason = _guard_artifact_reason(artifact)
                     for relpath in _guard_artifact_matches(artifact, canon_set, canon_by_base):
