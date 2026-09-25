@@ -256,7 +256,11 @@ class TestRuleOneFacadeIsBackCompatOnly:
             assert getattr(store, name) is not None, name
 
     def test_guard_exports_are_the_owner_objects(self):
-        for name in store._GUARD_EXPORTS:
+        names = (
+            "guard_staged", "guard_candidates", "arm_guard", "disarm_guard", "dismiss_guard",
+        )
+        assert store._GUARD_EXPORTS == frozenset(names)
+        for name in names:
             assert getattr(store, name) is getattr(guard_engine, name)
 
     def test_guard_engine_imported_before_store_still_resolves(self):
