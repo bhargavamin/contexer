@@ -44,12 +44,38 @@ LEAVES = frozenset({
 })
 
 
+def _imported_owners(tree: ast.AST) -> set[str]:
+    """Names a module uses for a contexer owner: `from contexer import policy`,
+    `import contexer.policy as policy`, or `import contexer.policy`."""
+    owners: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "contexer":
+            owners |= {alias.asname or alias.name for alias in node.names}
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith("contexer."):
+                    owners.add(alias.asname or alias.name)
+    return owners
+
+
+def _called_owner(call: ast.Call) -> tuple[str, str] | None:
+    func = call.func
+    if not isinstance(func, ast.Attribute):
+        return None
+    if isinstance(func.value, ast.Name):
+        return func.value.id, func.attr
+    inner = func.value
+    if isinstance(inner, ast.Attribute) and isinstance(inner.value, ast.Name):
+        return f"{inner.value.id}.{inner.attr}", func.attr
+    return None
+
+
 def _forwards_owner_call(func: ast.FunctionDef, owners: set[str]) -> bool:
     """True when `func` is only `return owner.same_name(same positional args)`."""
     if func.decorator_list or func.args.vararg or func.args.kwarg or func.args.kwonlyargs \
             or func.args.defaults or func.args.kw_defaults:
         return False
-    params = [arg.arg for arg in func.args.args]
+    params = [arg.arg for arg in (*func.args.posonlyargs, *func.args.args)]
     body = []
     for stmt in func.body:
         if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) \
@@ -64,13 +90,11 @@ def _forwards_owner_call(func: ast.FunctionDef, owners: set[str]) -> bool:
     if not all(isinstance(arg, ast.Name) and arg.id == name
                for arg, name in zip(call.args, params)):
         return False
-    target = call.func
-    if not isinstance(target, ast.Attribute) or not isinstance(target.value, ast.Name):
-        return False
-    if target.value.id not in owners:
+    called = _called_owner(call)
+    if called is None or called[0] not in owners:
         return False
     local = func.name[1:] if func.name.startswith("_") else func.name
-    return local == target.attr
+    return local == called[1]
 
 
 def _py_files(roots=("contexer",)):
@@ -294,14 +318,41 @@ class TestRuleThreeNoLeafReExportsAnotherLeaf:
         """
         offenders = []
         for path, tree in _py_files(("contexer",)):
-            owners = set()
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ImportFrom) and node.module == "contexer":
-                    owners |= {alias.asname or alias.name for alias in node.names}
+            owners = _imported_owners(tree)
             for node in ast.walk(tree):
                 if isinstance(node, ast.FunctionDef) and _forwards_owner_call(node, owners):
                     offenders.append(f"{path.relative_to(REPO)}:{node.lineno} {node.name}")
         assert offenders == [], offenders
+
+    def test_store_does_not_publish_policy(self):
+        assert not hasattr(store, "policy")
+
+    def test_positional_only_forward_is_an_alias(self):
+        tree = ast.parse(
+            "from contexer import policy\n"
+            "def _source_anchor_hits(anchors, relpaths, /):\n"
+            "    return policy.source_anchor_hits(anchors, relpaths)\n"
+        )
+        func = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef))
+        assert _forwards_owner_call(func, _imported_owners(tree))
+
+    def test_aliased_import_forward_is_an_alias(self):
+        tree = ast.parse(
+            "import contexer.policy as policy\n"
+            "def _source_anchor_hits(anchors, relpaths):\n"
+            "    return policy.source_anchor_hits(anchors, relpaths)\n"
+        )
+        func = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef))
+        assert _forwards_owner_call(func, _imported_owners(tree))
+
+    def test_qualified_import_forward_is_an_alias(self):
+        tree = ast.parse(
+            "import contexer.policy\n"
+            "def _source_anchor_hits(anchors, relpaths):\n"
+            "    return contexer.policy.source_anchor_hits(anchors, relpaths)\n"
+        )
+        func = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef))
+        assert _forwards_owner_call(func, _imported_owners(tree))
 
     def test_no_module_imports_store_with_from_imports(self):
         # Any module that reaches the store must import the MODULE OBJECT, so a value patched on

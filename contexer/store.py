@@ -14,7 +14,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from contexer import (  # pure stdlib leaves (no cycles)
-    policy,
     prompt_capture,
     reconciliation,
     sidecars,
@@ -6171,7 +6170,7 @@ def _index_file_lookup(repo_path: str, index: dict, file_artifacts: list[str]) -
     decisions (exactly like the rest of the BM25 ladder) - `_prompt_file_hits` layers a small
     LIVE scan over the global store on top, mirroring how the global store is always a
     separate, smaller-scale fallback path everywhere else in this router too."""
-    from contexer import guard_engine
+    from contexer import guard_engine, policy
     canon = [p for p in (guard_engine._guard_relpath(repo_path, f) for f in file_artifacts)
              if p and not guard_engine._escapes_repo(p)]
     if not canon:
