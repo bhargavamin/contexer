@@ -664,21 +664,29 @@ def test_update_context_refuses_a_task_scoped_operational_instruction(tmp_repo, 
     out = server.update_context(content=prompt, subtype="constraint")
     assert out.startswith("Not stored.")
     assert store.load(tmp_repo)["entries"] == []
+    for local in ("For this task, use staging.", "In this session, work in the sandbox."):
+        assert server.update_context(content=local, subtype="constraint").startswith("Not stored.")
+    assert store.load(tmp_repo)["entries"] == []
+    fact = server.update_context(content="The cache warmed for this task.", subtype="architecture")
+    assert not fact.startswith("Not stored.")
+    runner = server.update_context(
+        content="For the task runner, always use the queue protocol.",
+        subtype="constraint",
+    )
+    assert not runner.startswith("Not stored.")
     mixed = (
         "From now on, never change the live Kubernetes environment. "
         "For this task, work only with staging."
     )
-    assert server.update_context(content=mixed, subtype="constraint").startswith("Not stored.")
-    assert store.load(tmp_repo)["entries"] == []
-    stored = server.update_context(
-        content="From now on, never change the live Kubernetes environment.",
-        subtype="constraint",
-    )
-    assert not stored.startswith("Not stored.")
+    mixed_out = server.update_context(content=mixed, subtype="constraint")
+    assert not mixed_out.startswith("Not stored.")
     saved = store.load(tmp_repo)["entries"]
-    assert len(saved) == 1
-    assert "staging" not in saved[0]["content"].lower()
-    assert "never change the live" in saved[0]["content"].lower()
+    bodies = [entry["content"].lower() for entry in saved]
+    assert any("cache warmed" in body for body in bodies)
+    assert any("task runner" in body and "queue protocol" in body for body in bodies)
+    lasting = [body for body in bodies if "never change the live" in body]
+    assert len(lasting) == 1
+    assert "staging" not in lasting[0]
 
 
 def test_capture_guidance_names_the_local_scopes_prompt_capture_ignores():

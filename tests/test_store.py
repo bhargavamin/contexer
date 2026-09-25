@@ -892,6 +892,39 @@ class TestIsPrescriptiveConstraint:
         assert len(saved) == 1
         assert "staging" not in saved[0]["content"].lower()
 
+    @pytest.mark.parametrize("prompt", [
+        "For this task, use staging.",
+        "In this session, work in the sandbox.",
+    ])
+    def test_local_operation_without_a_constraint_word_is_not_stored(self, tmp_repo, prompt):
+        assert store.capture_user_constraint(tmp_repo, prompt, "s1") == (None, None, None)
+        assert store.load(tmp_repo)["entries"] == []
+
+    def test_component_name_is_not_local_scope(self, tmp_repo):
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo, "Never log passwords in the session handler.", "s1")
+        assert status == "approved"
+        assert entry_id
+        assert "session handler" in content.lower()
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo, "For the task runner, always use the queue protocol.", "s1")
+        assert status == "approved"
+        assert entry_id
+        assert "task runner" in content.lower()
+        assert "queue protocol" in content.lower()
+
+    def test_and_keeps_the_lasting_rule_beside_a_local_action(self, tmp_repo):
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo,
+            "While you do this, run the tests and from now on never commit credentials.",
+            "s1",
+        )
+        assert status == "approved"
+        assert entry_id
+        assert "never commit credentials" in content.lower()
+        assert "run the tests" not in content.lower()
+        assert "while you do this" not in content.lower()
+
     def test_ensure_you_with_object_quantifier_not_detected(self):
         # Greptile #216 P1: "any"/"all" quantify WHAT to act on, not HOW OFTEN — they
         # carry no recurrence, so they must not satisfy the durability requirement.

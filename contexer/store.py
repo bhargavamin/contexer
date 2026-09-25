@@ -1769,12 +1769,16 @@ _DIRECTIVE_WRAPPER_ONLY = re.compile(
 # remove task-bounded clauses before the ordinary directive detector assigns human authority.
 # This stays deliberately structural: guessing whether an arbitrary sentence is "important"
 # would be a second semantic model in a prompt hook.
+# The scope noun ends the adjunct. A following word is part of a component name
+# ("task runner", "session handler"), not a bound on this run.
+_SCOPE_ADJUNCT_END = r"(?!\s+[A-Za-z])"
 _TASK_SCOPE_MARKER = re.compile(
     r"\b(?:for|during|in)\s+(?:this|the)\s+"
     r"(?:run|pass|task|review|test|turn|request|bootstrap|session)\b"
-    r"|\b(?:this\s+time|right\s+now)\b"
-    r"|\bthe\s+task\s+I\s+gave\s+you\b"
-    r"|\bwhile\s+you\s+do\s+this\b",
+    + _SCOPE_ADJUNCT_END +
+    r"|\b(?:this\s+time|right\s+now)\b" + _SCOPE_ADJUNCT_END +
+    r"|\bthe\s+task\s+I\s+gave\s+you\b" + _SCOPE_ADJUNCT_END +
+    r"|\bwhile\s+you\s+do\s+this\b" + _SCOPE_ADJUNCT_END,
     re.IGNORECASE,
 )
 _DURABLE_DIRECTIVE = re.compile(
@@ -1793,6 +1797,13 @@ _TASK_IMPERATIVE = re.compile(
     r"^\s*(?:please\s+)?(?:re-?run|run|check|inspect|review|test|fix|implement|show|"
     r"report|open|install|create|change|update|edit|do\s+not|don['\u2019]t|ensure|"
     r"make\s+sure|always|never|from\s+now\s+on|going\s+forward)\b",
+    re.IGNORECASE,
+)
+# Clause-initial operations that are instructions even without always/never/do not.
+# "For this task, use staging" is local; "The cache warmed for this task" is not.
+_LOCAL_OPERATION = re.compile(
+    r"(?:^|[,:]\s*)(?:please\s+)?(?:use|work|run|stay|keep|stick|operate|deploy|"
+    r"change|edit|modify|touch|write|switch|limit|restrict)\b",
     re.IGNORECASE,
 )
 
@@ -1819,9 +1830,24 @@ def _directive_policy_text(text: str) -> str:
     if any(_TASK_SCOPE_MARKER.search(part) for part in fragments):
         # Explicit task scope governs sibling actions too. "Always" alone can describe
         # how to perform this run; only an independently declared lasting-policy clause
-        # escapes that scope.
-        durable = [part for part in fragments if _EXPLICIT_DURABLE_SCOPE.search(part)
-                   and not _TASK_SCOPE_MARKER.search(part)]
+        # escapes that scope. A lasting clause joined by a bare "and" is its own piece:
+        # the sentence split does not break on "and" without a comma.
+        durable = []
+        for part in fragments:
+            pieces = [part]
+            if _TASK_SCOPE_MARKER.search(part) and re.search(r"\s+and\s+", part, re.IGNORECASE):
+                pieces = [piece.strip(" ,") for piece in re.split(r"\s+and\s+", part, flags=re.IGNORECASE)
+                          if piece.strip(" ,")]
+            for piece in pieces:
+                if _EXPLICIT_DURABLE_SCOPE.search(piece) and not _TASK_SCOPE_MARKER.search(piece):
+                    durable.append(piece)
+                    continue
+                if not (_TASK_SCOPE_MARKER.search(piece) and _EXPLICIT_DURABLE_SCOPE.search(piece)):
+                    continue
+                stripped = re.sub(r"\s{2,}", " ", _TASK_SCOPE_MARKER.sub(" ", piece)).strip(" ,")
+                if (stripped and _EXPLICIT_DURABLE_SCOPE.search(stripped)
+                        and not _TASK_SCOPE_MARKER.search(stripped)):
+                    durable.append(stripped)
         return ". ".join(durable)
     task_actions = sum(bool(_TASK_IMPERATIVE.search(part)) for part in fragments)
     if task_actions < 2:
@@ -1831,14 +1857,25 @@ def _directive_policy_text(text: str) -> str:
     return ". ".join(durable)
 
 
-def explicitly_local_directive(text: str) -> bool:
-    """True when text is a directive that also names this task or session."""
+def local_instruction_remainder(text: str) -> str | None:
+    """What to store when text names this task or session.
+
+    None means this is not an operational local instruction, so the caller stores
+    the original text. An empty string means the instruction is entirely local and
+    must not be stored. Any other string is the lasting rule with the local grant
+    removed, the same text prompt capture would keep.
+    """
     candidate = _directive_candidate_text(text).strip()
     if not candidate or len(candidate) > _MAX_DIRECTIVE_LEN:
-        return False
+        return None
     if not _TASK_SCOPE_MARKER.search(candidate):
-        return False
-    return bool(_CONSTRAINT_TRIGGER.search(candidate))
+        return None
+    kept = _directive_policy_text(candidate).strip()
+    if kept:
+        return _sanitize_directive(kept)
+    if _CONSTRAINT_TRIGGER.search(candidate) or _LOCAL_OPERATION.search(candidate):
+        return ""
+    return None
 
 
 # Deictic referents point at an object only this conversation can resolve - a strong
