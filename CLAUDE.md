@@ -201,7 +201,8 @@ backing up existing content and rolling back failed writes. Its independent `pyt
 keeps standalone tests separate from package coverage; CI runs them on macOS and Linux.
 `tests/test_effectiveness_install.py` checks coexistence with normal adapter installation.
 
-`stop_hook.py` combines Git discovery and host transcript observations to create an immutable,
+`stop_hook.py` prefers host-provided repositories and uses its launch directory only when
+those paths yield no repository. It combines Git discovery and host transcript observations to create an immutable,
 digest-checked pending segment under `~/.contexer-usage/`. `transcript.py` parses host formats;
 opaque wrappers and missing transcript evidence make exhaustive counts unknown. Bounded Git
 work, session locks, transcript digests and carried evidence prevent failed scans from silently
