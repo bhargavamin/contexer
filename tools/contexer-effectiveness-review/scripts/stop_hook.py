@@ -20,6 +20,7 @@ import re
 import subprocess
 import sys
 import time
+import tempfile
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -31,7 +32,7 @@ import privacy  # noqa: E402
 ROOT = Path(os.environ.get("CONTEXER_USAGE_HOME") or Path.home() / ".contexer-usage")
 SKILL = Path(__file__).resolve().parent.parent / "SKILL.md"
 LOGGER = Path(__file__).resolve().parent / "log_usage.py"
-OBSERVER_VERSION = "observe-v4"
+OBSERVER_VERSION = "observe-v5"
 GIT_TIMEOUT = float(os.environ.get("CONTEXER_USAGE_GIT_TIMEOUT") or 4)
 _GIT_DEADLINE = None
 NO_TRANSCRIPT_LOOKBACK = 900
@@ -146,6 +147,7 @@ def observe(events, host):
     counts = {c: 0 for c in (*transcript.CATEGORIES, "discovery", "other")}
     calls, contexer_ids_by_call = [], {}
     captured_ids = set()
+    surface_ids = {name: set() for name in ("get_context", "review_pending", "other_tool")}
     first_contexer_at, exploration = None, 0
     git_writes = pr_creates = 0
     result_ids, autofetch_ids, hook_ids, autofetch_blocks = set(), set(), set(), 0
@@ -171,7 +173,12 @@ def observe(events, host):
             if "create_pull_request" in name.lower():
                 pr_creates += 1
         elif ev[0] == "result" and ev[1] in contexer_ids_by_call:
-            result_ids.update(decision_ids(ev[2]))
+            ids = decision_ids(ev[2])
+            result_ids.update(ids)
+            tool = contexer_ids_by_call[ev[1]]
+            surface = "get_context" if tool in ("get_context", "get_global_context") else (
+                "review_pending" if tool == "review_pending" else "other_tool")
+            surface_ids[surface].update(ids)
             if contexer_ids_by_call[ev[1]] in ("update_context", "update_global_context"):
                 captured_ids.update(decision_ids(ev[2]))
         elif ev[0] == "hook_context":
@@ -196,6 +203,8 @@ def observe(events, host):
         "pr_create_commands": pr_creates,
         "tool_results_visible": results,
         "contexer_result_ids": sorted(result_ids) if results and not opaque else None,
+        "contexer_result_ids_by_surface": ({k: sorted(v) for k, v in surface_ids.items()}
+                                           if results and not opaque else None),
         "autofetch_visible": hooks,
         "autofetch_blocks": autofetch_blocks if hooks else None,
         "autofetch_ids": sorted(autofetch_ids) if hooks else None,
@@ -243,8 +252,8 @@ def state_path(session):
 @contextmanager
 def session_lock(session):
     path = ROOT / "state" / f"{_safe(session)}.lock"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a") as f:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with privacy.open_append(path) as f:
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
         yield
 
@@ -292,10 +301,17 @@ def valid_state(state):
 
 
 def write_json(path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
-    os.replace(tmp, path)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            json.dump(data, stream, indent=2, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def digest(data):
@@ -305,10 +321,21 @@ def digest(data):
 def prune_pending(state):
     now = time.time()
     for p in (ROOT / "pending").glob("*.json"):
-        if now - p.stat().st_mtime > PENDING_TTL:
-            p.unlink(missing_ok=True)
-    state["digests"] = {t: d for t, d in state.get("digests", {}).items()
-                        if (ROOT / "pending" / f"{t}.json").exists()}
+        try:
+            if now - p.stat().st_mtime > PENDING_TTL:
+                p.unlink(missing_ok=True)
+        except OSError:
+            continue  # Another logger may consume a pending file while pruning scans it.
+    retained = {}
+    for token, digest in state.get("digests", {}).items():
+        try:
+            (ROOT / "pending" / f"{token}.json").stat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            pass  # Unreadable is not proof that an observation was consumed.
+        retained[token] = digest
+    state["digests"] = retained
 
 
 # ── review ───────────────────────────────────────────────────────────────────────────
@@ -320,7 +347,7 @@ def build_pending(state, host, session, model, transcript_path, commits_by_repo,
     available = bool(transcript_path and Path(transcript_path).is_file())
     observed['transcript_available'] = available
     if not available:
-        for key in ('contexer_call_count', 'contexer_result_ids', 'autofetch_blocks',
+        for key in ('contexer_call_count', 'contexer_result_ids', 'contexer_result_ids_by_surface', 'autofetch_blocks',
                     'autofetch_ids', 'injected_ids', 'captured_ids', 'git_write_commands',
                     'pr_create_commands'):
             observed[key] = None
@@ -434,7 +461,10 @@ def run_hook(host, data):
             return None
         finally:
             _GIT_DEADLINE = None
-            prune_pending(state)
+            try:
+                prune_pending(state)
+            except OSError as exc:
+                log_error(host, exc)
             write_json(path, state)
 
 
@@ -535,7 +565,7 @@ def run_manual(args):
 def log_error(host, exc):
     try:
         ROOT.mkdir(parents=True, exist_ok=True)
-        with open(ROOT / "hook-errors.log", "a") as f:
+        with privacy.open_append(ROOT / "hook-errors.log") as f:
             f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {host} {exc!r}\n")
     except OSError:
         pass

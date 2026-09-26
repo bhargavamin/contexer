@@ -92,7 +92,7 @@ def test_session_start_ids_are_checked_too(home, claude_pending):
     assert check(j, env, claude_pending).returncode == 2
     j["contexer_items"][0].update(surfaced_by="other_tool")
     assert check(j, env, claude_pending).returncode == 2
-    j["contexer_items"][0].update(id="11112222")
+    j["contexer_items"][0].update(id="11112222", surfaced_by="get_context")
     assert check(j, env, claude_pending).returncode == 0
 
 

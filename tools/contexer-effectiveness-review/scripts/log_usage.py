@@ -9,6 +9,7 @@ observed facts, or the pending file was edited after the hook wrote it.
 import argparse
 import fcntl
 import json
+import os
 import re
 import subprocess
 import sys
@@ -141,6 +142,13 @@ def _check_ids(j, errs):
                         "decision(s)")
 
 
+def surface_ids(observed, method):
+    if method in ("get_context", "review_pending", "other_tool"):
+        by_surface = observed.get("contexer_result_ids_by_surface")
+        return by_surface.get(method) if isinstance(by_surface, dict) else None
+    return observed.get(SURFACE_SOURCES.get(method, ""))
+
+
 def _check_consistency(j, observed, errs):
     items = [i for i in j.get("contexer_items") or [] if isinstance(i, dict)]
     captured = {c.get("id") for c in j.get("captures") or [] if isinstance(c, dict)}
@@ -176,13 +184,14 @@ def _check_consistency(j, observed, errs):
         for i, item in enumerate(items):
             if item.get("created_this_session"):
                 continue
-            source = observed.get(SURFACE_SOURCES.get(item.get("surfaced_by"), ""))
+            source = surface_ids(observed, item.get("surfaced_by"))
             if source is not None and item.get("id") not in source:
                 errs.append(f"contexer_items[{i}] ({item.get('id')}) was not in any "
                             f"{item.get('surfaced_by')} output this segment")
         expected_features = {c["tool"] for c in observed.get("contexer_calls", [])}
-        if "bootstrap_context" in expected_features:
-            expected_features.add("bootstrap")
+        aliases = {"bootstrap_context": "bootstrap", "get_global_context": "get_context",
+                   "update_global_context": "update_context"}
+        expected_features = {aliases.get(tool, tool) for tool in expected_features}
         expected_features &= set(FEATURES)
         if observed.get("autofetch_blocks"):
             expected_features.add("autofetch")
@@ -194,7 +203,7 @@ def _check_consistency(j, observed, errs):
 def ids_verified(judgment, observed):
     """True when every surfaced id could be checked against what the transcript showed."""
     items = [i for i in judgment.get("contexer_items", []) if not i.get("created_this_session")]
-    return all(observed.get(SURFACE_SOURCES.get(i.get("surfaced_by"), "")) is not None
+    return all(surface_ids(observed, i.get("surfaced_by")) is not None
                for i in items)
 
 
@@ -326,8 +335,8 @@ def record_key(pending):
 
 
 def append(path, record):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a+", encoding="utf-8") as f:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with privacy.open_append(path) as f:
         fcntl.flock(f, fcntl.LOCK_EX)
         f.seek(0)
         last_line = ''
@@ -343,6 +352,13 @@ def append(path, record):
         if last_line and not last_line.endswith('\n'):
             f.write('\n')
         f.write(json.dumps(record, sort_keys=True) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def record_paths(repo_key=None):
+    return sorted(path for path in (ROOT / "records").glob("*.jsonl")
+                  if repo_key is None or path.name == f"{repo_key}.jsonl")
 
 
 def main():

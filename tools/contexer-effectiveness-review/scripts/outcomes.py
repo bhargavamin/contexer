@@ -8,13 +8,15 @@ Usage: outcomes.py [--repo-key KEY]
 import argparse
 import fcntl
 import json
+import os
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from log_usage import ROOT, pr_lookup  # noqa: E402
+from log_usage import ROOT, pr_lookup, record_paths  # noqa: E402
+from privacy import open_append  # noqa: E402
 
 OUTCOMES = ROOT / "outcomes.jsonl"
 _FETCHED = set()
@@ -34,7 +36,7 @@ def checks_conclusion(rollup):
     states = {str(c.get("conclusion") or c.get("state") or "").upper() for c in rollup or []}
     if not states:
         return "none"
-    if states & {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"}:
+    if states & {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STALE", "STARTUP_FAILURE"}:
         return "failure"
     if states <= {"SUCCESS", "NEUTRAL", "SKIPPED"}:
         return "success"
@@ -119,8 +121,8 @@ def latest_rows():
 
 
 def append_changed(row):
-    OUTCOMES.parent.mkdir(parents=True, exist_ok=True)
-    with open(OUTCOMES, 'a+', encoding='utf-8') as stream:
+    OUTCOMES.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with open_append(OUTCOMES) as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
         stream.seek(0)
         prior, last_line = {}, ''
@@ -139,6 +141,8 @@ def append_changed(row):
             stream.write('\n')
         saved = dict(row, checked_at=time.strftime('%Y-%m-%dT%H:%M:%S%z'))
         stream.write(json.dumps(saved, sort_keys=True) + '\n')
+        stream.flush()
+        os.fsync(stream.fileno())
         return True
 
 
@@ -148,7 +152,7 @@ def main():
     args = parser.parse_args()
     checked = changed = 0
     seen = set()
-    for path in sorted((ROOT / "records").glob(f"{args.repo_key or '*'}.jsonl")):
+    for path in record_paths(args.repo_key):
         for line in path.read_text().splitlines():
             try:
                 rec = json.loads(line)
