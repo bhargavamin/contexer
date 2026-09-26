@@ -1238,7 +1238,10 @@ def _update_needs_approval(subtype: str, created_by: str) -> bool:
 _DIRECTIVE_OPERATION_VERBS = (
     r"use|work|run|stay|keep|stick|operate|deploy|change|edit|modify|touch|write|"
     r"switch|limit|restrict|encrypt|rotate|disable|enable|delete|remove|"
-    r"check|inspect|review|test|fix|implement|show|report|open|install|create|update"
+    r"check|inspect|review|test|fix|implement|show|report|open|install|create|update|"
+    r"publish|upload|download|build|release|ship|commit|push|pull|merge|rebase|tag|"
+    r"approve|grant|allow|authorize|execute|apply|restart|start|stop|rerun|rebuild|"
+    r"revert|reset|sync|migrate|provision|destroy|scale|configure|validate|verify"
 )
 _CONSTRAINT_TRIGGER = re.compile(
     r"\b(?:"
@@ -1781,7 +1784,8 @@ _DIRECTIVE_WRAPPER_ONLY = re.compile(
 # A different following word is a component name ("task runner", "session handler").
 _SCOPE_FOLLOWER = (
     rf"{_DIRECTIVE_OPERATION_VERBS}|never|always|do|please|ensure|make|from|avoid|"
-    r"stop|must|should|and|but|permanently|you|we"
+    r"stop|must|should|and|but|permanently|you|we|when|while|if|unless|until|"
+    r"before|after|because|as|that|which|where|with|without"
 )
 _SCOPE_MODIFIER = r"(?:\s+only\b|\s+at\s+hand\b)?"
 _SCOPE_ADJUNCT_END = rf"(?!\s+(?!(?:{_SCOPE_FOLLOWER})\b)[A-Za-z])"
@@ -1908,7 +1912,8 @@ def _independent_lasting_clauses(part: str) -> list[str]:
         # tests for this task"). Find the start of that group, preserving noun
         # lists and explicitly durable siblings before it. Cutting at either the
         # first or last conjunction loses rules or keeps temporary authority.
-        splits = list(re.finditer(r"\s+(?:and|but)\s+", before, flags=re.IGNORECASE))
+        splits = list(re.finditer(r",\s*(?:(?:and|but)\s+)?|\s+(?:and|but)\s+",
+                                 before, flags=re.IGNORECASE))
         for index, split in enumerate(splits):
             end = splits[index + 1].start() if index + 1 < len(splits) else len(before)
             piece = before[split.end():end].strip(" ,")
