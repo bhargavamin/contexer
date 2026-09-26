@@ -2899,6 +2899,28 @@
     }
   }
 
+  // The decision pane and the lists scroll inside themselves. A poll throws
+  // the view away and builds a new one, which resets those panes to the top.
+  // Read them after the fetch returns and put the same offsets on the new nodes.
+  const VIEW_SCROLLERS = ".detail, .list-scroll";
+
+  function captureViewScroll() {
+    const root = document.scrollingElement;
+    return {
+      doc: root ? root.scrollTop : 0,
+      panes: Array.prototype.map.call(viewEl.querySelectorAll(VIEW_SCROLLERS), (el) => el.scrollTop),
+    };
+  }
+
+  function restoreViewScroll(snap) {
+    if (!snap) return;
+    const root = document.scrollingElement;
+    if (root) root.scrollTop = snap.doc;
+    const panes = viewEl.querySelectorAll(VIEW_SCROLLERS);
+    const saved = snap.panes || [];
+    for (let i = 0; i < panes.length && i < saved.length; i++) panes[i].scrollTop = saved[i];
+  }
+
   async function render(opts) {
     const o = opts || {};
     const seq = ++renderSeq;
@@ -2938,7 +2960,6 @@
     if (route.name !== "decisions") state.edit = null;
 
     const focus = captureFocus();
-    const scroll = document.scrollingElement ? document.scrollingElement.scrollTop : 0;
     let node;
     try {
       if (route.name === "dashboard") node = await viewDashboard(route.slug);
@@ -2963,9 +2984,10 @@
       ]);
     }
     if (seq !== renderSeq) return; // a newer render won
+    const scroll = o.poll ? captureViewScroll() : null;
     clear(viewEl);
     viewEl.appendChild(node);
-    if (document.scrollingElement && o.poll) document.scrollingElement.scrollTop = scroll;
+    if (scroll) restoreViewScroll(scroll);
     restoreFocus(focus);
     paintSidebar();
   }

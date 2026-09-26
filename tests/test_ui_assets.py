@@ -492,6 +492,39 @@ def test_render_dispatches_the_sessions_route_to_view_sessions(script):
     ), 'render() must dispatch route.name === "sessions" to viewSessions(route.slug, route.id):\n' + body[:800]
 
 
+def test_a_poll_rebuild_keeps_the_decision_detail_scroll(script):
+    """The decision pane scrolls inside `.detail`, and the lists inside `.list-scroll`.
+
+    A poll throws the view away and builds a new one. Restoring only
+    `document.scrollingElement` leaves that pane at the top, so reading a
+    decision jumps back to the start on every refresh. The positions have to
+    be read after the view fetch returns — a read taken before the await
+    throws away whatever the reader scrolled while the request was in flight.
+    """
+    css = STYLES.read_text()
+    detail_at = css.index(".detail {")
+    assert "overflow-y: auto" in css[detail_at:detail_at + 400]
+    assert 'const VIEW_SCROLLERS = ".detail, .list-scroll"' in script
+
+    capture = _code(_function_body(script, "captureViewScroll"))
+    restore = _code(_function_body(script, "restoreViewScroll"))
+    assert "querySelectorAll(VIEW_SCROLLERS)" in capture
+    assert "scrollTop" in capture
+    assert "querySelectorAll(VIEW_SCROLLERS)" in restore
+    assert "scrollTop" in restore
+
+    body = _code(_function_body(script, "render"))
+    clear_at = body.index("clear(viewEl)")
+    append_at = body.index("appendChild(node)")
+    last_await = body.rfind("await ", 0, clear_at)
+    capture_at = body.rfind("captureViewScroll()", 0, clear_at)
+    assert last_await != -1
+    assert capture_at > last_await, (
+        "detail scroll must be read after the view fetch and before the DOM swap:\n" + body
+    )
+    assert body.find("restoreViewScroll(", append_at) > append_at
+
+
 def test_capture_session_row_links_with_the_full_session_id_not_the_short_label(script):
     """Interface decision carried from the Task 1 review (binding): a row's `short_id` is not
     unique on prefix collisions, so every navigation link must be built from the full
