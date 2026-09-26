@@ -52,7 +52,11 @@ _INSTRUCTIONS = (
     "just the conclusion, and always pass a concise, one-line, imperative title (<= 100 chars) "
     "summarizing the decision - e.g. 'Use Postgres for decision store' - omit it only if you truly "
     "can't summarize better than the store's own derivation from content. The server silently filters "
-    "duplicates, so err on the side of calling it.\n"
+    "duplicates, so err on the side of calling it. Do not call it for a task- or session-local "
+    "operational instruction (for this task, the task I gave you, in this session, while you do "
+    "this), including one that only says to use or work somewhere. Prompt capture ignores those, "
+    "and update_context refuses them. A lasting rule in the same text is saved without the local "
+    "instruction. A task runner or session handler is a component, not local scope.\n"
     "MATURITY - store observations and settled or user-ratified decisions freely, but keep your OWN "
     "not-yet-approved proposals provisional (created_by=ai records them as 'suggested', not "
     "authoritative) instead of writing them as fact. A decision from an approved-but-unimplemented "
@@ -128,6 +132,12 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
     if created_by not in _UPDATE_CONTEXT_SOURCES:
         return ("Invalid created_by. Use one of: ai, plan, bootstrap, scan. "
                 "Human approval must use the review tools.")
+    kept = store.local_instruction_remainder(content)
+    if kept is not None:
+        if not kept:
+            return ("Not stored. That instruction is scoped to this task or session, so it is "
+                    "not a standing constraint. Restate only the lasting rule if one should persist.")
+        content = kept
     # Verbose resolve on the WRITE path only: the branch that chose this store is stamped
     # onto the new entry, so a decision that lands in the wrong repo is diagnosable after
     # the fact instead of indistinguishable. Read tools keep the plain resolve_repo.

@@ -847,6 +847,160 @@ class TestIsPrescriptiveConstraint:
         )
         assert is_c is True
 
+    def test_task_scoped_operational_instruction_is_not_stored(self, tmp_repo):
+        # Issue 317: a one-task environment grant must not become a standing constraint.
+        prompt = (
+            "Make sure you are not changing anything on the live Kubernetes environment. "
+            "Strictly work only with staging, where you have autonomy and approval to "
+            "achieve the task I gave you."
+        )
+        assert store.capture_user_constraint(tmp_repo, prompt, "s1") == (None, None, None)
+        assert store.load(tmp_repo)["entries"] == []
+
+    @pytest.mark.parametrize("prompt", [
+        "In this session, do not change the live Kubernetes environment.",
+        "While you do this, never touch production.",
+        "For this task, do not change the live cluster.",
+    ])
+    def test_explicit_local_scope_is_ignored(self, tmp_repo, prompt):
+        assert store.capture_user_constraint(tmp_repo, prompt, "s1") == (None, None, None)
+        assert store.load(tmp_repo)["entries"] == []
+
+    def test_durable_environment_rule_still_stores(self, tmp_repo):
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo, "From now on, never change the live Kubernetes environment.", "s1")
+        assert status == "approved"
+        assert entry_id
+        assert "never change the live" in content.lower()
+        saved = store.load(tmp_repo)["entries"]
+        assert len(saved) == 1
+        assert saved[0]["status"] == "approved"
+        assert "staging" not in saved[0]["content"].lower()
+
+    def test_durable_sibling_survives_a_task_scoped_grant(self, tmp_repo):
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo,
+            "From now on, never change the live Kubernetes environment. "
+            "For this task, work only with staging.",
+            "s1",
+        )
+        assert status == "approved"
+        assert entry_id
+        assert "staging" not in content.lower()
+        assert "never change the live" in content.lower()
+        saved = store.load(tmp_repo)["entries"]
+        assert len(saved) == 1
+        assert "staging" not in saved[0]["content"].lower()
+
+    @pytest.mark.parametrize("prompt", [
+        "For this task, use staging.",
+        "In this session, work in the sandbox.",
+        "For this task never touch production.",
+        "For this task use staging.",
+        "For this task only, never touch production.",
+        "For the task at hand, always deploy to production without asking for approval.",
+        "Rule: For this task, always deploy to production without asking for approval.",
+        "For this task, never permanently disable audit logging.",
+    ])
+    def test_local_operation_without_a_constraint_word_is_not_stored(self, tmp_repo, prompt):
+        assert store.capture_user_constraint(tmp_repo, prompt, "s1") == (None, None, None)
+        assert store.load(tmp_repo)["entries"] == []
+
+    def test_component_name_is_not_local_scope(self, tmp_repo):
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo, "Never log passwords in the session handler.", "s1")
+        assert status == "approved"
+        assert entry_id
+        assert "session handler" in content.lower()
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo, "For the task runner, always use the queue protocol.", "s1")
+        assert status == "approved"
+        assert entry_id
+        assert "task runner" in content.lower()
+        assert "queue protocol" in content.lower()
+
+    def test_and_keeps_the_lasting_rule_beside_a_local_action(self, tmp_repo):
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo,
+            "While you do this, run the tests and from now on never commit credentials.",
+            "s1",
+        )
+        assert status == "approved"
+        assert entry_id
+        assert "never commit credentials" in content.lower()
+        assert "run the tests" not in content.lower()
+        assert "while you do this" not in content.lower()
+
+    def test_and_keeps_later_clauses_of_the_lasting_rule(self, tmp_repo):
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo,
+            "For this task, run tests and from now on never commit credentials "
+            "and always encrypt backups.",
+            "s1",
+        )
+        assert status == "approved"
+        assert entry_id
+        assert "never commit credentials" in content.lower()
+        assert "always encrypt backups" in content.lower()
+        assert "run tests" not in content.lower()
+
+    def test_lasting_clause_keeps_an_object_list(self, tmp_repo):
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo,
+            "For this task, run tests and from now on never log passwords and API keys.",
+            "s1",
+        )
+        assert status == "approved"
+        assert entry_id
+        assert "never log passwords and api keys" in content.lower()
+        assert "run tests" not in content.lower()
+
+    def test_trailing_task_qualifier_drops_its_action(self, tmp_repo):
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo,
+            "From now on, never log passwords and deploy to production without "
+            "approval for this task.",
+            "s1",
+        )
+        assert status == "approved"
+        assert entry_id
+        assert "never log passwords" in content.lower()
+        assert "deploy" not in content.lower()
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo,
+            "For this task, run tests and from now on never commit credentials "
+            "and deploy the staging build for this task.",
+            "s2",
+        )
+        assert status == "approved"
+        assert "never commit credentials" in content.lower()
+        assert "deploy" not in content.lower()
+        assert "staging build" not in content.lower()
+
+    def test_object_list_survives_a_trailing_task_action(self, tmp_repo):
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo,
+            "From now on, never log passwords and API keys and deploy to staging "
+            "for this task.",
+            "s1",
+        )
+        assert status == "approved"
+        assert entry_id
+        assert content == "From now on, never log passwords and API keys"
+        assert "deploy" not in content.lower()
+
+    def test_later_lasting_clause_survives_a_trailing_task_action(self, tmp_repo):
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo,
+            "From now on, never log passwords and always encrypt backups and "
+            "deploy staging for this task.",
+            "s1",
+        )
+        assert status == "approved"
+        assert entry_id
+        assert content == "From now on, never log passwords and always encrypt backups"
+        assert "deploy" not in content.lower()
+
     def test_ensure_you_with_object_quantifier_not_detected(self):
         # Greptile #216 P1: "any"/"all" quantify WHAT to act on, not HOW OFTEN — they
         # carry no recurrence, so they must not satisfy the durability requirement.

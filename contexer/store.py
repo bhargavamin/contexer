@@ -1769,9 +1769,32 @@ _DIRECTIVE_WRAPPER_ONLY = re.compile(
 # remove task-bounded clauses before the ordinary directive detector assigns human authority.
 # This stays deliberately structural: guessing whether an arbitrary sentence is "important"
 # would be a second semantic model in a prompt hook.
+# The scope noun ends the adjunct, continues with a scope modifier ("only",
+# "at hand"), or is followed by the instruction itself ("for this task never").
+# A different following word is a component name ("task runner", "session handler").
+_SCOPE_FOLLOWER = (
+    r"never|always|do|use|work|run|stay|keep|stick|operate|deploy|change|edit|"
+    r"modify|touch|write|switch|limit|restrict|please|ensure|make|from|avoid|"
+    r"stop|must|should"
+)
+_SCOPE_MODIFIER = r"(?:\s+only\b|\s+at\s+hand\b)?"
+_SCOPE_ADJUNCT_END = rf"(?!\s+(?!(?:{_SCOPE_FOLLOWER})\b)[A-Za-z])"
 _TASK_SCOPE_MARKER = re.compile(
-    r"\b(?:for|during|in)\s+(?:this|the)\s+(?:run|pass|task|review|test|turn|request|bootstrap)\b"
-    r"|\b(?:this\s+time|right\s+now)\b",
+    r"\b(?:for|during|in)\s+(?:this|the)\s+"
+    r"(?:run|pass|task|review|test|turn|request|bootstrap|session)\b"
+    + _SCOPE_MODIFIER + _SCOPE_ADJUNCT_END +
+    r"|\b(?:this\s+time|right\s+now)\b" + _SCOPE_ADJUNCT_END +
+    r"|\bthe\s+task\s+I\s+gave\s+you\b" + _SCOPE_ADJUNCT_END +
+    r"|\bwhile\s+you\s+do\s+this\b" + _SCOPE_ADJUNCT_END,
+    re.IGNORECASE,
+)
+# A labeled "Rule:" on a task-scoped sentence is still that sentence. Only an
+# independent lasting phrase starts text that should outlive the task.
+# "permanently" counts only at a clause boundary: inside "never permanently
+# disable" it is an adverb, and slicing from it would drop the prohibition.
+_INDEPENDENT_LASTING_SCOPE = re.compile(
+    r"\b(?:from\s+now\s+on|going\s+forward|henceforth)\b"
+    r"|(?:^|[.!?]\s+|\b(?:and|but)\s+)permanently\b",
     re.IGNORECASE,
 )
 _DURABLE_DIRECTIVE = re.compile(
@@ -1790,6 +1813,17 @@ _TASK_IMPERATIVE = re.compile(
     r"^\s*(?:please\s+)?(?:re-?run|run|check|inspect|review|test|fix|implement|show|"
     r"report|open|install|create|change|update|edit|do\s+not|don['\u2019]t|ensure|"
     r"make\s+sure|always|never|from\s+now\s+on|going\s+forward)\b",
+    re.IGNORECASE,
+)
+# Clause-initial operations that are instructions even without always/never/do not.
+# "For this task, use staging" is local; "The cache warmed for this task" is not.
+_LOCAL_OPERATION = re.compile(
+    r"(?:^|[,:]\s*|"
+    r"(?:for|during|in)\s+(?:this|the)\s+"
+    r"(?:run|pass|task|review|test|turn|request|bootstrap|session)\s+|"
+    r"while\s+you\s+do\s+this\s+)"
+    r"(?:please\s+)?(?:use|work|run|stay|keep|stick|operate|deploy|"
+    r"change|edit|modify|touch|write|switch|limit|restrict)\b",
     re.IGNORECASE,
 )
 
@@ -1814,18 +1848,79 @@ def _directive_policy_text(text: str) -> str:
         r"(?<=[.!?])\s+|\n+|,\s+(?:but|and)\s+|\s+but\s+", candidate,
         flags=re.IGNORECASE) if part.strip(" ,")]
     if any(_TASK_SCOPE_MARKER.search(part) for part in fragments):
-        # Explicit task scope governs sibling actions too. "Always" alone can describe
-        # how to perform this run; only an independently declared lasting-policy clause
-        # escapes that scope.
-        durable = [part for part in fragments if _EXPLICIT_DURABLE_SCOPE.search(part)
-                   and not _TASK_SCOPE_MARKER.search(part)]
-        return ". ".join(durable)
+        # Explicit task scope governs sibling actions too. "Always" alone, and a
+        # "Rule:" label wrapped around a local instruction, describe this run.
+        # An independent lasting phrase is kept whole, including its own "and" list.
+        durable = []
+        for part in fragments:
+            if not _TASK_SCOPE_MARKER.search(part):
+                if _EXPLICIT_DURABLE_SCOPE.search(part):
+                    durable.append(part)
+                continue
+            durable.extend(_independent_lasting_clauses(part))
+        return ". ".join(clause for clause in durable if clause)
     task_actions = sum(bool(_TASK_IMPERATIVE.search(part)) for part in fragments)
     if task_actions < 2:
         return candidate if not _TASK_SCOPE_MARKER.search(candidate) else ""
     durable = [part for part in fragments if _DURABLE_DIRECTIVE.search(part)
                and not _TASK_SCOPE_MARKER.search(part)]
     return ". ".join(durable)
+
+
+def _independent_lasting_clauses(part: str) -> list[str]:
+    """Lasting text in a clause that also names this task or session.
+
+    Words joined to the lasting phrase by "and" stay with it. A task qualifier
+    drops the coordinated action it governs, not only the words "for this task".
+    A leading rule label is not a lasting phrase.
+    """
+    clauses = []
+    rest = part
+    while rest:
+        match = _INDEPENDENT_LASTING_SCOPE.search(rest)
+        if not match:
+            return clauses
+        tail = rest[match.start():]
+        later = _TASK_SCOPE_MARKER.search(tail)
+        if not later:
+            clause = tail.strip(" ,")
+            if clause:
+                clauses.append(clause)
+            return clauses
+        before = tail[:later.start()]
+        # The first "and" can swallow later ones, which drops an object list
+        # ("passwords and API keys") or a later lasting clause ("and always
+        # encrypt backups") along with the task-local action. The qualifier
+        # governs the final coordinated action, so cut at the last conjunction.
+        splits = list(re.finditer(r"\s+(?:and|but)\s+", before, flags=re.IGNORECASE))
+        if splits:
+            clause = before[:splits[-1].start()].strip(" ,")
+            if clause and not _TASK_SCOPE_MARKER.search(clause):
+                clauses.append(clause)
+        rest = tail[later.end():]
+    return clauses
+
+
+def local_instruction_remainder(text: str) -> str | None:
+    """What to store when text names this task or session.
+
+    None means this is not an operational local instruction, so the caller stores
+    the original text. An empty string means the instruction is entirely local and
+    must not be stored. Any other string is the lasting rule with the local grant
+    removed, the same text prompt capture would keep.
+    """
+    candidate = _directive_candidate_text(text).strip()
+    if not candidate or len(candidate) > _MAX_DIRECTIVE_LEN:
+        return None
+    if not _TASK_SCOPE_MARKER.search(candidate):
+        return None
+    kept = _directive_policy_text(candidate).strip()
+    if kept:
+        return _sanitize_directive(kept)
+    if _CONSTRAINT_TRIGGER.search(candidate) or _LOCAL_OPERATION.search(candidate):
+        return ""
+    return None
+
 
 # Deictic referents point at an object only this conversation can resolve - a strong
 # signal the directive is session-scoped intent, not a standing rule. Still stored
