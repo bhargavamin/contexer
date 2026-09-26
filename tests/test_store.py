@@ -900,6 +900,7 @@ class TestIsPrescriptiveConstraint:
         "For this task only, never touch production.",
         "For the task at hand, always deploy to production without asking for approval.",
         "Rule: For this task, always deploy to production without asking for approval.",
+        "For this task, never permanently disable audit logging.",
     ])
     def test_local_operation_without_a_constraint_word_is_not_stored(self, tmp_repo, prompt):
         assert store.capture_user_constraint(tmp_repo, prompt, "s1") == (None, None, None)
@@ -953,6 +954,28 @@ class TestIsPrescriptiveConstraint:
         assert entry_id
         assert "never log passwords and api keys" in content.lower()
         assert "run tests" not in content.lower()
+
+    def test_trailing_task_qualifier_drops_its_action(self, tmp_repo):
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo,
+            "From now on, never log passwords and deploy to production without "
+            "approval for this task.",
+            "s1",
+        )
+        assert status == "approved"
+        assert entry_id
+        assert "never log passwords" in content.lower()
+        assert "deploy" not in content.lower()
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo,
+            "For this task, run tests and from now on never commit credentials "
+            "and deploy the staging build for this task.",
+            "s2",
+        )
+        assert status == "approved"
+        assert "never commit credentials" in content.lower()
+        assert "deploy" not in content.lower()
+        assert "staging build" not in content.lower()
 
     def test_ensure_you_with_object_quantifier_not_detected(self):
         # Greptile #216 P1: "any"/"all" quantify WHAT to act on, not HOW OFTEN — they

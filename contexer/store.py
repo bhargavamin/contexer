@@ -1790,8 +1790,11 @@ _TASK_SCOPE_MARKER = re.compile(
 )
 # A labeled "Rule:" on a task-scoped sentence is still that sentence. Only an
 # independent lasting phrase starts text that should outlive the task.
+# "permanently" counts only at a clause boundary: inside "never permanently
+# disable" it is an adverb, and slicing from it would drop the prohibition.
 _INDEPENDENT_LASTING_SCOPE = re.compile(
-    r"\b(?:from\s+now\s+on|going\s+forward|henceforth|permanently)\b",
+    r"\b(?:from\s+now\s+on|going\s+forward|henceforth)\b"
+    r"|(?:^|[.!?]\s+|\b(?:and|but)\s+)permanently\b",
     re.IGNORECASE,
 )
 _DURABLE_DIRECTIVE = re.compile(
@@ -1867,30 +1870,31 @@ def _directive_policy_text(text: str) -> str:
 def _independent_lasting_clauses(part: str) -> list[str]:
     """Lasting text in a clause that also names this task or session.
 
-    The lasting phrase is copied through to the next task-scope adjunct. Words
-    joined to it by "and" stay in that copy. A leading rule label is not a
-    lasting phrase, so a labeled local instruction contributes nothing.
+    Words joined to the lasting phrase by "and" stay with it. A task qualifier
+    drops the coordinated action it governs, not only the words "for this task".
+    A leading rule label is not a lasting phrase.
     """
     clauses = []
     rest = part
-    while True:
+    while rest:
         match = _INDEPENDENT_LASTING_SCOPE.search(rest)
         if not match:
             return clauses
         tail = rest[match.start():]
         later = _TASK_SCOPE_MARKER.search(tail)
-        if later:
-            clause = tail[:later.start()]
-            clause = re.sub(r"(?:\s+and|\s+but)\s*$", "", clause, flags=re.IGNORECASE)
-            rest = tail[later.end():]
-        else:
-            clause = tail
-            rest = ""
-        clause = clause.strip(" ,")
-        if clause and not _TASK_SCOPE_MARKER.search(clause):
-            clauses.append(clause)
-        if not rest:
+        if not later:
+            clause = tail.strip(" ,")
+            if clause:
+                clauses.append(clause)
             return clauses
+        before = tail[:later.start()]
+        split = re.search(r"\s+(?:and|but)\s+[^.!?]*$", before, flags=re.IGNORECASE)
+        if split:
+            clause = before[:split.start()].strip(" ,")
+            if clause and not _TASK_SCOPE_MARKER.search(clause):
+                clauses.append(clause)
+        rest = tail[later.end():]
+    return clauses
 
 
 def local_instruction_remainder(text: str) -> str | None:

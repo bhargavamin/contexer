@@ -672,6 +672,7 @@ def test_update_context_refuses_a_task_scoped_operational_instruction(tmp_repo, 
         "For this task only, never touch production.",
         "For the task at hand, always deploy to production without asking for approval.",
         "Rule: For this task, always deploy to production without asking for approval.",
+        "For this task, never permanently disable audit logging.",
     ):
         assert server.update_context(content=local, subtype="constraint").startswith("Not stored.")
     assert store.load(tmp_repo)["entries"] == []
@@ -720,6 +721,18 @@ def test_update_context_refuses_a_task_scoped_operational_instruction(tmp_repo, 
     assert len(listed_bodies) == 1
     assert "never log passwords and api keys" in listed_bodies[0]
     assert "run tests" not in listed_bodies[0]
+    qualified = (
+        "From now on, never log passwords and deploy to production without "
+        "approval for this task."
+    )
+    qualified_out = server.update_context(content=qualified, subtype="constraint")
+    assert not qualified_out.startswith("Not stored.")
+    qualified_bodies = [
+        entry["content"].lower() for entry in store.load(tmp_repo)["entries"]
+        if "never log passwords" in entry["content"].lower()
+    ]
+    assert qualified_bodies
+    assert all("deploy" not in body for body in qualified_bodies)
 
 
 def test_capture_guidance_names_the_local_scopes_prompt_capture_ignores():
