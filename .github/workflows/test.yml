@@ -103,3 +103,22 @@ jobs:
       # caches are already out, and a new top-level module is linted the day it lands.
       - name: Run ruff
         run: uvx ruff@0.15.4 check .
+
+  effectiveness-review:
+    name: Effectiveness review / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v6.0.3
+      - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+          python-version: "3.13"
+      - name: Test optional review hook and installer
+        run: >-
+          uv run --no-project --with pytest pytest
+          -c tools/contexer-effectiveness-review/pytest.ini
+          tools/contexer-effectiveness-review/tests -q --tb=short

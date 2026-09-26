@@ -232,6 +232,7 @@ These results describe the measured tasks, not a guarantee for every project. A 
 | **[Usage & CLI](docs/usage.md)** | Natural-language commands, CLI reference, teams login, troubleshooting, limitations |
 | **[Local console](docs/ui.md)** | `contexer ui`, the seven views, `[ui]` settings, security model |
 | **[Decision-impact pilot](docs/decision-impact-pilot.md)** | Explicitly requested file checks, local receipts, consent, setup, and claim limits |
+| **[Effectiveness review](tools/contexer-effectiveness-review/README.md)** | Opt-in developer hook, installation, local evidence and measurement limits |
 | **[Benchmark](docs/benchmark.md)** | Live-session A/B methodology, findings (including negative ones), raw data |
 
 ---

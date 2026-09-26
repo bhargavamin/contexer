@@ -191,6 +191,32 @@ Pass the full reasoning, not just the conclusion. Pass `subtype` so decisions ar
 
 **Retrieving context JIT**: before reading files for any question about architecture, design decisions, rationale, constraints, patterns, or conventions, use a relevant `[Contexer: auto-fetched ...]` block when one is present. If that block does not answer the question, call Contexer's `get_context` with concise subject keywords; another memory, graph, or search tool is not a substitute. Multiword keyword queries fall back to the same content-and-title ranker as prompt retrieval when no literal phrase matches. Fall back to reading files only when Contexer context is missing or the question is about current code state (exact syntax, current values). Use `query` for keyword search or `entry_type` to retrieve a specific subtype. Use `limit` to override the display cap. When results are truncated, the output includes a `"showing N of M"` note so you know more exist.
 
+## Optional effectiveness review experiment
+
+`tools/contexer-effectiveness-review/` is a standalone, explicitly installed developer skill.
+It does not change the production no-Stop-hook policy above or run under `contexer install`.
+Its installer copies the bundle to `~/.agents/skills/contexer-effectiveness-review/` and merges
+user-level Claude/Codex `Stop` and Cursor `stop` registrations, preserving unrelated config,
+backing up existing content and rolling back failed writes. Its independent `pytest.ini`
+keeps standalone tests separate from package coverage; CI runs them on macOS and Linux.
+`tests/test_effectiveness_install.py` checks coexistence with normal adapter installation.
+
+`stop_hook.py` combines Git discovery and host transcript observations to create an immutable,
+digest-checked pending segment under `~/.contexer-usage/`. `transcript.py` parses host formats;
+opaque wrappers and missing transcript evidence make exhaustive counts unknown. Bounded Git
+work, session locks, transcript digests and carried evidence prevent failed scans from silently
+consuming activity. Literal shell calls in supported wrappers are intent, not execution proof.
+`log_usage.py` validates bounded judgments, provenance and same-session capture exclusions;
+`privacy.py` omits argument values and filters known credentials. `outcomes.py` appends later
+GitHub/Git observations; `summarize.py` deduplicates records and reports denominators and coverage.
+The runtime uses the standard library; uv is used to run it and provision pytest for tests.
+
+Schema `contexer-effectiveness/v2` and observer `observe-v4` are distinct version axes.
+Do not treat agent judgments as independent outcome measurements, missing evidence as zero,
+merge/CI status as causal proof, or the sampled segments as all developer work. Keep this
+experiment opt-in: it intentionally adds review latency and model usage. Published examples
+and fixtures are synthetic; personal transcripts, records and handover notes are excluded.
+
 ## Commit-time guard (`contexer guard`)
 
 A git `pre-commit` hook - install with `contexer guard --install-hook` (never wired automatically by `contexer install`) - that checks staged files against stored decisions when you commit. Two tiers, both implemented in `contexer/guard_engine.py`:
