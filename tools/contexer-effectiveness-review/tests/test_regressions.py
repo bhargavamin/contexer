@@ -397,3 +397,141 @@ def test_launch_directory_is_used_when_payload_has_no_repository(home, repo, tmp
     result = stop('claude', env, data)
     assert fired(result)
     assert pending_of(data_dir, result)['repo'] == str(repo)
+
+
+@pytest.mark.parametrize('tool,feature', [('get_global_context', 'get_context'),
+                                         ('update_global_context', 'update_context')])
+def test_global_tools_require_the_corresponding_feature_rating(tool, feature):
+    judgment = example()
+    judgment['feature_ratings'] = [r for r in judgment['feature_ratings'] if r['feature'] != feature]
+    observed = stop_hook.observe([('call', tool, {}, 'c', 'contexer', tool)], 'claude')
+    errors = log_usage.validate(judgment, observed)
+    assert any('missing observed features' in e and feature in e for e in errors)
+
+
+@pytest.mark.parametrize('tool,correct', [('get_context', 'get_context'),
+                                        ('get_global_context', 'get_context'),
+                                        ('review_pending', 'review_pending'),
+                                        ('bootstrap_context', 'other_tool')])
+def test_decision_ids_are_verified_for_the_actual_surfacing_method(tool, correct):
+    observed = stop_hook.observe([('call', tool, {}, 'c', 'contexer', tool),
+                                 ('result', 'c', '(id=a1b2c3d4)')], 'claude')
+    for method in ('get_context', 'review_pending', 'other_tool'):
+        assert ('a1b2c3d4' in log_usage.surface_ids(observed, method)) == (method == correct)
+    judgment = example()
+    judgment['contexer_items'] = [dict(judgment['contexer_items'][0], surfaced_by=correct)]
+    judgment['captures'] = []
+    judgment['feature_ratings'] += [{'feature': feature, 'verdict': 'not_useful', 'note': 'No effect'}
+                                    for feature in ('bootstrap', 'review_pending')]
+    assert log_usage.validate(judgment, observed) == []
+    judgment['contexer_items'][0]['surfaced_by'] = 'other_tool' if correct != 'other_tool' else 'get_context'
+    assert any('not in any' in e for e in log_usage.validate(judgment, observed))
+
+
+def test_old_observations_cannot_verify_tool_specific_provenance():
+    observed = {'contexer_result_ids': ['a1b2c3d4']}
+    judgment = {'contexer_items': [{'id': 'a1b2c3d4', 'surfaced_by': 'get_context'}]}
+    assert not log_usage.ids_verified(judgment, observed)
+
+
+def test_pruning_tolerates_a_pending_file_consumed_by_another_logger(tmp_path, monkeypatch):
+    monkeypatch.setattr(stop_hook, 'ROOT', tmp_path)
+    target = tmp_path / 'pending/consumed.json'
+    stop_hook.write_json(target, {})
+    original = type(target).stat
+    def vanished(path, *args, **kwargs):
+        if path == target:
+            raise FileNotFoundError(path)
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(type(target), 'stat', vanished)
+    state = {'digests': {'consumed': 'digest'}}
+    stop_hook.prune_pending(state)
+    assert state['digests'] == {}
+
+
+def test_persisted_measurements_are_private_and_appends_are_synced(tmp_path, monkeypatch):
+    import os
+    import stat
+    synced = []
+    original_sync = os.fsync
+    def sync(fd):
+        synced.append(fd)
+        original_sync(fd)
+    monkeypatch.setattr(os, 'fsync', sync)
+    json_path = tmp_path / 'pending/record.json'
+    record_path = tmp_path / 'records/repo.jsonl'
+    outcome_path = tmp_path / 'outcomes.jsonl'
+    monkeypatch.setattr(outcomes, 'OUTCOMES', outcome_path)
+    previous_umask = os.umask(0)
+    try:
+        stop_hook.write_json(json_path, {'value': 1})
+        log_usage.append(record_path, {'record_key': 'one'})
+        outcomes.append_changed({'record_id': 'one'})
+    finally:
+        os.umask(previous_umask)
+    assert len(synced) == 3
+    assert all(stat.S_IMODE(p.stat().st_mode) == 0o600 for p in
+               (json_path, record_path, outcome_path))
+    assert not list(json_path.parent.glob('.record.json.*'))
+
+
+def test_failed_json_replace_retains_previous_state_and_cleans_temporary_file(tmp_path, monkeypatch):
+    path = tmp_path / 'state.json'
+    stop_hook.write_json(path, {'value': 'before'})
+    def fail(*args):
+        raise OSError('replace failed')
+    monkeypatch.setattr(stop_hook.os, 'replace', fail)
+    with pytest.raises(OSError):
+        stop_hook.write_json(path, {'value': 'after'})
+    assert json.loads(path.read_text()) == {'value': 'before'}
+    assert not list(tmp_path.glob('.state.json.*'))
+
+
+@pytest.mark.parametrize('key', ['repo[1]-1234', 'repo*-1234', 'repo?-1234'])
+def test_repo_key_filters_are_literal_for_both_reports(home, key):
+    data_dir, env = home
+    own, other = record(1, 'convention', 'neutral'), record(2, 'convention', 'neutral')
+    own['repo_key'] = key
+    path = data_dir / 'records'
+    path.mkdir(parents=True)
+    (path / f'{key}.jsonl').write_text(json.dumps(own) + '\n')
+    (path / 'repoX-1234.jsonl').write_text(json.dumps(other) + '\n')
+    report = run_script('summarize.py', ['--repo-key', key], env=env, check=True)
+    assert 'Records: 1 ' in report.stdout
+    run_script('outcomes.py', ['--repo-key', key], env=env, check=True)
+    rows = [json.loads(line) for line in (data_dir/'outcomes.jsonl').read_text().splitlines()]
+    assert [row['record_id'] for row in rows] == [own['record_id']]
+
+
+@pytest.mark.parametrize('conclusion', ['STALE', 'STARTUP_FAILURE'])
+def test_terminal_ci_failures_do_not_look_pending(conclusion):
+    assert outcomes.checks_conclusion([{'conclusion': conclusion}]) == 'failure'
+
+
+def test_report_exposes_each_ci_state_and_its_denominator(home):
+    data_dir, env = home
+    states = ['success', 'failure', 'pending', 'none', 'unknown', 'not_checked']
+    recs = [record(i, 'convention', 'neutral') for i in range(len(states))]
+    write_records(data_dir, recs)
+    (data_dir / 'outcomes.jsonl').write_text('\n'.join(
+        json.dumps({'record_id': r['record_id'], 'checks': status, 'pr_state': 'open'})
+        for r, status in zip(recs, states) if status != 'not_checked') + '\n')
+    report = run_script('summarize.py', env=env, check=True).stdout.split('## CI checks')[1]
+    assert all(status in report for status in states)
+    assert '| neutral | 1 | 1 | 1 | 1 | 1 | 1 | 6 |' in report
+
+
+def test_pruning_failure_does_not_lose_seen_commit_state(home, repo, tmp_path, monkeypatch):
+    data_dir, _ = home
+    monkeypatch.setattr(stop_hook, 'ROOT', data_dir)
+    t = Transcript(tmp_path / 'prune.jsonl', 'claude')
+    data = json.loads(payload('claude', 'prune-failure', t.path, repo))
+    stop_hook.run_hook('claude', data)
+    commit(repo, 'fix.txt', 'fix: retain state')
+    t.shell('git commit -m fix')
+    def fail(state):
+        raise PermissionError('pending directory unavailable')
+    monkeypatch.setattr(stop_hook, 'prune_pending', fail)
+    assert stop_hook.run_hook('claude', data)
+    assert stop_hook.run_hook('claude', data) is None
+    assert json.loads(stop_hook.state_path('prune-failure').read_text())['seen']

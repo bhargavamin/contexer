@@ -1,5 +1,6 @@
 """Credential filtering for local benchmark metadata; judgments are rejected separately."""
 import re
+import os
 
 # Provider token shapes, private keys, JWTs, URL credentials, and keyword=value pairs whose value
 # looks machine-generated (12+ characters mixing letters and digits, no spaces).
@@ -21,3 +22,14 @@ def scrub(value):
     if isinstance(value, dict):
         return {key: scrub(item) for key, item in value.items()}
     return value
+
+
+def open_append(path):
+    """Create append-only measurement files without a permissive-umask exposure window."""
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        return os.fdopen(fd, 'a+', encoding='utf-8')
+    except BaseException:
+        os.close(fd)
+        raise

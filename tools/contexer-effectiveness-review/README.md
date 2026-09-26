@@ -85,7 +85,7 @@ Start with descriptive questions: Which kinds of work benefit? Which knowledge i
 - **Feature burden:** noise or harmful ratings divided by all ratings of that feature. Compare with useful ratings, gaps and evidence-backed improvement ideas. Missing ratings are not approval.
 - **Outcome association:** compare credited and non-credited records with known outcome data. Show missing PR, CI and revert statuses separately. A merge or passing CI is not a correctness score; no detected revert is not proof of no regression.
 
-The report provides verdict distributions, task breakdowns, fact sources, relevance, feature ratings, improvement ideas, visible tool counts and outcome summaries. It ranks groups only with at least five records and warns below twenty total records; neither threshold establishes statistical significance. It does not calculate causal uplift, time saved, token savings, dollars saved or confidence intervals.
+The report provides verdict distributions, task breakdowns, fact sources, relevance, feature ratings, improvement ideas, visible tool counts, repository outcomes and a separate CI-status table with missing data shown. It ranks groups only with at least five records and warns below twenty total records; neither threshold establishes statistical significance. It does not calculate causal uplift, time saved, token savings, dollars saved or confidence intervals.
 
 Before combining data, define cohorts by task category/difficulty, question type, knowledge location, scope, repository, host, model and observer/schema version. The built-in report only filters by host and repository; finer cohort analysis requires processing the JSONL separately. Repository keys are based on local identity: the same project can have different keys on different machines. Agree on a de-identified project mapping before multi-developer aggregation, and avoid treating multiple segments from one task as independent experiments.
 
@@ -98,6 +98,8 @@ Unknown values are `null`, never zero. Missing transcripts and opaque Codex wrap
 Automatic sampling favors work that reaches commit/PR activity. Abandoned work, non-commit investigations, missing hook delivery, failed reviews and manual selection bias are not fully measured. The dataset is not a denominator for all developer work. Keep an external enrollment/completion log if estimating collection coverage.
 
 Data stays under `~/.contexer-usage/`: records, outcomes, session state, pending observations and error logs. Set `CONTEXER_USAGE_HOME` consistently for the hook and reporting processes to isolate an experiment. The installer does not persist this environment variable. Pending observations expire after seven days during later hook activity; final records/outcomes have no automatic retention policy.
+
+New measurement files are created with owner-only permissions. Append targets are restricted on write and flushed to disk before completion. This does not retroactively change untouched files from older installations.
 
 Raw transcripts are read locally but not copied into records. Tool argument values are omitted. Metadata can still include repository paths, remotes, commit subjects, session identifiers and short agent-written evidence. Known credential formats are scrubbed or rejected; that is not comprehensive de-identification. Do not paste secrets, decision bodies or customer data into judgments, and inspect exports before sharing. This tool has no automatic upload. Obtain each participant's consent and agree on retention and redaction before collecting team data.
 

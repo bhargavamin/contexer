@@ -123,7 +123,7 @@ Duplicate feature rows are rejected. Features the observer directly saw must be 
 
 ## Observation coverage
 
-The observer version is `observe-v4`; judgment records remain `contexer-effectiveness/v2`.
+The observer version is `observe-v5`; judgment records remain `contexer-effectiveness/v2`.
 Missing transcripts produce unknown (`null`) measurements. Codex `exec`/`js` wrappers can hide
 inner calls: their segments have `contexer_calls_complete=false`, a null total call count and
 null exhaustive result ids. `contexer_observed_call_count` and `contexer_calls` retain direct
@@ -131,3 +131,7 @@ calls only. `captured_ids` and `session_captured_ids` retain positively observed
 `capture_ids_complete=false` means absence is not proof that a decision was never captured.
 `ids_verified=false` marks judgments whose cited ids cannot all be checked from the transcript.
 Tool arguments retain field names only, and known credential shapes in script metadata are redacted.
+
+Observer v5 verifies tool-result ids against the claimed surfacing method. Global retrieval
+and capture tools are rated under `get_context` and `update_context`, respectively. Older
+observations without per-method ids cannot establish method-specific provenance.

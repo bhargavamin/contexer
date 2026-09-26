@@ -212,7 +212,7 @@ consuming activity. Literal shell calls in supported wrappers are intent, not ex
 GitHub/Git observations; `summarize.py` deduplicates records and reports denominators and coverage.
 The runtime uses the standard library; uv is used to run it and provision pytest for tests.
 
-Schema `contexer-effectiveness/v2` and observer `observe-v4` are distinct version axes.
+Schema `contexer-effectiveness/v2` and observer `observe-v5` are distinct version axes.
 Do not treat agent judgments as independent outcome measurements, missing evidence as zero,
 merge/CI status as causal proof, or the sampled segments as all developer work. Keep this
 experiment opt-in: it intentionally adds review latency and model usage. Published examples

@@ -11,7 +11,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from log_usage import ENUMS, ROOT, SCHEMA, validate  # noqa: E402
+from log_usage import ENUMS, ROOT, SCHEMA, record_paths, validate  # noqa: E402
 
 MIN_RECORDS = 20
 MIN_ROW = 5
@@ -61,7 +61,7 @@ def dedupe_key(rec):
 
 def load(repo_key, host):
     records, skipped, dupes, keys = [], 0, 0, set()
-    for path in sorted((ROOT / "records").glob(f"{repo_key or '*'}.jsonl")):
+    for path in record_paths(repo_key):
         for line in path.read_text().splitlines():
             try:
                 rec = json.loads(line)
@@ -250,6 +250,17 @@ def main():
         cells[r["judgment"]["verdict"].get("contexer_effect")][state] += 1
     cols = ["merged", "open", "closed", "reverted", "no_pr", "unknown", "not_checked"]
     print(table(ENUMS["verdict.contexer_effect"], cols, cells))
+    print("\n## CI checks (observed status, by self-assessed effect)\n")
+    checks = defaultdict(Counter)
+    statuses = ["success", "failure", "pending", "none", "unknown", "not_checked"]
+    for record in records:
+        row = outcomes.get(record["record_id"])
+        state = row.get("checks", "unknown") if row else "not_checked"
+        if not isinstance(state, str) or state not in statuses:
+            state = "unknown"
+        checks[record["judgment"]["verdict"]["contexer_effect"]][state] += 1
+    print(table(ENUMS["verdict.contexer_effect"], statuses, checks))
+
 
 
 if __name__ == "__main__":
