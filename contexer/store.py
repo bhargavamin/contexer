@@ -1235,6 +1235,14 @@ def _update_needs_approval(subtype: str, created_by: str) -> bool:
 
 # Prescriptive constraint/convention signals in user prompts.
 # al+w(?:ay|ya)s catches "always", "allways" (double-l), "alwyas" (transposition).
+_DIRECTIVE_OPERATION_VERBS = (
+    r"use|work|run|stay|keep|stick|operate|deploy|change|edit|modify|touch|write|"
+    r"switch|limit|restrict|encrypt|rotate|disable|enable|delete|remove|"
+    r"check|inspect|review|test|fix|implement|show|report|open|install|create|update|"
+    r"publish|upload|download|build|release|ship|commit|push|pull|merge|rebase|tag|"
+    r"approve|grant|allow|authorize|execute|apply|restart|start|stop|rerun|rebuild|"
+    r"revert|reset|sync|migrate|provision|destroy|scale|configure|validate|verify"
+)
 _CONSTRAINT_TRIGGER = re.compile(
     r"\b(?:"
     r"store\s+this\s+decision(?=\s*:)"  # explicit human capture command
@@ -1254,6 +1262,8 @@ _CONSTRAINT_TRIGGER = re.compile(
     r"|from\s+now\s+on"             # from now on
     r"|going\s+forward"              # going forward
     r"|henceforth"                   # henceforth
+    # A clause-initial imperative, not descriptive "permanently encrypted" prose.
+    rf"|^permanently\s+(?:{_DIRECTIVE_OPERATION_VERBS})"
     r"|ensure\s+(?:you\s+|that\s+you\s+)"       # ensure you / ensure that you
     r"|make\s+sure\s+(?:you\s+|that\s+you\s+)"  # make sure you / make sure that you
     r"|(?:make|create|add|set|establish)\s+(?:a\s+|the\s+)?rule"  # "create a rule …"
@@ -1769,9 +1779,32 @@ _DIRECTIVE_WRAPPER_ONLY = re.compile(
 # remove task-bounded clauses before the ordinary directive detector assigns human authority.
 # This stays deliberately structural: guessing whether an arbitrary sentence is "important"
 # would be a second semantic model in a prompt hook.
+# The scope noun ends the adjunct, continues with a scope modifier ("only",
+# "at hand"), or is followed by the instruction itself ("for this task never").
+# A different following word is a component name ("task runner", "session handler").
+_SCOPE_FOLLOWER = (
+    rf"{_DIRECTIVE_OPERATION_VERBS}|never|always|do|please|ensure|make|from|avoid|"
+    r"stop|must|should|and|but|permanently|you|we|when|while|if|unless|until|"
+    r"before|after|because|as|that|which|where|with|without"
+)
+_SCOPE_MODIFIER = r"(?:\s+only\b|\s+at\s+hand\b)?"
+_SCOPE_ADJUNCT_END = rf"(?!\s+(?!(?:{_SCOPE_FOLLOWER})\b)[A-Za-z])"
 _TASK_SCOPE_MARKER = re.compile(
-    r"\b(?:for|during|in)\s+(?:this|the)\s+(?:run|pass|task|review|test|turn|request|bootstrap)\b"
-    r"|\b(?:this\s+time|right\s+now)\b",
+    r"\b(?:for|during|in)\s+(?:this|the)\s+"
+    r"(?:run|pass|task|review|test|turn|request|bootstrap|session)\b"
+    + _SCOPE_MODIFIER + _SCOPE_ADJUNCT_END +
+    r"|\b(?:this\s+time|right\s+now)\b" + _SCOPE_ADJUNCT_END +
+    r"|\bthe\s+task\s+I\s+gave\s+you\b" + _SCOPE_ADJUNCT_END +
+    r"|\bwhile\s+you\s+do\s+this\b" + _SCOPE_ADJUNCT_END,
+    re.IGNORECASE,
+)
+# A labeled "Rule:" on a task-scoped sentence is still that sentence. Only an
+# independent lasting phrase starts text that should outlive the task.
+# "permanently" counts only at a clause boundary: inside "never permanently
+# disable" it is an adverb, and slicing from it would drop the prohibition.
+_INDEPENDENT_LASTING_SCOPE = re.compile(
+    r"(?P<boundary>^|[.!?;,]\s*|\b(?:and|but)\s+)"
+    r"(?P<rule>from\s+now\s+on|going\s+forward|henceforth|permanently)\b",
     re.IGNORECASE,
 )
 _DURABLE_DIRECTIVE = re.compile(
@@ -1792,6 +1825,22 @@ _TASK_IMPERATIVE = re.compile(
     r"make\s+sure|always|never|from\s+now\s+on|going\s+forward)\b",
     re.IGNORECASE,
 )
+# Clause-initial operations that are instructions even without always/never/do not.
+# "For this task, use staging" is local; "The cache warmed for this task" is not.
+_LOCAL_OPERATION = re.compile(
+    r"(?:^|[,:]\s*|"
+    r"(?:for|during|in)\s+(?:this|the)\s+"
+    r"(?:run|pass|task|review|test|turn|request|bootstrap|session)\s+|"
+    r"while\s+you\s+do\s+this\s+)"
+    rf"(?:please\s+)?(?:permanently\s+)?(?:{_DIRECTIVE_OPERATION_VERBS})\b",
+    re.IGNORECASE,
+)
+# These technical object phrases can also be bare imperative actions. A local
+# qualifier later in the chain cannot resolve which reading the developer meant.
+_AMBIGUOUS_OPERATION_OBJECT = re.compile(
+    r"^(?:build\s+(?:artifacts|outputs)|release\s+notes|test\s+(?:results|reports))\b",
+    re.IGNORECASE,
+)
 
 
 def _directive_policy_text(text: str) -> str:
@@ -1810,22 +1859,119 @@ def _directive_policy_text(text: str) -> str:
     # shorten an over-limit document into something that suddenly looks authoritative.
     if len(candidate) > _MAX_DIRECTIVE_LEN:
         return candidate
-    fragments = [part.strip(" ,") for part in re.split(
-        r"(?<=[.!?])\s+|\n+|,\s+(?:but|and)\s+|\s+but\s+", candidate,
+    fragments = [part.strip(" ,;") for part in re.split(
+        r"(?<=[.!?])\s+|;\s*|\n+|,\s+(?:but|and)\s+|\s+but\s+", candidate,
         flags=re.IGNORECASE) if part.strip(" ,")]
     if any(_TASK_SCOPE_MARKER.search(part) for part in fragments):
-        # Explicit task scope governs sibling actions too. "Always" alone can describe
-        # how to perform this run; only an independently declared lasting-policy clause
-        # escapes that scope.
-        durable = [part for part in fragments if _EXPLICIT_DURABLE_SCOPE.search(part)
-                   and not _TASK_SCOPE_MARKER.search(part)]
-        return ". ".join(durable)
+        # Explicit task scope governs sibling actions too. "Always" alone, and a
+        # "Rule:" label wrapped around a local instruction, describe this run.
+        # An independent lasting phrase is kept whole, including its own "and" list.
+        durable = []
+        for part in fragments:
+            if not _TASK_SCOPE_MARKER.search(part):
+                if _EXPLICIT_DURABLE_SCOPE.search(part):
+                    durable.append(part)
+                continue
+            clauses = _independent_lasting_clauses(part)
+            if clauses is None:
+                # Keep the scope and the original wording: capture routes this
+                # mixed instruction to review, never to approved standing policy.
+                return candidate
+            durable.extend(clauses)
+        return ". ".join(clause for clause in durable if clause)
     task_actions = sum(bool(_TASK_IMPERATIVE.search(part)) for part in fragments)
     if task_actions < 2:
         return candidate if not _TASK_SCOPE_MARKER.search(candidate) else ""
     durable = [part for part in fragments if _DURABLE_DIRECTIVE.search(part)
                and not _TASK_SCOPE_MARKER.search(part)]
     return ". ".join(durable)
+
+
+def _independent_lasting_clauses(part: str) -> list[str] | None:
+    """Lasting text in a clause that also names this task or session.
+
+    Words joined to the lasting phrase by "and" stay with it. A task qualifier
+    drops the coordinated action it governs, not only the words "for this task".
+    A leading rule label is not a lasting phrase. None means a noun/action
+    ambiguity prevents lossless extraction; the caller must retain it for review.
+    """
+    clauses = []
+    rest = part
+    while rest:
+        match = None
+        for item in _INDEPENDENT_LASTING_SCOPE.finditer(rest):
+            if item.group("boundary").startswith(","):
+                prefix = part[:len(part) - len(rest) + item.start()]
+                prefix = re.split(r"[;,]|\s+(?:and|but)\s+", prefix, flags=re.IGNORECASE)[-1]
+                prefix = _TASK_SCOPE_MARKER.sub("", prefix).strip(" ,")
+                # "For this task, permanently ..." is one local instruction;
+                # "Run tests for this task, permanently ..." starts a sibling.
+                if not prefix or _EXPLICIT_DURABLE_SCOPE.fullmatch(prefix):
+                    continue
+            match = item
+            break
+        if not match:
+            return clauses
+        tail = rest[match.start("rule"):]
+        later = _TASK_SCOPE_MARKER.search(tail)
+        if not later:
+            clause = tail.strip(" ,")
+            if clause:
+                clauses.append(clause)
+            return clauses
+        before = tail[:later.start()]
+        # A trailing qualifier can govern a group of actions ("deploy and run
+        # tests for this task"). Find the start of that group, preserving noun
+        # lists and explicitly durable siblings before it. Cutting at either the
+        # first or last conjunction loses rules or keeps temporary authority.
+        splits = list(re.finditer(r",\s*(?:(?:and|but)\s+)?|\s+(?:and|but)\s+",
+                                 before, flags=re.IGNORECASE))
+        for index, split in enumerate(splits):
+            end = splits[index + 1].start() if index + 1 < len(splits) else len(before)
+            piece = before[split.end():end].strip(" ,")
+            if _AMBIGUOUS_OPERATION_OBJECT.match(piece):
+                return None
+            if (piece and (_DURABLE_DIRECTIVE.match(piece)
+                           or not (_LOCAL_OPERATION.match(piece) or _TASK_IMPERATIVE.match(piece)))):
+                continue
+            clause = before[:split.start()].strip(" ,")
+            if clause:
+                clauses.append(clause)
+            break
+        rest = tail[later.end():]
+    return clauses
+
+
+def local_instruction_remainder(text: str) -> str | None:
+    """What to store when text names this task or session.
+
+    None means this is not an operational local instruction, so the caller stores
+    the original text. An empty string means the instruction is entirely local and
+    must not be stored. Any other string is the lasting rule with the local grant
+    removed, the same text prompt capture would keep.
+    """
+    candidate = _directive_candidate_text(text).strip()
+    if not candidate:
+        return None
+    if not _TASK_SCOPE_MARKER.search(candidate):
+        return None
+    if len(candidate) > _MAX_DIRECTIVE_LEN:
+        # Hook capture refuses over-limit documents. The MCP path must not turn
+        # that parsing limit into permission to persist an explicit local grant.
+        # Ask for a separate lasting rule instead of extracting from a long blob.
+        return "" if (_CONSTRAINT_TRIGGER.search(candidate)
+                      or _LOCAL_OPERATION.search(candidate)) else None
+    kept = _directive_policy_text(candidate).strip()
+    if _TASK_SCOPE_MARKER.search(kept):
+        # Ambiguous noun/action chains cannot be safely rewritten. Ask the model
+        # to restate the lasting rule, regardless of the caller's chosen subtype.
+        return ""
+    if kept:
+        return _sanitize_directive(kept)
+    if _CONSTRAINT_TRIGGER.search(candidate) or _LOCAL_OPERATION.search(candidate):
+        return ""
+    return None
+
 
 # Deictic referents point at an object only this conversation can resolve - a strong
 # signal the directive is session-scoped intent, not a standing rule. Still stored
@@ -2056,7 +2202,7 @@ def capture_user_constraint_with_meta(
         content = _sanitize_directive(_directive_policy_text(prompt).strip())[:600]
     if not _is_storable(content):
         return None, None, None, {}
-    deictic = _is_deictic(content)
+    deictic = _is_deictic(content) or bool(_TASK_SCOPE_MARKER.search(content))
     ambiguous_label = bool(_AMBIGUOUS_STANDALONE_ATTRIBUTION.search(content)) or (
         bool(_AMBIGUOUS_LABELLED_DIRECTIVE.search(content))
         and not _CLEAR_SCOPE_LABEL.search(content)
@@ -2292,8 +2438,12 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
             "confirmation_required" if confirmation_required else "revision_proposed"), {}
 
     if pending_twin and not review_required:
+        if _TASK_SCOPE_MARKER.search(revisions.current_content(hit)):
+            # A shorter, unambiguous restatement must not bless the fuller draft
+            # when that draft still contains a possible temporary authorization.
+            revisions.append_revision(hit, content, source="human", approved_at=now)
         # Terse clean restatement is the activation gesture: bless revision 1 in place,
-        # keeping the fuller stored content (approve_decision precedent).
+        # keeping fuller content only when it has no unresolved task scope.
         cur = revisions.current_revision(hit)
         hit["status"] = "approved"
         hit["approved_at"] = now

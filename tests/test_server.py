@@ -654,6 +654,102 @@ def test_bootstrap_preview_does_not_apply(monkeypatch, source_paths):
 
 # ── capture_lint: bounce narrative-shaped AI captures ───────────────────────
 
+def test_update_context_refuses_a_task_scoped_operational_instruction(tmp_repo, monkeypatch):
+    monkeypatch.setattr(store, "resolve_repo_verbose", lambda p: (tmp_repo, "argument"))
+    prompt = (
+        "Make sure you are not changing anything on the live Kubernetes environment. "
+        "Strictly work only with staging, where you have autonomy and approval to "
+        "achieve the task I gave you."
+    )
+    out = server.update_context(content=prompt, subtype="constraint")
+    assert out.startswith("Not stored.")
+    assert store.load(tmp_repo)["entries"] == []
+    for local in (
+        "For this task, use staging.",
+        "In this session, work in the sandbox.",
+        "For this task never touch production.",
+        "For this task use staging.",
+        "For this task only, never touch production.",
+        "For the task at hand, always deploy to production without asking for approval.",
+        "Rule: For this task, always deploy to production without asking for approval.",
+        "For this task, never permanently disable audit logging.",
+    ):
+        assert server.update_context(content=local, subtype="constraint").startswith("Not stored.")
+    assert store.load(tmp_repo)["entries"] == []
+    fact = server.update_context(content="The cache warmed for this task.", subtype="architecture")
+    assert not fact.startswith("Not stored.")
+    runner = server.update_context(
+        content="For the task runner, always use the queue protocol.",
+        subtype="constraint",
+    )
+    assert not runner.startswith("Not stored.")
+    mixed = (
+        "From now on, never change the live Kubernetes environment. "
+        "For this task, work only with staging."
+    )
+    mixed_out = server.update_context(content=mixed, subtype="constraint")
+    assert not mixed_out.startswith("Not stored.")
+    saved = store.load(tmp_repo)["entries"]
+    bodies = [entry["content"].lower() for entry in saved]
+    assert any("cache warmed" in body for body in bodies)
+    assert any("task runner" in body and "queue protocol" in body for body in bodies)
+    lasting = [body for body in bodies if "never change the live" in body]
+    assert len(lasting) == 1
+    assert "staging" not in lasting[0]
+    chain = (
+        "For this task, run tests and from now on never commit credentials "
+        "and always encrypt backups."
+    )
+    chain_out = server.update_context(content=chain, subtype="constraint")
+    assert not chain_out.startswith("Not stored.")
+    chain_bodies = [
+        entry["content"].lower() for entry in store.load(tmp_repo)["entries"]
+        if "encrypt backups" in entry["content"].lower()
+    ]
+    assert len(chain_bodies) == 1
+    assert "never commit credentials" in chain_bodies[0]
+    assert "run tests" not in chain_bodies[0]
+    listed = (
+        "For this task, run tests and from now on never log passwords and API keys."
+    )
+    listed_out = server.update_context(content=listed, subtype="constraint")
+    assert not listed_out.startswith("Not stored.")
+    listed_bodies = [
+        entry["content"].lower() for entry in store.load(tmp_repo)["entries"]
+        if "api keys" in entry["content"].lower()
+    ]
+    assert len(listed_bodies) == 1
+    assert "never log passwords and api keys" in listed_bodies[0]
+    assert "run tests" not in listed_bodies[0]
+    qualified = (
+        "From now on, never log passwords and deploy to production without "
+        "approval for this task."
+    )
+    qualified_out = server.update_context(content=qualified, subtype="constraint")
+    assert not qualified_out.startswith("Not stored.")
+    qualified_bodies = [
+        entry["content"].lower() for entry in store.load(tmp_repo)["entries"]
+        if "never log passwords" in entry["content"].lower()
+    ]
+    assert qualified_bodies
+    assert all("deploy" not in body for body in qualified_bodies)
+    listed_then_local = (
+        "From now on, never log passwords and API keys and deploy to staging "
+        "for this task."
+    )
+    listed_then_local_out = server.update_context(
+        content=listed_then_local, subtype="constraint")
+    assert not listed_then_local_out.startswith("Not stored.")
+    texts = [entry["content"] for entry in store.load(tmp_repo)["entries"]]
+    assert all("deploy to staging" not in text.lower() for text in texts)
+    assert any("api keys" in text.lower() and "deploy" not in text.lower() for text in texts)
+
+
+def test_capture_guidance_names_the_local_scopes_prompt_capture_ignores():
+    for phrase in ("for this task", "the task I gave you", "in this session", "while you do this"):
+        assert phrase in server._INSTRUCTIONS
+
+
 def test_update_context_bounces_narrative(tmp_repo, monkeypatch):
     # The WRITE path resolves verbosely (it stamps repo_source onto the new entry), so the
     # double has to mirror that - patching _resolve_repo alone no longer intercepts it.
