@@ -28,6 +28,8 @@ ASSETS = Path(api.__file__).parent / "assets"
 SCRIPT = ASSETS / "console.js"
 MARKUP = ASSETS / "index.html"
 STYLES = ASSETS / "console.css"
+NODE = shutil.which("node")
+needs_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
 
 
 @pytest.fixture(scope="module")
@@ -492,6 +494,96 @@ def test_render_dispatches_the_sessions_route_to_view_sessions(script):
     ), 'render() must dispatch route.name === "sessions" to viewSessions(route.slug, route.id):\n' + body[:800]
 
 
+@needs_node
+def test_a_poll_rebuild_keeps_only_matching_pane_scroll(script):
+    """Execute the shipped render path across a refresh and overlapping navigation."""
+    css = STYLES.read_text()
+    detail_at = css.index(".detail {")
+    assert "overflow-y: auto" in css[detail_at:detail_at + 400]
+    declarations = "\n".join(_js_declaration(script, name) for name in (
+        "scrollRoute", "captureViewScroll", "restoreViewScroll", "render",
+    ))
+    js = """
+const state = { stores: [{ slug: "repo", is_current: true }], slug: "repo", edit: null };
+let route = { name: "decisions", slug: "repo", id: "first" };
+let renderSeq = 0;
+let renderedRoute = JSON.stringify(["decisions", "repo", "first"]);
+const requests = [];
+const document = { scrollingElement: { scrollTop: 40 } };
+const viewEl = {
+  panes: { ".detail": { scrollTop: 200 }, ".list-scroll": { scrollTop: 75 } },
+  querySelector(selector) { return this.panes[selector] || null; },
+  appendChild(node) { this.panes = node.panes; },
+};
+class NetworkError extends Error {}
+function clear(node) { node.panes = {}; }
+function parseHash() { return { ...route }; }
+function req() { return Promise.resolve(state.stores); }
+function asList(value) { return value; }
+function paintSidebar() {}
+function captureFocus() { return null; }
+function restoreFocus() {}
+function viewDecisions(slug, id) {
+  return new Promise((resolve) => requests.push({ id, resolve }));
+}
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+const pane = (detail, list) => ({ panes: {
+  ...(detail ? { ".detail": { scrollTop: 0 } } : {}),
+  ...(list ? { ".list-scroll": { scrollTop: 0 } } : {}),
+} });
+""" + declarations + """
+async function run() {
+  const refresh = render({ poll: true });
+  await tick();
+  viewEl.panes[".detail"].scrollTop = 330; // scrolling while the poll request is in flight
+  requests.shift().resolve(pane(true, true));
+  await refresh;
+  const same = { detail: viewEl.panes[".detail"].scrollTop,
+                 list: viewEl.panes[".list-scroll"].scrollTop,
+                 doc: document.scrollingElement.scrollTop };
+
+  route = { name: "decisions", slug: "repo", id: "second" };
+  const navigation = render();
+  await tick();
+  const poll = render({ poll: true }); // supersedes the still-loading navigation
+  await tick();
+  const oldNavigation = requests.shift();
+  const secondPoll = requests.shift();
+  secondPoll.resolve(pane(true, true));
+  await poll;
+  oldNavigation.resolve(pane(true, true));
+  await navigation;
+  const different = { detail: viewEl.panes[".detail"].scrollTop,
+                      list: viewEl.panes[".list-scroll"].scrollTop };
+
+  viewEl.panes[".detail"].scrollTop = 410;
+  viewEl.panes[".list-scroll"].scrollTop = 17;
+  const fewer = render({ poll: true });
+  await tick();
+  requests.shift().resolve(pane(false, true));
+  await fewer;
+  const listOnly = viewEl.panes[".list-scroll"].scrollTop;
+
+  const more = render({ poll: true });
+  await tick();
+  requests.shift().resolve(pane(true, false));
+  await more;
+  console.log(JSON.stringify({ same, different, listOnly,
+    newDetail: viewEl.panes[".detail"].scrollTop }));
+}
+run().catch((err) => { console.error(err); process.exitCode = 1; });
+"""
+    proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=10)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout.strip())
+    assert result == {
+        "same": {"detail": 330, "list": 75, "doc": 40},
+        "different": {"detail": 0, "list": 0},
+        "listOnly": 17,
+        "newDetail": 0,
+    }
+
+
 def test_capture_session_row_links_with_the_full_session_id_not_the_short_label(script):
     """Interface decision carried from the Task 1 review (binding): a row's `short_id` is not
     unique on prefix collisions, so every navigation link must be built from the full
@@ -578,9 +670,6 @@ def test_the_word_marks_are_gated_on_the_change_being_small(script):
 # proposal in full (`.drow-text` is clamped to two lines), so "the whole text is shown" is the
 # property that matters, and it is behavioural.
 
-NODE = shutil.which("node")
-needs_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
-
 # Minimal DOM: enough for h()/append() to build a tree and for the test to read it back.
 _DOM_SHIM = """
 class Node {
@@ -607,7 +696,7 @@ _JS_FUNCTIONS = ("append", "h", "tokenize", "diffTokens", "sameShare", "diffColu
 
 def _js_declaration(text: str, name: str) -> str:
     """`function name(...) { ... }`, declaration included — the body alone is not runnable."""
-    m = re.search(r"function\s+" + re.escape(name) + r"\s*\([^)]*\)\s*\{", text)
+    m = re.search(r"(?:async\s+)?function\s+" + re.escape(name) + r"\s*\([^)]*\)\s*\{", text)
     assert m, "no function %s in console.js" % name
     return text[m.start():m.end() - 1] + _block_at(text, m.end() - 1)
 

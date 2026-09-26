@@ -2869,6 +2869,7 @@
   // ── Render loop ───────────────────────────────────────────────────────────────────────
   const viewEl = document.getElementById("view");
   let renderSeq = 0;
+  let renderedRoute = null;
   let debounceTimer = 0;
 
   function debouncedRender() {
@@ -2897,6 +2898,33 @@
         /* not a text-selectable input */
       }
     }
+  }
+
+  // A poll replaces the view, including its internal scroll panes. The route that
+  // produced the visible DOM can differ from state.route while navigation loads.
+  function scrollRoute(route) {
+    return JSON.stringify([route.name, route.slug, route.id]);
+  }
+
+  function captureViewScroll() {
+    const root = document.scrollingElement;
+    const detail = viewEl.querySelector(".detail");
+    const list = viewEl.querySelector(".list-scroll");
+    return {
+      doc: root ? root.scrollTop : 0,
+      detail: detail ? detail.scrollTop : null,
+      list: list ? list.scrollTop : null,
+    };
+  }
+
+  function restoreViewScroll(snap) {
+    if (!snap) return;
+    const root = document.scrollingElement;
+    if (root) root.scrollTop = snap.doc;
+    const detail = viewEl.querySelector(".detail");
+    const list = viewEl.querySelector(".list-scroll");
+    if (detail && snap.detail !== null) detail.scrollTop = snap.detail;
+    if (list && snap.list !== null) list.scrollTop = snap.list;
   }
 
   async function render(opts) {
@@ -2938,7 +2966,6 @@
     if (route.name !== "decisions") state.edit = null;
 
     const focus = captureFocus();
-    const scroll = document.scrollingElement ? document.scrollingElement.scrollTop : 0;
     let node;
     try {
       if (route.name === "dashboard") node = await viewDashboard(route.slug);
@@ -2963,9 +2990,12 @@
       ]);
     }
     if (seq !== renderSeq) return; // a newer render won
+    // Keep capture next to the swap: an await here would lose scrolling during the fetch.
+    const scroll = o.poll && renderedRoute === scrollRoute(route) ? captureViewScroll() : null;
     clear(viewEl);
     viewEl.appendChild(node);
-    if (document.scrollingElement && o.poll) document.scrollingElement.scrollTop = scroll;
+    renderedRoute = scrollRoute(route);
+    if (scroll) restoreViewScroll(scroll);
     restoreFocus(focus);
     paintSidebar();
   }
