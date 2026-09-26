@@ -1235,6 +1235,11 @@ def _update_needs_approval(subtype: str, created_by: str) -> bool:
 
 # Prescriptive constraint/convention signals in user prompts.
 # al+w(?:ay|ya)s catches "always", "allways" (double-l), "alwyas" (transposition).
+_DIRECTIVE_OPERATION_VERBS = (
+    r"use|work|run|stay|keep|stick|operate|deploy|change|edit|modify|touch|write|"
+    r"switch|limit|restrict|encrypt|rotate|disable|enable|delete|remove|"
+    r"check|inspect|review|test|fix|implement|show|report|open|install|create|update"
+)
 _CONSTRAINT_TRIGGER = re.compile(
     r"\b(?:"
     r"store\s+this\s+decision(?=\s*:)"  # explicit human capture command
@@ -1254,6 +1259,8 @@ _CONSTRAINT_TRIGGER = re.compile(
     r"|from\s+now\s+on"             # from now on
     r"|going\s+forward"              # going forward
     r"|henceforth"                   # henceforth
+    # A clause-initial imperative, not descriptive "permanently encrypted" prose.
+    rf"|^permanently\s+(?:{_DIRECTIVE_OPERATION_VERBS})"
     r"|ensure\s+(?:you\s+|that\s+you\s+)"       # ensure you / ensure that you
     r"|make\s+sure\s+(?:you\s+|that\s+you\s+)"  # make sure you / make sure that you
     r"|(?:make|create|add|set|establish)\s+(?:a\s+|the\s+)?rule"  # "create a rule …"
@@ -1773,9 +1780,8 @@ _DIRECTIVE_WRAPPER_ONLY = re.compile(
 # "at hand"), or is followed by the instruction itself ("for this task never").
 # A different following word is a component name ("task runner", "session handler").
 _SCOPE_FOLLOWER = (
-    r"never|always|do|use|work|run|stay|keep|stick|operate|deploy|change|edit|"
-    r"modify|touch|write|switch|limit|restrict|please|ensure|make|from|avoid|"
-    r"stop|must|should"
+    rf"{_DIRECTIVE_OPERATION_VERBS}|never|always|do|please|ensure|make|from|avoid|"
+    r"stop|must|should|and|but|permanently|you|we"
 )
 _SCOPE_MODIFIER = r"(?:\s+only\b|\s+at\s+hand\b)?"
 _SCOPE_ADJUNCT_END = rf"(?!\s+(?!(?:{_SCOPE_FOLLOWER})\b)[A-Za-z])"
@@ -1793,8 +1799,8 @@ _TASK_SCOPE_MARKER = re.compile(
 # "permanently" counts only at a clause boundary: inside "never permanently
 # disable" it is an adverb, and slicing from it would drop the prohibition.
 _INDEPENDENT_LASTING_SCOPE = re.compile(
-    r"\b(?:from\s+now\s+on|going\s+forward|henceforth)\b"
-    r"|(?:^|[.!?]\s+|\b(?:and|but)\s+)permanently\b",
+    r"(?P<boundary>^|[.!?;,]\s*|\b(?:and|but)\s+)"
+    r"(?P<rule>from\s+now\s+on|going\s+forward|henceforth|permanently)\b",
     re.IGNORECASE,
 )
 _DURABLE_DIRECTIVE = re.compile(
@@ -1822,8 +1828,7 @@ _LOCAL_OPERATION = re.compile(
     r"(?:for|during|in)\s+(?:this|the)\s+"
     r"(?:run|pass|task|review|test|turn|request|bootstrap|session)\s+|"
     r"while\s+you\s+do\s+this\s+)"
-    r"(?:please\s+)?(?:use|work|run|stay|keep|stick|operate|deploy|"
-    r"change|edit|modify|touch|write|switch|limit|restrict)\b",
+    rf"(?:please\s+)?(?:permanently\s+)?(?:{_DIRECTIVE_OPERATION_VERBS})\b",
     re.IGNORECASE,
 )
 
@@ -1844,8 +1849,8 @@ def _directive_policy_text(text: str) -> str:
     # shorten an over-limit document into something that suddenly looks authoritative.
     if len(candidate) > _MAX_DIRECTIVE_LEN:
         return candidate
-    fragments = [part.strip(" ,") for part in re.split(
-        r"(?<=[.!?])\s+|\n+|,\s+(?:but|and)\s+|\s+but\s+", candidate,
+    fragments = [part.strip(" ,;") for part in re.split(
+        r"(?<=[.!?])\s+|;\s*|\n+|,\s+(?:but|and)\s+|\s+but\s+", candidate,
         flags=re.IGNORECASE) if part.strip(" ,")]
     if any(_TASK_SCOPE_MARKER.search(part) for part in fragments):
         # Explicit task scope governs sibling actions too. "Always" alone, and a
@@ -1877,10 +1882,21 @@ def _independent_lasting_clauses(part: str) -> list[str]:
     clauses = []
     rest = part
     while rest:
-        match = _INDEPENDENT_LASTING_SCOPE.search(rest)
+        match = None
+        for item in _INDEPENDENT_LASTING_SCOPE.finditer(rest):
+            if item.group("boundary").startswith(","):
+                prefix = part[:len(part) - len(rest) + item.start()]
+                prefix = re.split(r"[;,]|\s+(?:and|but)\s+", prefix, flags=re.IGNORECASE)[-1]
+                prefix = _TASK_SCOPE_MARKER.sub("", prefix).strip(" ,")
+                # "For this task, permanently ..." is one local instruction;
+                # "Run tests for this task, permanently ..." starts a sibling.
+                if not prefix or _EXPLICIT_DURABLE_SCOPE.fullmatch(prefix):
+                    continue
+            match = item
+            break
         if not match:
             return clauses
-        tail = rest[match.start():]
+        tail = rest[match.start("rule"):]
         later = _TASK_SCOPE_MARKER.search(tail)
         if not later:
             clause = tail.strip(" ,")
@@ -1888,15 +1904,21 @@ def _independent_lasting_clauses(part: str) -> list[str]:
                 clauses.append(clause)
             return clauses
         before = tail[:later.start()]
-        # The first "and" can swallow later ones, which drops an object list
-        # ("passwords and API keys") or a later lasting clause ("and always
-        # encrypt backups") along with the task-local action. The qualifier
-        # governs the final coordinated action, so cut at the last conjunction.
+        # A trailing qualifier can govern a group of actions ("deploy and run
+        # tests for this task"). Find the start of that group, preserving noun
+        # lists and explicitly durable siblings before it. Cutting at either the
+        # first or last conjunction loses rules or keeps temporary authority.
         splits = list(re.finditer(r"\s+(?:and|but)\s+", before, flags=re.IGNORECASE))
-        if splits:
-            clause = before[:splits[-1].start()].strip(" ,")
-            if clause and not _TASK_SCOPE_MARKER.search(clause):
+        for index, split in enumerate(splits):
+            end = splits[index + 1].start() if index + 1 < len(splits) else len(before)
+            piece = before[split.end():end].strip(" ,")
+            if (piece and (_DURABLE_DIRECTIVE.match(piece)
+                           or not (_LOCAL_OPERATION.match(piece) or _TASK_IMPERATIVE.match(piece)))):
+                continue
+            clause = before[:split.start()].strip(" ,")
+            if clause:
                 clauses.append(clause)
+            break
         rest = tail[later.end():]
     return clauses
 
@@ -1910,10 +1932,16 @@ def local_instruction_remainder(text: str) -> str | None:
     removed, the same text prompt capture would keep.
     """
     candidate = _directive_candidate_text(text).strip()
-    if not candidate or len(candidate) > _MAX_DIRECTIVE_LEN:
+    if not candidate:
         return None
     if not _TASK_SCOPE_MARKER.search(candidate):
         return None
+    if len(candidate) > _MAX_DIRECTIVE_LEN:
+        # Hook capture refuses over-limit documents. The MCP path must not turn
+        # that parsing limit into permission to persist an explicit local grant.
+        # Ask for a separate lasting rule instead of extracting from a long blob.
+        return "" if (_CONSTRAINT_TRIGGER.search(candidate)
+                      or _LOCAL_OPERATION.search(candidate)) else None
     kept = _directive_policy_text(candidate).strip()
     if kept:
         return _sanitize_directive(kept)
