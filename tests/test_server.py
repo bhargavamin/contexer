@@ -733,6 +733,16 @@ def test_update_context_refuses_a_task_scoped_operational_instruction(tmp_repo, 
     ]
     assert qualified_bodies
     assert all("deploy" not in body for body in qualified_bodies)
+    listed_then_local = (
+        "From now on, never log passwords and API keys and deploy to staging "
+        "for this task."
+    )
+    listed_then_local_out = server.update_context(
+        content=listed_then_local, subtype="constraint")
+    assert not listed_then_local_out.startswith("Not stored.")
+    texts = [entry["content"] for entry in store.load(tmp_repo)["entries"]]
+    assert all("deploy to staging" not in text.lower() for text in texts)
+    assert any("api keys" in text.lower() and "deploy" not in text.lower() for text in texts)
 
 
 def test_capture_guidance_names_the_local_scopes_prompt_capture_ignores():

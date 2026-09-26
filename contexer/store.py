@@ -1888,9 +1888,13 @@ def _independent_lasting_clauses(part: str) -> list[str]:
                 clauses.append(clause)
             return clauses
         before = tail[:later.start()]
-        split = re.search(r"\s+(?:and|but)\s+[^.!?]*$", before, flags=re.IGNORECASE)
-        if split:
-            clause = before[:split.start()].strip(" ,")
+        # The first "and" can swallow later ones, which drops an object list
+        # ("passwords and API keys") or a later lasting clause ("and always
+        # encrypt backups") along with the task-local action. The qualifier
+        # governs the final coordinated action, so cut at the last conjunction.
+        splits = list(re.finditer(r"\s+(?:and|but)\s+", before, flags=re.IGNORECASE))
+        if splits:
+            clause = before[:splits[-1].start()].strip(" ,")
             if clause and not _TASK_SCOPE_MARKER.search(clause):
                 clauses.append(clause)
         rest = tail[later.end():]

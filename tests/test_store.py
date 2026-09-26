@@ -977,6 +977,30 @@ class TestIsPrescriptiveConstraint:
         assert "deploy" not in content.lower()
         assert "staging build" not in content.lower()
 
+    def test_object_list_survives_a_trailing_task_action(self, tmp_repo):
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo,
+            "From now on, never log passwords and API keys and deploy to staging "
+            "for this task.",
+            "s1",
+        )
+        assert status == "approved"
+        assert entry_id
+        assert content == "From now on, never log passwords and API keys"
+        assert "deploy" not in content.lower()
+
+    def test_later_lasting_clause_survives_a_trailing_task_action(self, tmp_repo):
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo,
+            "From now on, never log passwords and always encrypt backups and "
+            "deploy staging for this task.",
+            "s1",
+        )
+        assert status == "approved"
+        assert entry_id
+        assert content == "From now on, never log passwords and always encrypt backups"
+        assert "deploy" not in content.lower()
+
     def test_ensure_you_with_object_quantifier_not_detected(self):
         # Greptile #216 P1: "any"/"all" quantify WHAT to act on, not HOW OFTEN — they
         # carry no recurrence, so they must not satisfy the durability requirement.
