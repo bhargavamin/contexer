@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.49.2](https://github.com/bhargavamin/contexer/compare/v0.49.1...v0.49.2) (2026-09-26)
+
+
+### Bug Fixes
+
+* **ui:** keep the decision pane scroll across console refreshes ([#331](https://github.com/bhargavamin/contexer/issues/331)) ([fb4839e](https://github.com/bhargavamin/contexer/commit/fb4839ee76dc6832bf2fe377a854aed13356623f))
+
 ## [0.49.1](https://github.com/bhargavamin/contexer/compare/v0.49.0...v0.49.1) (2026-09-26)
 
 
