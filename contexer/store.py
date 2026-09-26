@@ -1835,6 +1835,12 @@ _LOCAL_OPERATION = re.compile(
     rf"(?:please\s+)?(?:permanently\s+)?(?:{_DIRECTIVE_OPERATION_VERBS})\b",
     re.IGNORECASE,
 )
+# These technical object phrases can also be bare imperative actions. A local
+# qualifier later in the chain cannot resolve which reading the developer meant.
+_AMBIGUOUS_OPERATION_OBJECT = re.compile(
+    r"^(?:build\s+(?:artifacts|outputs)|release\s+notes|test\s+(?:results|reports))\b",
+    re.IGNORECASE,
+)
 
 
 def _directive_policy_text(text: str) -> str:
@@ -1866,7 +1872,12 @@ def _directive_policy_text(text: str) -> str:
                 if _EXPLICIT_DURABLE_SCOPE.search(part):
                     durable.append(part)
                 continue
-            durable.extend(_independent_lasting_clauses(part))
+            clauses = _independent_lasting_clauses(part)
+            if clauses is None:
+                # Keep the scope and the original wording: capture routes this
+                # mixed instruction to review, never to approved standing policy.
+                return candidate
+            durable.extend(clauses)
         return ". ".join(clause for clause in durable if clause)
     task_actions = sum(bool(_TASK_IMPERATIVE.search(part)) for part in fragments)
     if task_actions < 2:
@@ -1876,12 +1887,13 @@ def _directive_policy_text(text: str) -> str:
     return ". ".join(durable)
 
 
-def _independent_lasting_clauses(part: str) -> list[str]:
+def _independent_lasting_clauses(part: str) -> list[str] | None:
     """Lasting text in a clause that also names this task or session.
 
     Words joined to the lasting phrase by "and" stay with it. A task qualifier
     drops the coordinated action it governs, not only the words "for this task".
-    A leading rule label is not a lasting phrase.
+    A leading rule label is not a lasting phrase. None means a noun/action
+    ambiguity prevents lossless extraction; the caller must retain it for review.
     """
     clauses = []
     rest = part
@@ -1917,6 +1929,8 @@ def _independent_lasting_clauses(part: str) -> list[str]:
         for index, split in enumerate(splits):
             end = splits[index + 1].start() if index + 1 < len(splits) else len(before)
             piece = before[split.end():end].strip(" ,")
+            if _AMBIGUOUS_OPERATION_OBJECT.match(piece):
+                return None
             if (piece and (_DURABLE_DIRECTIVE.match(piece)
                            or not (_LOCAL_OPERATION.match(piece) or _TASK_IMPERATIVE.match(piece)))):
                 continue
@@ -1948,6 +1962,10 @@ def local_instruction_remainder(text: str) -> str | None:
         return "" if (_CONSTRAINT_TRIGGER.search(candidate)
                       or _LOCAL_OPERATION.search(candidate)) else None
     kept = _directive_policy_text(candidate).strip()
+    if _TASK_SCOPE_MARKER.search(kept):
+        # Ambiguous noun/action chains cannot be safely rewritten. Ask the model
+        # to restate the lasting rule, regardless of the caller's chosen subtype.
+        return ""
     if kept:
         return _sanitize_directive(kept)
     if _CONSTRAINT_TRIGGER.search(candidate) or _LOCAL_OPERATION.search(candidate):
@@ -2184,7 +2202,7 @@ def capture_user_constraint_with_meta(
         content = _sanitize_directive(_directive_policy_text(prompt).strip())[:600]
     if not _is_storable(content):
         return None, None, None, {}
-    deictic = _is_deictic(content)
+    deictic = _is_deictic(content) or bool(_TASK_SCOPE_MARKER.search(content))
     ambiguous_label = bool(_AMBIGUOUS_STANDALONE_ATTRIBUTION.search(content)) or (
         bool(_AMBIGUOUS_LABELLED_DIRECTIVE.search(content))
         and not _CLEAR_SCOPE_LABEL.search(content)
@@ -2420,8 +2438,12 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
             "confirmation_required" if confirmation_required else "revision_proposed"), {}
 
     if pending_twin and not review_required:
+        if _TASK_SCOPE_MARKER.search(revisions.current_content(hit)):
+            # A shorter, unambiguous restatement must not bless the fuller draft
+            # when that draft still contains a possible temporary authorization.
+            revisions.append_revision(hit, content, source="human", approved_at=now)
         # Terse clean restatement is the activation gesture: bless revision 1 in place,
-        # keeping the fuller stored content (approve_decision precedent).
+        # keeping fuller content only when it has no unresolved task scope.
         cur = revisions.current_revision(hit)
         hit["status"] = "approved"
         hit["approved_at"] = now

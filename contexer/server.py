@@ -135,8 +135,8 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
     kept = store.local_instruction_remainder(content)
     if kept is not None:
         if not kept:
-            return ("Not stored. That instruction is scoped to this task or session, so it is "
-                    "not a standing constraint. Restate only the lasting rule if one should persist.")
+            return ("Not stored. This text contains task- or session-local instructions. "
+                    "Restate only the lasting rule separately if one should persist.")
         content = kept
     # Verbose resolve on the WRITE path only: the branch that chose this store is stamped
     # onto the new entry, so a decision that lands in the wrong repo is diagnosable after

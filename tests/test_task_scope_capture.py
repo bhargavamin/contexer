@@ -124,3 +124,47 @@ def test_issue317_instruction_never_reaches_review(tmp_repo, monkeypatch, capsys
     assert store.load(tmp_repo)["entries"] == []
     cli.review()
     assert capsys.readouterr().out.strip() == "No decisions pending approval."
+
+
+@pytest.mark.parametrize("prompt", [
+    "From now on, always archive design notes and sprint plans, build artifacts and run tests for this task.",
+    "From now on, always archive design notes and sprint plans, release notes and run tests for the task.",
+    "From now on, never log passwords and build artifacts and run tests for this task.",
+])
+def test_ambiguous_object_action_chain_never_becomes_approved(prompt, tmp_repo, monkeypatch):
+    # Either reading is plausible. Keep the user's words for human review rather
+    # than approve a truncated rule or replay a possible temporary authorization.
+    _, content, status = store.capture_user_constraint(tmp_repo, prompt, "ambiguous-chain")
+    assert content == prompt.rstrip(".")
+    assert status == "pending_approval"
+    entries = store.load(tmp_repo)["entries"]
+    assert len(entries) == 1
+    assert entries[0]["content"] == prompt.rstrip(".")
+    assert entries[0]["status"] == "pending_approval"
+
+    mcp_repo = tmp_repo + "-mcp"
+    monkeypatch.setattr(store, "resolve_repo_verbose", lambda _: (mcp_repo, "argument"))
+    for subtype in ("constraint", "convention", "architecture"):
+        response = server.update_context(content=prompt, subtype=subtype)
+        assert response.startswith("Not stored.")
+        assert "lasting rule separately" in response
+    assert store.load(mcp_repo)["entries"] == []
+
+
+def test_clean_restatement_does_not_activate_ambiguous_task_tail(tmp_repo):
+    prompt = (
+        "From now on, always archive design notes and sprint plans, build artifacts "
+        "and run tests for this task."
+    )
+    entry_id, _, status = store.capture_user_constraint(tmp_repo, prompt, "ambiguous")
+    assert status == "pending_approval"
+    clean = "Always archive design notes."
+    promoted_id, content, status = store.capture_user_constraint(tmp_repo, clean, "clarified")
+    assert promoted_id == entry_id
+    assert status == "promoted"
+    assert content == clean.rstrip(".")
+    entry = store.load(tmp_repo)["entries"][0]
+    assert entry["status"] == "approved"
+    assert entry["content"] == clean.rstrip(".")
+    assert len(entry["revisions"]) == 2
+    assert entry["revisions"][0]["content"] == prompt.rstrip(".")
