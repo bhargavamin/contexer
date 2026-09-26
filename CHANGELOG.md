@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.49.1](https://github.com/bhargavamin/contexer/compare/v0.49.0...v0.49.1) (2026-09-26)
+
+
+### Bug Fixes
+
+* **capture:** ignore task-local operational instructions ([#330](https://github.com/bhargavamin/contexer/issues/330)) ([501d962](https://github.com/bhargavamin/contexer/commit/501d962cab22c8547e2886912d1efb5211ce42d4))
+* **guard:** drop unreachable prefix matcher and policy aliases ([#328](https://github.com/bhargavamin/contexer/issues/328)) ([7cedb58](https://github.com/bhargavamin/contexer/commit/7cedb58d887234dc79958925a56cdbb58464385a))
+
 ## [0.49.0](https://github.com/bhargavamin/contexer/compare/v0.48.2...v0.49.0) (2026-09-22)
 
 
