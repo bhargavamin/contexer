@@ -669,6 +669,9 @@ def test_update_context_refuses_a_task_scoped_operational_instruction(tmp_repo, 
         "In this session, work in the sandbox.",
         "For this task never touch production.",
         "For this task use staging.",
+        "For this task only, never touch production.",
+        "For the task at hand, always deploy to production without asking for approval.",
+        "Rule: For this task, always deploy to production without asking for approval.",
     ):
         assert server.update_context(content=local, subtype="constraint").startswith("Not stored.")
     assert store.load(tmp_repo)["entries"] == []
@@ -705,6 +708,18 @@ def test_update_context_refuses_a_task_scoped_operational_instruction(tmp_repo, 
     assert len(chain_bodies) == 1
     assert "never commit credentials" in chain_bodies[0]
     assert "run tests" not in chain_bodies[0]
+    listed = (
+        "For this task, run tests and from now on never log passwords and API keys."
+    )
+    listed_out = server.update_context(content=listed, subtype="constraint")
+    assert not listed_out.startswith("Not stored.")
+    listed_bodies = [
+        entry["content"].lower() for entry in store.load(tmp_repo)["entries"]
+        if "api keys" in entry["content"].lower()
+    ]
+    assert len(listed_bodies) == 1
+    assert "never log passwords and api keys" in listed_bodies[0]
+    assert "run tests" not in listed_bodies[0]
 
 
 def test_capture_guidance_names_the_local_scopes_prompt_capture_ignores():

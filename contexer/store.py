@@ -1769,22 +1769,29 @@ _DIRECTIVE_WRAPPER_ONLY = re.compile(
 # remove task-bounded clauses before the ordinary directive detector assigns human authority.
 # This stays deliberately structural: guessing whether an arbitrary sentence is "important"
 # would be a second semantic model in a prompt hook.
-# The scope noun ends the adjunct, or is followed by the instruction itself
-# ("for this task never ..."). A different following word is a component name
-# ("task runner", "session handler"), not a bound on this run.
+# The scope noun ends the adjunct, continues with a scope modifier ("only",
+# "at hand"), or is followed by the instruction itself ("for this task never").
+# A different following word is a component name ("task runner", "session handler").
 _SCOPE_FOLLOWER = (
     r"never|always|do|use|work|run|stay|keep|stick|operate|deploy|change|edit|"
     r"modify|touch|write|switch|limit|restrict|please|ensure|make|from|avoid|"
     r"stop|must|should"
 )
+_SCOPE_MODIFIER = r"(?:\s+only\b|\s+at\s+hand\b)?"
 _SCOPE_ADJUNCT_END = rf"(?!\s+(?!(?:{_SCOPE_FOLLOWER})\b)[A-Za-z])"
 _TASK_SCOPE_MARKER = re.compile(
     r"\b(?:for|during|in)\s+(?:this|the)\s+"
     r"(?:run|pass|task|review|test|turn|request|bootstrap|session)\b"
-    + _SCOPE_ADJUNCT_END +
+    + _SCOPE_MODIFIER + _SCOPE_ADJUNCT_END +
     r"|\b(?:this\s+time|right\s+now)\b" + _SCOPE_ADJUNCT_END +
     r"|\bthe\s+task\s+I\s+gave\s+you\b" + _SCOPE_ADJUNCT_END +
     r"|\bwhile\s+you\s+do\s+this\b" + _SCOPE_ADJUNCT_END,
+    re.IGNORECASE,
+)
+# A labeled "Rule:" on a task-scoped sentence is still that sentence. Only an
+# independent lasting phrase starts text that should outlive the task.
+_INDEPENDENT_LASTING_SCOPE = re.compile(
+    r"\b(?:from\s+now\s+on|going\s+forward|henceforth|permanently)\b",
     re.IGNORECASE,
 )
 _DURABLE_DIRECTIVE = re.compile(
@@ -1838,42 +1845,52 @@ def _directive_policy_text(text: str) -> str:
         r"(?<=[.!?])\s+|\n+|,\s+(?:but|and)\s+|\s+but\s+", candidate,
         flags=re.IGNORECASE) if part.strip(" ,")]
     if any(_TASK_SCOPE_MARKER.search(part) for part in fragments):
-        # Explicit task scope governs sibling actions too. "Always" alone can describe
-        # how to perform this run; only an independently declared lasting-policy clause
-        # escapes that scope. A lasting clause joined by a bare "and" is its own piece:
-        # the sentence split does not break on "and" without a comma. Once that lasting
-        # clause has started, a later always/never piece in the same chain stays with it.
+        # Explicit task scope governs sibling actions too. "Always" alone, and a
+        # "Rule:" label wrapped around a local instruction, describe this run.
+        # An independent lasting phrase is kept whole, including its own "and" list.
         durable = []
         for part in fragments:
-            pieces = [part]
-            if _TASK_SCOPE_MARKER.search(part) and re.search(r"\s+and\s+", part, re.IGNORECASE):
-                pieces = [piece.strip(" ,") for piece in re.split(r"\s+and\s+", part, flags=re.IGNORECASE)
-                          if piece.strip(" ,")]
-            lasting = False
-            for piece in pieces:
-                if _EXPLICIT_DURABLE_SCOPE.search(piece) and not _TASK_SCOPE_MARKER.search(piece):
-                    durable.append(piece)
-                    lasting = True
-                    continue
-                if (lasting and durable and _DURABLE_DIRECTIVE.search(piece)
-                        and not _TASK_SCOPE_MARKER.search(piece)):
-                    durable[-1] = f"{durable[-1]} and {piece}"
-                    continue
-                lasting = False
-                if not (_TASK_SCOPE_MARKER.search(piece) and _EXPLICIT_DURABLE_SCOPE.search(piece)):
-                    continue
-                stripped = re.sub(r"\s{2,}", " ", _TASK_SCOPE_MARKER.sub(" ", piece)).strip(" ,")
-                if (stripped and _EXPLICIT_DURABLE_SCOPE.search(stripped)
-                        and not _TASK_SCOPE_MARKER.search(stripped)):
-                    durable.append(stripped)
-                    lasting = True
-        return ". ".join(durable)
+            if not _TASK_SCOPE_MARKER.search(part):
+                if _EXPLICIT_DURABLE_SCOPE.search(part):
+                    durable.append(part)
+                continue
+            durable.extend(_independent_lasting_clauses(part))
+        return ". ".join(clause for clause in durable if clause)
     task_actions = sum(bool(_TASK_IMPERATIVE.search(part)) for part in fragments)
     if task_actions < 2:
         return candidate if not _TASK_SCOPE_MARKER.search(candidate) else ""
     durable = [part for part in fragments if _DURABLE_DIRECTIVE.search(part)
                and not _TASK_SCOPE_MARKER.search(part)]
     return ". ".join(durable)
+
+
+def _independent_lasting_clauses(part: str) -> list[str]:
+    """Lasting text in a clause that also names this task or session.
+
+    The lasting phrase is copied through to the next task-scope adjunct. Words
+    joined to it by "and" stay in that copy. A leading rule label is not a
+    lasting phrase, so a labeled local instruction contributes nothing.
+    """
+    clauses = []
+    rest = part
+    while True:
+        match = _INDEPENDENT_LASTING_SCOPE.search(rest)
+        if not match:
+            return clauses
+        tail = rest[match.start():]
+        later = _TASK_SCOPE_MARKER.search(tail)
+        if later:
+            clause = tail[:later.start()]
+            clause = re.sub(r"(?:\s+and|\s+but)\s*$", "", clause, flags=re.IGNORECASE)
+            rest = tail[later.end():]
+        else:
+            clause = tail
+            rest = ""
+        clause = clause.strip(" ,")
+        if clause and not _TASK_SCOPE_MARKER.search(clause):
+            clauses.append(clause)
+        if not rest:
+            return clauses
 
 
 def local_instruction_remainder(text: str) -> str | None:
