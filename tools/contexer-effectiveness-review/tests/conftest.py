@@ -99,6 +99,14 @@ class Transcript:
         self._write(rec)
 
 
+@pytest.fixture(autouse=True)
+def isolated_host(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     data = tmp_path / "data"

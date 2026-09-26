@@ -65,7 +65,7 @@ Both reporting scripts accept `--repo-key KEY`; the report also accepts `--host 
 
 ## What is recorded
 
-A review record describes a segment since the preceding review, not necessarily a whole task or developer session. Several commits can belong to one record, and one session can produce several records. Automatic triggers use attributed Git activity or visible PR-creation command intent; an attempted command does not prove success. Manual records carry their own kind.
+A review record describes a segment since the preceding review, not necessarily a whole task or developer session. Several commits can belong to one record, and one session can produce several records. Automatic triggers use attributed Git activity or visible PR-creation command intent; an attempted command does not prove success. Manual records carry their own kind. Repository selection follows the host's repository/workspace paths; the launch directory is only a fallback when those paths yield no repository.
 
 | Evidence | Examples | What it supports |
 |---|---|---|

@@ -487,7 +487,9 @@ def review_if_due(state, host, session, data, transcript_path, seg, end):
     seen = set(state.get("seen", []))
     message = None
     try:
-        infos = repos_for([data.get("cwd"), *(data.get("workspace_roots") or []), os.getcwd()])
+        infos = repos_for([data.get("cwd"), *(data.get("workspace_roots") or [])])
+        if not infos:
+            infos = repos_for([os.getcwd()])
         groups = [dict(info, commits=new_commits(info, state["checked_at"], seen))
                   for info in infos]
         found = [c for g in groups for c in g["commits"]]

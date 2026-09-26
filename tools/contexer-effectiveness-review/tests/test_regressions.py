@@ -367,3 +367,33 @@ def test_outcome_append_repairs_partial_line_and_is_idempotent(tmp_path, monkeyp
     assert outcomes.append_changed(row) is True
     assert outcomes.append_changed(row) is False
     assert json.loads(path.read_text().splitlines()[-1])['record_id'] == 'r1'
+
+
+def test_payload_repository_does_not_scan_unrelated_launch_directory(home, repo, tmp_path, monkeypatch):
+    from conftest import make_repo
+    unrelated = make_repo(tmp_path / 'unrelated')
+    # Empty local identity reproduces a clean CI runner regardless of global config.
+    git(unrelated, 'config', 'user.email', '')
+    monkeypatch.chdir(unrelated)
+    data_dir, env = home
+    t = Transcript(tmp_path / 'payload.jsonl', 'claude')
+    data = payload('claude', 'payload-repo', t.path, repo)
+    stop('claude', env, data)
+    commit(repo, 'fix.txt', 'fix: use the host repository')
+    t.shell('git commit -m fix')
+    result = stop('claude', env, data)
+    assert fired(result)
+    assert pending_of(data_dir, result)['repo'] == str(repo)
+
+
+def test_launch_directory_is_used_when_payload_has_no_repository(home, repo, tmp_path, monkeypatch):
+    monkeypatch.chdir(repo)
+    data_dir, env = home
+    t = Transcript(tmp_path / 'fallback.jsonl', 'claude')
+    data = json.dumps({'session_id': 'fallback-repo', 'transcript_path': str(t.path)})
+    stop('claude', env, data)
+    commit(repo, 'fix.txt', 'fix: fallback')
+    t.shell('git commit -m fix')
+    result = stop('claude', env, data)
+    assert fired(result)
+    assert pending_of(data_dir, result)['repo'] == str(repo)
