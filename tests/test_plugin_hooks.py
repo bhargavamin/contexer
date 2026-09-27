@@ -4,6 +4,7 @@ mcp_tool capture, and it must run the same code paths as the console-script inst
 import json
 import os
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -102,8 +103,16 @@ _SENTINEL_RE = re.compile(r" # contexer-managed-hook.*$")
 
 def _normalize_adapter_command(cmd: str, python: str) -> str:
     """installer-generated command -> the form the plugin bundle should carry."""
+    wrapper = shlex.split(cmd)
+    assert wrapper[:4] == [python, "-P", "-c",
+                           "from contexer.hook_host import run_claude; run_claude()"]
+    cmd = wrapper[4]
     cmd = cmd.replace(f'"{python}" -P -c', 'uv run --directory "${CLAUDE_PLUGIN_ROOT}" python -P -c')
-    return _SENTINEL_RE.sub("", cmd)
+    cmd = _SENTINEL_RE.sub("", cmd)
+    # --project keeps the workspace cwd until the inner command resolves REPO.
+    return ('uv run --project "${CLAUDE_PLUGIN_ROOT}" python -P -c '
+            '"from contexer.hook_host import run_claude; run_claude()" '
+            + shlex.quote(cmd))
 
 
 @pytest.fixture

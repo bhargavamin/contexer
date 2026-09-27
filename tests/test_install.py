@@ -1,5 +1,6 @@
 """Tests for contexer CLI install/uninstall commands."""
 import json
+import shlex
 
 import pytest
 
@@ -541,7 +542,7 @@ class TestBookkeepingWritesAreFailSoft:
         cmds = self._cmds(clean_home, "PostToolUse")
         post_write_cmds = [c for c in cmds if "claude.post_write" in c]
         assert len(post_write_cmds) == 1, "must replace, not duplicate"
-        assert post_write_cmds[0].startswith('REPO="$PWD" &&')
+        assert shlex.split(post_write_cmds[0])[-1].startswith('REPO="$PWD" &&')
         assert "git rev-parse" not in post_write_cmds[0]
 
     def test_reinstall_replaces_an_unguarded_anchor_hook(self, clean_home):

@@ -1,5 +1,6 @@
 """Tests for the multi-provider adapter registry."""
 import json as _json
+import shlex
 from pathlib import Path
 
 import pytest
@@ -393,13 +394,14 @@ class TestClaudePostWriteRepoResolutionParity:
         settings = _json.loads((home / ".claude" / "settings.json").read_text())
         cmds = [h["command"] for grp in settings["hooks"]["PostToolUse"]
                 for h in grp.get("hooks", []) if "command" in h]
-        return next(c for c in cmds if "claude.post_write" in c)
+        return shlex.split(next(c for c in cmds if "claude.post_write" in c))[-1]
 
     def _sibling_prefix(self, home):
         settings = _json.loads((home / ".claude" / "settings.json").read_text())
         cmds = [h["command"] for grp in settings["hooks"]["UserPromptSubmit"]
                 for h in grp.get("hooks", []) if "command" in h]
         rationale_cmd = next(c for c in cmds if "claude.rationale" in c)
+        rationale_cmd = shlex.split(rationale_cmd)[-1]  # inside the host boundary
         # Repo-resolution prefix: everything up to and including the `&&` that starts
         # the python invocation.
         return rationale_cmd.split("&&")[0] + "&&"

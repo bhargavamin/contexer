@@ -19,6 +19,23 @@ Full integration: automatic session-start injection of your rules, per-prompt ra
 contexer install --target cursor
 ```
 
+### Using Cursor and Claude Code together
+
+Contexer's integration follows the application, regardless of the selected model. Claude models in Cursor use the native Cursor integration for session context, directive capture, and MCP retrieval and saving. The Claude Code application uses the Claude Code integration, including when launched from Cursor's terminal.
+
+Cursor can also [import Claude Code hooks](https://cursor.com/docs/reference/third-party-hooks). Contexer's Claude Code registrations return silently when invoked by Cursor, avoiding duplicate bootstrap instructions and other actions. Cursor may still list these skipped hooks in its activity log. Other applications' hooks and Cursor's import settings are left unchanged.
+
+After updating Contexer, refresh both registrations:
+
+```bash
+contexer install --target claude
+contexer install --target cursor
+```
+
+Start a new Cursor conversation with a Claude model. Ask it to save a distinctive project convention, then ask it to recall that convention. Native session context and Contexer tools should work; imported Claude Code hooks should return `{}` without repeating bootstrap work. To check the registration boundary locally from a source checkout, run `uv run pytest tests/test_hook_host.py --no-cov`.
+
+### Cursor behavior
+
 This registers Contexer's MCP server in `~/.cursor/mcp.json` and wires two Cursor hook events in `~/.cursor/hooks.json`:
 
 - `sessionStart`: injects your stored project rules and a usage nudge, and drops a managed always-apply rule at `<repo>/.cursor/rules/contexer.mdc`.

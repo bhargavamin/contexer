@@ -1,5 +1,6 @@
 """Tests for the Codex adapter install/uninstall."""
 import json
+import shlex
 import sys
 import tomllib
 from pathlib import Path
@@ -617,6 +618,7 @@ class TestCodexPostWriteRepoResolutionParity:
         claude_cmds = [h["command"] for g in claude_settings["hooks"]["PostToolUse"]
                        for h in g.get("hooks", []) if "command" in h]
         claude_post_write = next(c for c in claude_cmds if "claude.post_write" in c)
+        claude_post_write = shlex.split(claude_post_write)[-1]  # Claude-only host boundary
         claude_prefix = claude_post_write.split("&&")[0] + "&&"
 
         assert codex_prefix == claude_prefix

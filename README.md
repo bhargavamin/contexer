@@ -72,6 +72,8 @@ contexer install           # 2. wire into your AI assistants
 
 `contexer install` auto-detects supported assistants and configures the ones it finds. Restart your assistant, open your project, and follow Contexer's first-run setup guidance to build its starting context.
 
+Cursor uses its own Contexer integration with every supported model, including Claude. If you also use Claude Code, Contexer prevents its imported Claude Code hooks from duplicating actions in Cursor. See the [coexistence setup](docs/integrations.md#using-cursor-and-claude-code-together).
+
 Then try telling your assistant:
 
 ```text
