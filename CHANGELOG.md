@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.49.3](https://github.com/bhargavamin/contexer/compare/v0.49.2...v0.49.3) (2026-09-27)
+
+
+### Bug Fixes
+
+* **hooks:** prevent duplicate Claude hooks in Cursor ([#335](https://github.com/bhargavamin/contexer/issues/335)) ([bfa24bf](https://github.com/bhargavamin/contexer/commit/bfa24bf404c82f8dabc6022c3b3d92a40a46ef5a))
+
 ## [0.49.2](https://github.com/bhargavamin/contexer/compare/v0.49.1...v0.49.2) (2026-09-26)
 
 
