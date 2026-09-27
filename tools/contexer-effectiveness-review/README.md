@@ -46,7 +46,7 @@ Then test **actual host delivery** in a disposable repository:
 
 1. Activate the hook in your selected host. Open a scratch Git repository with an initial commit, with Contexer enabled for the session.
 2. Ask the agent to make a small change, test it, and commit it. Let the turn finish normally.
-3. Expect one “Contexer effectiveness review due” follow-up. The agent reads the installed skill, writes its assessment, validates it, and logs it. The review continuation should not repeatedly trigger itself.
+3. Expect one “Contexer effectiveness review due” follow-up. The agent reads the installed skill, writes its assessment, validates it, and logs it. The review continuation should not repeatedly trigger itself. If logging is abandoned or fails, the same pending token is offered at the next normal stop until logged or expired; new activity waits behind it.
 4. Verify that a new record appears under `~/.contexer-usage/records/` and run the report below. A neutral result is a successful collection test; usefulness is not required.
 5. Repeat for each host/version you intend to use. Automated format tests do not establish that every host build delivers hooks or complete transcripts.
 
@@ -61,11 +61,11 @@ uv run --no-project --python 3.13 python "$SKILL_DIR/scripts/summarize.py"
 uv run --no-project --python 3.13 python "$SKILL_DIR/scripts/summarize.py" --host codex
 ```
 
-Both reporting scripts accept `--repo-key KEY`; the report also accepts `--host HOST`, `--kind hook|manual` and an optional externally counted `--eligible-work N`. Read keys from record filenames. Run outcome collection again after CI finishes or a PR merges: it appends changed statuses and retries previously absent PRs. It may fetch Git remote history and query GitHub through `gh`; it never publishes review records. There is no background collection schedule.
+Both reporting scripts accept `--repo-key KEY`; the report also accepts `--host HOST`, `--kind hook|manual` and an optional externally counted `--eligible-work N`. Read keys from record filenames. Run outcome collection again after CI finishes or a PR merges: it appends changed statuses and retries previously absent PRs. Branch-based PR lookup requires every reviewed commit to appear in the candidate PR; a reused branch, missing commit membership or PR-command-only segment stays unverified/unknown rather than receiving unrelated outcomes. It may fetch Git remote history and query GitHub through `gh`; it never publishes review records. There is no background collection schedule.
 
 ## What is recorded
 
-A review record describes a segment since the preceding review, not necessarily a whole task or developer session. Several commits can belong to one record, and one session can produce several records. Automatic triggers use attributed Git activity or visible PR-creation command intent; an attempted command does not prove success. Manual records carry their own kind. Repository selection follows the host's repository/workspace paths; the launch directory is only a fallback when those paths yield no repository.
+A review record describes a fixed transcript segment since the preceding review, not necessarily a whole task or developer session. Reoffering a pending review preserves its original byte boundary and observations. Several commits can belong to one record, and one session can produce several records. Automatic triggers use attributed Git activity or visible PR-creation command intent; an attempted command does not prove success. Manual records carry their own kind. Repository selection follows the host's repository/workspace paths; the launch directory is only a fallback when those paths yield no repository.
 
 | Evidence | Examples | What it supports |
 |---|---|---|
@@ -174,7 +174,7 @@ See the [study design note](https://github.com/bhargavamin/contexer/blob/codex/e
 
 ## Coverage and privacy
 
-Unknown script observations are `null`, never zero. New judgment fields use explicit `uncertain` or `unknown` enums. Missing transcripts and opaque Codex wrappers can hide calls and results; directly observed counts are only lower bounds. Cursor records do not expose the result and injection evidence needed for exhaustive id verification. Check completeness flags and `ids_verified` before comparing cohorts. Literal commands inside known wrappers show intent only. Compaction can replace transcripts and replay old evidence; concurrent agents weaken commit attribution. Exclude or separately report unverified attribution for comparisons.
+Unknown script observations are `null`, never zero. New judgment fields use explicit `uncertain` or `unknown` enums. Missing transcripts and opaque Codex wrappers can hide calls and results; directly observed counts are only lower bounds. Cursor records do not expose the result and injection evidence needed for exhaustive id verification. Check completeness flags and `ids_verified` before comparing cohorts. Literal commands inside known wrappers show intent only. Compaction can replace transcripts and replay old evidence; concurrent agents weaken commit attribution. Exclude or separately report unverified attribution for comparisons. A temporary committer identity is recognized when a visible Git command result supplies a matching commit SHA; hosts without that result evidence still cannot establish the alternate identity.
 
 Automatic sampling favors work that reaches commit/PR activity. Abandoned work, non-commit investigations, missing hook delivery, failed reviews and manual selection bias are not fully measured. The dataset is not a denominator for all developer work. Keep an external enrollment/completion log if estimating collection coverage.
 
@@ -188,7 +188,7 @@ Raw transcripts are read locally but not copied into primary records. Optional s
 
 If no review appears, check host hook execution/trust, whether the turn completed normally, whether a new commit or PR command was visible, and `~/.contexer-usage/hook-errors.log`. Missing transcripts reduce coverage; they do not mean zero use. Aborted turns and hook continuations defer eligible evidence until the next ordinary stop. A validation error lists the fields to correct; never edit a pending observation to force acceptance. An expired pending review can be replaced with a manual review, labeled accordingly.
 
-Remove registrations for selected hosts while retaining the skill, configuration backups and collected data:
+Only registrations targeting this user’s exact managed skill path are removed; matching filename suffixes in other checkouts are preserved. Remove registrations for selected hosts while retaining the skill, configuration backups and collected data:
 
 ```bash
 SKILL_DIR="$HOME/.agents/skills/contexer-effectiveness-review"

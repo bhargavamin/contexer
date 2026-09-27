@@ -24,7 +24,7 @@ def test_product_install_reinstall_uninstall_preserves_review_hook(tmp_path, mon
     def review_commands():
         entries = json.loads(path.read_text())['hooks'].get(event, [])
         hooks = entries if host == 'cursor' else [hook for group in entries for hook in group['hooks']]
-        return [hook['command'] for hook in hooks if installer.owned(hook)]
+        return [hook['command'] for hook in hooks if installer.owned(hook, tmp_path / '.agents/skills' / installer.NAME)]
 
     expected = review_commands()
     assert len(expected) == 1

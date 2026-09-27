@@ -29,7 +29,9 @@ Resolve script paths relative to this skill directory, not the current repositor
 2. Read the pending file. It holds the commits, how they were attributed to this session, the
    Contexer calls the script saw, and which facts the transcript could show (`null` means not
    visible, not zero). Never edit it: the logger rejects a pending file whose digest changed.
-3. Go back over this session since the last review and write the judgment JSON defined in
+3. Review only the pending segment, from `segment.from_offset` through `segment.to_offset`
+   when present. A retried token still refers to its original evidence; exclude later work.
+   Write the judgment JSON defined in
    [schema.md](schema.md):
    - the task and what kind of problem it was: knowledge needed, where the answer lived, scope;
    - a stable `task.task_id`, reused for later segments of this same task;
@@ -104,7 +106,8 @@ Resolve script paths relative to this skill directory, not the current repositor
   unreadable records and counts duplicates once.
 
 Previously absent PRs are checked again on later outcome runs. Failed fetches or git queries
-produce unknown revert status. Reports separate unknown tool counts from observed zero counts.
+produce unknown revert status. Branch-based PR matching requires the reviewed commits;
+branch reuse and PR-command-only evidence remain unverified without commit membership. Reports separate unknown tool counts from observed zero counts.
 
 ## Known limits
 
@@ -115,6 +118,10 @@ produce unknown revert status. Reports separate unknown tool counts from observe
   release script, but no visible git command), or `git_only` (no transcript; 15-minute
   lookback). Sessions that made no shell or subagent call are never credited. Filter out
   `unverified` when two sessions may have committed in the same repo at once.
+- Unlogged automatic reviews are reoffered with the same token on the next normal stop, until
+  logged or the seven-day pending retention expires. New activity remains queued behind them.
+  A matching SHA in a visible Git command result can establish a temporary committer identity;
+  a command string alone cannot.
 - Commits made in an aborted turn, or in a continuation another hook forced, are reviewed on the
   next normal turn. Failed git queries and timeouts preserve the evidence for the next stop.
   Each git call has a 4-second limit; the hook's git work has a shared 7-second budget.

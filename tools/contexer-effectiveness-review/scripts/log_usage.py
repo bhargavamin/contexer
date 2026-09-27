@@ -324,8 +324,8 @@ def default_branch(repo):
     return "main" if out.returncode == 0 else "master"
 
 
-def pr_lookup(repo, branch):
-    """(url or None, status): status is ok, none, no_branch, or error."""
+def pr_lookup(repo, branch, commits=()):
+    """Match a branch candidate to every reviewed commit; branch names alone are not identity."""
     if not repo or not branch or branch == "HEAD":
         return None, "no_branch"
     default = default_branch(repo)
@@ -342,7 +342,22 @@ def pr_lookup(repo, branch):
     if out.returncode != 0:
         return None, "error"
     url = out.stdout.strip()
-    return (url, "ok") if url else (None, "none")
+    if not url:
+        return None, "none"
+    if not commits:
+        return None, "unverified"
+    try:
+        out = subprocess.run(['gh', 'pr', 'view', url, '--json', 'commits'], cwd=repo,
+                             capture_output=True, text=True, timeout=15)
+        data = json.loads(out.stdout) if out.returncode == 0 else {}
+        shas = [row['oid'] for row in data['commits']]
+        if any(not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{40}', sha) for sha in shas):
+            return None, 'error'
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError):
+        return None, 'error'
+    matched = all(isinstance(prefix, str) and re.fullmatch(r'[0-9a-f]{7,40}', prefix)
+                  and any(sha.startswith(prefix) for sha in shas) for prefix in commits)
+    return (url, 'ok') if matched else (None, 'unverified')
 
 
 def record_key(pending):
@@ -403,7 +418,8 @@ def main():
         return
     if not pending:
         parser.error("--token is required (from the review prompt or stop_hook.py --manual)")
-    url, status = pr_lookup(pending["repo"], pending.get("branch"))
+    url, status = pr_lookup(pending["repo"], pending.get("branch"),
+                            [c['sha'] for c in pending['trigger']['commits']])
     record = {
         "schema": SCHEMA,
         "record_id": uuid.uuid4().hex,

@@ -159,3 +159,15 @@ def test_home_alias_is_resolved_but_nested_symlinks_are_rejected(tmp_path, sourc
     with pytest.raises(ValueError, match='symlink'):
         install.install(alias, ['codex'], source=source)
     assert not (other / 'hooks.json').exists()
+
+
+@pytest.mark.parametrize('host', list(install.CONFIGS))
+def test_same_suffix_in_another_checkout_is_not_owned(tmp_path, host):
+    destination = tmp_path / '.agents/skills' / install.NAME
+    foreign = {'type': 'command', 'command': f'python /another/checkout/{install.NAME}/scripts/stop_hook.py --host {host}'}
+    event = install.CONFIGS[host][1]
+    entries = [foreign] if host == 'cursor' else [{'hooks': [foreign]}]
+    config = {'hooks': {event: entries}}
+    added = install.configured(config, host, destination, Path(sys.executable))
+    removed = install.configured(added, host, destination, Path(sys.executable), uninstall=True)
+    assert removed['hooks'][event] == entries

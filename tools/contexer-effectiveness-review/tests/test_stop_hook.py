@@ -40,12 +40,14 @@ def test_real_pr_command_triggers_without_a_commit(home, repo, tmp_path):
 
 
 def test_review_turn_text_does_not_retrigger_next_turn(home, repo, tmp_path):
-    _, env = home
+    data_dir, env = home
     t = Transcript(tmp_path / "t.jsonl", "cursor")
     stop("cursor", env, payload("cursor", "s1", t.path, repo))
     commit(repo, "b.txt", "fix: b")
     t.shell("git commit -m b")
-    assert fired(stop("cursor", env, payload("cursor", "s1", t.path, repo)))
+    first = stop("cursor", env, payload("cursor", "s1", t.path, repo))
+    assert fired(first)
+    (data_dir / 'pending' / f'{token_of(first)}.json').unlink()  # Simulate consumed review.
     t.shell("gh pr create --title 'mentioned in review'")
     assert not fired(stop("cursor", env, payload("cursor", "s1", t.path, repo, loop_count=1)))
     assert not fired(stop("cursor", env, payload("cursor", "s1", t.path, repo)))
@@ -222,7 +224,9 @@ def test_partial_last_line_is_read_next_time(home, repo, tmp_path):
         {"type": "tool_use", "id": "x", "name": "mcp__contexer__get_context", "input": {}}]}})
     with open(t.path, "a") as f:
         f.write(line[:20])
-    assert fired(stop("claude", env, payload("claude", "pl", t.path, repo)))
+    first = stop("claude", env, payload("claude", "pl", t.path, repo))
+    assert fired(first)
+    (data_dir / 'pending' / f'{token_of(first)}.json').unlink()  # First review consumed.
     with open(t.path, "a") as f:
         f.write(line[20:] + "\n")
     commit(repo, "c.txt", "fix: c")
@@ -348,4 +352,4 @@ def test_one_review_per_commit(home, repo, tmp_path):
     first = stop("claude", env, payload("claude", "once", t.path, repo))
     t.shell("git commit -m b")
     second = stop("claude", env, payload("claude", "once", t.path, repo))
-    assert fired(first) and not fired(second) and token_of(first)
+    assert fired(first) and token_of(first) == token_of(second)  # Unlogged evidence is reoffered, not duplicated.

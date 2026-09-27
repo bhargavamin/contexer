@@ -19,14 +19,15 @@ CONFIGS = {'cursor': ('.cursor/hooks.json', 'stop'),
            'codex': ('.codex/hooks.json', 'Stop')}
 
 
-def owned(hook):
+def owned(hook, destination):
     if not isinstance(hook, dict) or not isinstance(hook.get('command'), str):
         return False
     try:
         parts = shlex.split(hook['command'])
     except ValueError:
         return False
-    return any(Path(part).parts[-3:] == (NAME, 'scripts', 'stop_hook.py') for part in parts)
+    expected = destination / 'scripts/stop_hook.py'
+    return any(Path(part).is_absolute() and Path(part) == expected for part in parts)
 
 
 def reject_symlinks(path):
@@ -56,13 +57,13 @@ def configured(config, host, destination, python, uninstall=False):
         if not isinstance(entry, dict):
             raise ValueError(f'Expected an object in hooks.{event}')
         if host == 'cursor':
-            if not owned(entry):
+            if not owned(entry, destination):
                 kept.append(entry)
         else:
             members = entry.get('hooks')
             if not isinstance(members, list):
                 raise ValueError(f'Expected a hooks list inside hooks.{event}')
-            remaining = [hook for hook in members if not owned(hook)]
+            remaining = [hook for hook in members if not owned(hook, destination)]
             if remaining or not members:
                 kept.append(dict(entry, hooks=remaining))
     if not uninstall:

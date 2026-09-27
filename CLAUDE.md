@@ -207,13 +207,18 @@ those paths yield no repository. It combines Git discovery and host transcript o
 digest-checked pending segment under `~/.contexer-usage/`. `transcript.py` parses host formats;
 opaque wrappers and missing transcript evidence make exhaustive counts unknown. Bounded Git
 work, session locks, transcript digests and carried evidence prevent failed scans from silently
-consuming activity. Literal shell calls in supported wrappers are intent, not execution proof.
+consuming activity. Literal shell calls in supported wrappers are intent, not execution proof. Visible Git-result
+SHAs can match temporary committer identities. Unlogged hook observations are reoffered by
+their original digest/token and fixed transcript boundary; fresh evidence is carried forward
+until the pending record is consumed or expires. A completed record left behind after interrupted
+pending-file cleanup is recognized by record_key. Branch-based PR candidates require reviewed
+commit membership; exact managed-destination paths establish installer ownership.
 `log_usage.py` validates bounded judgments, provenance and same-session capture exclusions;
 `privacy.py` omits argument values and filters known credentials. `outcomes.py` appends later
 GitHub/Git observations; `summarize.py` deduplicates records and reports denominators and coverage.
 The runtime uses the standard library; uv is used to run it and provision pytest for tests.
 
-Schema `contexer-effectiveness/v3` and observer `observe-v5` are distinct version axes.
+Schema `contexer-effectiveness/v3` and observer `observe-v6` are distinct version axes.
 `assessment.py` validates opportunity/action/fact recovery fields while projecting common
 fields through the retained v2 provenance validator. `measurement.py` computes the explicit
 conditional funnel and material-fact denominators. `secondary.py` seals a separate required-
