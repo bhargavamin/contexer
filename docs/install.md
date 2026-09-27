@@ -37,6 +37,13 @@ Verify the server is connected — open any Claude Code session and run:
 contexer install --target cursor     # or: contexer install (auto-detects ~/.cursor)
 ```
 
+For an existing installation with both Cursor and Claude Code, after updating the package:
+
+```bash
+contexer install --target claude
+contexer install --target cursor
+```
+
 This registers Contexer's MCP server in `~/.cursor/mcp.json` and wires `sessionStart` +
 `beforeSubmitPrompt` hooks in `~/.cursor/hooks.json`. On each session start in a repo, Contexer
 also drops a managed always-apply rule at `<repo>/.cursor/rules/contexer.mdc` (marker-guarded —

@@ -4,6 +4,7 @@ mcp_tool capture, and it must run the same code paths as the console-script inst
 import json
 import os
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -91,6 +92,8 @@ def test_capture_hooks_present(plugin_hooks):
 # Two differences are legitimate and documented in hooks/hooks.json's _comment:
 #   1. invocation: the plugin runs `uv run --directory "${CLAUDE_PLUGIN_ROOT}" python`
 #      (durable plugin dir) where the installer uses `"{sys.executable}"` directly.
+#      Its outer stdlib guard runs as a file with an existing interpreter found
+#      offline by uv, before loading or syncing that project.
 #   2. sentinel: every installer-generated command carries a trailing
 #      `# contexer-managed-hook` comment (so `install()`/`uninstall()` can recognize
 #      and migrate their own previously-written hooks on reinstall) — the static
@@ -102,8 +105,18 @@ _SENTINEL_RE = re.compile(r" # contexer-managed-hook.*$")
 
 def _normalize_adapter_command(cmd: str, python: str) -> str:
     """installer-generated command -> the form the plugin bundle should carry."""
+    wrapper = shlex.split(cmd)
+    assert wrapper[:4] == [python, "-P", "-c",
+                           "from contexer.hook_host import run_claude; run_claude()"]
+    cmd = wrapper[4]
     cmd = cmd.replace(f'"{python}" -P -c', 'uv run --directory "${CLAUDE_PLUGIN_ROOT}" python -P -c')
-    return _SENTINEL_RE.sub("", cmd)
+    cmd = _SENTINEL_RE.sub("", cmd)
+    # Find an existing interpreter without loading/syncing the plugin project.
+    # The standalone stdlib guard preserves cwd until the inner command resolves REPO.
+    return ("CONTEXER_HOOK_PYTHON=$(uv python find --no-project --no-config --system "
+            "--offline --no-python-downloads '>=3.12') && "
+            '"$CONTEXER_HOOK_PYTHON" -P "${CLAUDE_PLUGIN_ROOT}/contexer/hook_host.py" '
+            + shlex.quote(cmd))
 
 
 @pytest.fixture

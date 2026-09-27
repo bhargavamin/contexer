@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -590,8 +591,16 @@ def install(home: Path) -> list[str]:
     log: list[str] = []
     python = sys.executable
 
+    def _claude_only(command: str) -> str:
+        # Cursor imports ~/.claude/settings.json as well as its native hooks. Gate at
+        # registration, not in shared handlers that Codex also calls. Keep the original
+        # command in argv so exact-command migrations and ownership remain inspectable.
+        return (f'{shlex.quote(python)} -P -c '
+                '"from contexer.hook_host import run_claude; run_claude()" '
+                f'{shlex.quote(command)}')
+
     def _py(code: str) -> str:
-        return (
+        return _claude_only(
             'REPO="$PWD" && '
             f'"{python}" -P -c "{code}" "$REPO" # {_HOOK_SENTINEL}'
         )
@@ -629,7 +638,7 @@ def install(home: Path) -> list[str]:
     # `tail` as the hook's stdout JSON. The python call prints nothing — only `tail`
     # reaches stdout, so the hook output stays valid.
     def _sync(tail: str) -> str:
-        return (
+        return _claude_only(
             'REPO="$PWD" && '
             f'"{python}" -P -c "from contexer import store; from contexer.adapters import claude; '
             'import sys; raw=sys.stdin.read(); '
@@ -707,6 +716,14 @@ def install(home: Path) -> list[str]:
                       f'print(claude.post_write(sys.argv[1], sys.stdin.read()))" "$REPO" '
                       f'# {_HOOK_SENTINEL} .pending_capture')
 
+    anchor_cmd = _claude_only(anchor_cmd)
+    plan_cmd = _claude_only(plan_cmd)
+    cap_con = _claude_only(cap_con)
+    cap_rat = _claude_only(cap_rat)
+    cap_poll = _claude_only(cap_poll)
+    review_cmd = _claude_only(review_cmd)
+    post_write_cmd = _claude_only(post_write_cmd)
+
     contexer_bin = shutil.which("contexer") or "contexer"
 
     # MCP server (~/.claude.json)
@@ -777,7 +794,9 @@ def install(home: Path) -> list[str]:
         put.append({"matcher": "Write|Edit", "hooks": [{"type": "command",
             "command": post_write_cmd}]})
     # Plan-approval capture: separate matcher on ExitPlanMode, injects the reminder directly.
-    if not _in_groups(put, "plan approved"):
+    put = _strip_stale(put, ["plan approved"], plan_cmd)
+    hooks["PostToolUse"] = put
+    if not _has_exact_command(put, plan_cmd):
         put.append({"matcher": "ExitPlanMode", "hooks": [{"type": "command",
             "command": plan_cmd}]})
 
