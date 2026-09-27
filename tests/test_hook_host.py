@@ -3,6 +3,7 @@ import io
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -109,6 +110,31 @@ def test_reinstall_migrates_all_owned_hooks_and_preserves_foreign_siblings(insta
     assert all(h == foreign for groups in remaining.values() for g in groups for h in g["hooks"])
 
 
+@pytest.mark.parametrize("stale", [False, True])
+@pytest.mark.parametrize("sibling", [False, True])
+def test_foreign_plan_marker_cannot_suppress_managed_reminder(installed, stale, sibling):
+    path = installed / ".claude/settings.json"
+    settings = json.loads(path.read_text())
+    groups = settings["hooks"]["PostToolUse"]
+    plan = next(g for g in groups if g.get("matcher") == "ExitPlanMode")
+    expected = plan["hooks"][0]["command"]
+    plan["hooks"] = ([{"type": "command", "command": shlex.split(expected)[-1]}]
+                     if stale else [])
+    foreign = {"type": "command", "command": "echo 'plan approved by human'", "timeout": 17}
+    if sibling:
+        plan["hooks"].append(foreign)
+    else:
+        groups.append({"matcher": "ExitPlanMode", "hooks": [foreign]})
+    path.write_text(json.dumps(settings))
+    claude.install(installed)
+    migrated = path.read_bytes()
+    hooks = [h for g in json.loads(migrated)["hooks"]["PostToolUse"] for h in g["hooks"]]
+    assert foreign in hooks
+    assert sum(h["command"] == expected for h in hooks) == 1
+    claude.install(installed)
+    assert path.read_bytes() == migrated
+
+
 def test_claude_command_passes_prompt_literally_and_preserves_reminders(installed, tmp_path):
     flag = installed / ".contexer/.pending_capture"
     flag.parent.mkdir()
@@ -196,3 +222,48 @@ def test_plugin_guard_preserves_workspace_and_skips_cursor(installed, tmp_path, 
     offered = invoke(command, {"session_id": "claude-plugin"}, repo)
     assert offered.returncode == 0, offered.stderr
     assert str(repo) in offered.stdout
+
+
+@pytest.mark.parametrize("broken_env", [False, True])
+def test_plugin_skips_cursor_without_starting_or_repairing_project(installed, tmp_path, monkeypatch, broken_env):
+    root = Path(__file__).resolve().parents[1]
+    bundle = tmp_path / "plugin with spaces"
+    (bundle / "contexer").mkdir(parents=True)
+    shutil.copyfile(root / "contexer/hook_host.py", bundle / "contexer/hook_host.py")
+    # A project load would fail, and there is deliberately no installed contexer here.
+    (bundle / "pyproject.toml").write_text("not valid TOML [")
+    if broken_env:
+        (bundle / ".venv/bin").mkdir(parents=True)
+        (bundle / ".venv/pyvenv.cfg").write_text("home = /missing-python\n")
+        (bundle / ".venv/bin/python").symlink_to("/missing-python")
+    real_uv = shutil.which("uv")
+    assert real_uv
+    log = tmp_path / "uv-calls"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    trap = bin_dir / "uv"
+    trap.write_text("#!/bin/sh\n"
+                    f"printf '%s\\n' \"$*\" >> {shlex.quote(str(log))}\n"
+                    'if [ "$1 $2" = "python find" ]; then\n'
+                    f"  exec {shlex.quote(real_uv)} \"$@\"\n"
+                    "fi\nexit 97\n")
+    trap.chmod(0o700)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(bin_dir), str(Path(sys._base_executable).parent),
+                                               os.environ["PATH"]]))
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(bundle))
+    monkeypatch.delenv("UV_NO_SYNC", raising=False)
+    monkeypatch.delenv("UV_NO_PROJECT", raising=False)
+    hooks = json.loads((root / "hooks/hooks.json").read_text())["hooks"]
+    before = sorted(str(p.relative_to(bundle)) for p in bundle.rglob("*"))
+    for groups in hooks.values():
+        for group in groups:
+            for hook in group["hooks"]:
+                result = invoke(hook["command"], {"cursor_version": "3.21.18", "model": "claude-sonnet"}, tmp_path)
+                assert result.returncode == 0, result.stderr
+                assert result.stdout == "{}\n"
+                assert result.stderr == ""
+    assert sorted(str(p.relative_to(bundle)) for p in bundle.rglob("*")) == before
+    assert len(log.read_text().splitlines()) == 11
+    assert all(line.startswith("python find ") and "--no-project" in line
+               and "--no-config" in line and "--offline" in line
+               and "--no-python-downloads" in line for line in log.read_text().splitlines())

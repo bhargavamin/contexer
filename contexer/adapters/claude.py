@@ -796,7 +796,7 @@ def install(home: Path) -> list[str]:
     # Plan-approval capture: separate matcher on ExitPlanMode, injects the reminder directly.
     put = _strip_stale(put, ["plan approved"], plan_cmd)
     hooks["PostToolUse"] = put
-    if not _in_groups(put, "plan approved"):
+    if not _has_exact_command(put, plan_cmd):
         put.append({"matcher": "ExitPlanMode", "hooks": [{"type": "command",
             "command": plan_cmd}]})
 

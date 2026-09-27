@@ -25,3 +25,7 @@ def run_claude() -> None:
         return
     result = subprocess.run(sys.argv[1], shell=True, input=raw)
     raise SystemExit(result.returncode)
+
+
+if __name__ == "__main__":
+    run_claude()
