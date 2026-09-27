@@ -218,7 +218,7 @@ Duplicate feature rows are rejected. Features the observer directly saw must be 
 
 ## Observation coverage
 
-The observer version is `observe-v5`; new records use `contexer-effectiveness/v3`.
+The observer version is `observe-v6`; new records use `contexer-effectiveness/v3`.
 Valid v2 records remain readable without rewriting them. Their missing v3 assessments remain
 unknown; old `code_would_reveal=no` is not mapped to any new recovery flag. Unsupported v1
 records remain on disk and are reported as skipped. Schema and observer versions are separate.
@@ -342,3 +342,9 @@ Reviewer identity and real-world independence are declarations, not externally v
 Partial/unblinded reviews appear in coverage and agreement; the benefit funnel accepts only
 reviews declaring blind first-stage assessment. Multiple conflicting blind reviews yield
 uncertain. Unknown earlier follow-up assessments are not automatically superseded by later yes.
+
+Observer v6 adds positive Git-result commit SHAs and a fixed `segment.to_offset`. These permit
+matching temporary committer identities when results are visible and keep retries scoped to the
+original segment. A branch-only PR candidate without reviewed commit membership is `unverified`
+and maps to unknown outcome status. Missing or opaque result evidence cannot establish an
+alternate committer identity; a command string alone is insufficient.

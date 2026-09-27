@@ -533,5 +533,84 @@ def test_pruning_failure_does_not_lose_seen_commit_state(home, repo, tmp_path, m
         raise PermissionError('pending directory unavailable')
     monkeypatch.setattr(stop_hook, 'prune_pending', fail)
     assert stop_hook.run_hook('claude', data)
+    for path in (data_dir / 'pending').glob('*.json'):
+        path.unlink()  # The logger consumed the review before the next stop.
     assert stop_hook.run_hook('claude', data) is None
     assert json.loads(stop_hook.state_path('prune-failure').read_text())['seen']
+
+
+def test_retry_pending_keeps_new_commit_evidence_and_stops_after_logging(home, repo, tmp_path):
+    data_dir, env = home
+    t = Transcript(tmp_path / 'retry.jsonl', 'claude')
+    data = payload('claude', 'retry', t.path, repo)
+    stop('claude', env, data)
+    first_sha = commit(repo, 'b.txt', 'first')
+    t.shell('git commit -m first')
+    first = stop('claude', env, data)
+    p = pending_of(data_dir, first)
+    second_sha = commit(repo, 'c.txt', 'second')
+    t.shell('git commit -m second')
+    retry = stop('claude', env, data)
+    assert token_of(retry) == token_of(first)
+    assert pending_of(data_dir, retry) == p
+    records = data_dir / 'records' / f"{p['repo_key']}.jsonl"
+    records.parent.mkdir()
+    records.write_text(json.dumps({'record_key': f"retry|{p['token']}"}) + '\n')
+    next_review = stop('claude', env, data)
+    assert token_of(next_review) != token_of(first)
+    shas = [c['sha'] for c in pending_of(data_dir, next_review)['trigger']['commits']]
+    assert second_sha[:12] in shas and first_sha[:12] not in shas
+
+
+@pytest.mark.parametrize('unset_config', [False, True])
+def test_temporary_committer_is_matched_by_result_sha(home, repo, tmp_path, unset_config):
+    data_dir, env = home
+    t = Transcript(tmp_path / 'identity.jsonl', 'claude')
+    data = payload('claude', 'identity', t.path, repo)
+    stop('claude', env, data)
+    sha = commit(repo, 'b.txt', 'temporary identity', env={'GIT_COMMITTER_EMAIL': 'temporary@example.com'})
+    # Another identity's commit is not attributed just because some commit command ran.
+    other = commit(repo, 'c.txt', 'someone else', env={'GIT_COMMITTER_EMAIL': 'other@example.com'})
+    t.call('Bash', {'command': 'GIT_COMMITTER_EMAIL=temporary@example.com git commit -m fix'}, result=f'[main {sha[:7]}] fix')
+    if unset_config:
+        git(repo, 'config', '--unset', 'user.email')
+    result = stop('claude', env, data)
+    shas = [c['sha'] for c in pending_of(data_dir, result)['trigger']['commits']]
+    assert sha[:12] in shas and other[:12] not in shas
+
+
+def test_temporary_committer_result_survives_guarded_turn(home, repo, tmp_path):
+    data_dir, env = home
+    t = Transcript(tmp_path / 'identity.jsonl', 'claude')
+    data = payload('claude', 'carry-identity', t.path, repo)
+    stop('claude', env, data)
+    sha = commit(repo, 'b.txt', 'temporary', env={'GIT_COMMITTER_EMAIL': 'temporary@example.com'})
+    t.call('Bash', {'command': 'git -c user.email=temporary@example.com commit -m fix'}, result=f'[main {sha[:7]}] fix')
+    assert not fired(stop('claude', env, payload('claude', 'carry-identity', t.path, repo, stop_hook_active=True)))
+    result = stop('claude', env, data)
+    assert pending_of(data_dir, result)['trigger']['commits'][0]['sha'] == sha[:12]
+
+
+@pytest.mark.parametrize('commits,expected', [(['a'*12], 'ok'), (['b'*12], 'unverified'), ([], 'unverified')])
+def test_branch_candidate_needs_reviewed_commits(monkeypatch, commits, expected):
+    from types import SimpleNamespace
+    monkeypatch.setattr(log_usage, 'default_branch', lambda repo: 'main')
+    calls = []
+    def fake(args, **kwargs):
+        calls.append(args)
+        value = 'https://example/pr/1' if 'list' in args else json.dumps({'commits': [{'oid': 'a'*40}]})
+        return SimpleNamespace(returncode=0, stdout=value)
+    monkeypatch.setattr(log_usage.subprocess, 'run', fake)
+    url, status = log_usage.pr_lookup('/repo', 'reused-branch', commits)
+    assert status == expected
+    assert bool(url) == (expected == 'ok')
+    assert len(calls) == (2 if commits else 1)
+
+
+def test_unverified_branch_candidate_does_not_attach_outcome(monkeypatch):
+    rec = record(1, 'rationale', 'neutral')
+    rec.update(repo='/repo', branch='reused', pr_lookup='none')
+    monkeypatch.setattr(outcomes, 'pr_lookup', lambda *a: (None, 'unverified'))
+    monkeypatch.setattr(outcomes, 'pr_outcome', lambda *a: pytest.fail('must not attach unrelated PR'))
+    monkeypatch.setattr(outcomes, 'reverted', lambda *a: None)
+    assert outcomes.outcome_for(rec)['pr_state'] == 'unknown'

@@ -32,7 +32,7 @@ import privacy  # noqa: E402
 ROOT = Path(os.environ.get("CONTEXER_USAGE_HOME") or Path.home() / ".contexer-usage")
 SKILL = Path(__file__).resolve().parent.parent / "SKILL.md"
 LOGGER = Path(__file__).resolve().parent / "log_usage.py"
-OBSERVER_VERSION = "observe-v5"
+OBSERVER_VERSION = "observe-v6"
 GIT_TIMEOUT = float(os.environ.get("CONTEXER_USAGE_GIT_TIMEOUT") or 4)
 _GIT_DEADLINE = None
 NO_TRANSCRIPT_LOOKBACK = 900
@@ -94,11 +94,11 @@ def repos_for(paths):
     return found
 
 
-def new_commits(info, since, seen):
-    """This user's commits on any branch or worktree HEAD with a committer time >= since."""
+def new_commits(info, since, seen, result_shas=()):
+    """Configured-identity commits or commits matched to a visible Git command result."""
     repo = info["repo"]
-    email = git(repo, "config", "user.email", required=True)
-    if not email:
+    email = git(repo, "config", "user.email", required=not result_shas)
+    if not email and not result_shas:
         raise GitError("commit attribution requires user.email")
     worktrees = git(repo, "worktree", "list", "--porcelain", required=True)
     heads = [ln.split()[1] for ln in worktrees.splitlines()
@@ -117,7 +117,8 @@ def new_commits(info, since, seen):
         if len(parts) != 4:
             continue
         sha, ct, ce, subject = parts
-        if sha in seen or int(ct) < int(since) or (email and ce != email):
+        result_matched = any(sha.startswith(prefix) for prefix in result_shas)
+        if sha in seen or int(ct) < int(since) or (ce != email and not result_matched):
             continue
         found.append({"sha": sha[:12], "full_sha": sha, "time": int(ct),
                       "subject": privacy.scrub(subject)[:200], "shortstat": stat.strip(),
@@ -150,6 +151,7 @@ def observe(events, host):
     surface_ids = {name: set() for name in ("get_context", "review_pending", "other_tool")}
     first_contexer_at, exploration = None, 0
     git_writes = pr_creates = 0
+    git_call_ids, git_result_shas = set(), set()
     result_ids, autofetch_ids, hook_ids, autofetch_blocks = set(), set(), set(), 0
     opaque = False
     for ev in events:
@@ -169,9 +171,13 @@ def observe(events, host):
                 opaque |= wrapped
                 commands = transcript.shell_commands(args, wrapped)
                 git_writes += any(re.match(_ENV + _GIT_WRITE, c) for c in commands)
+                if any(re.match(_ENV + _GIT_WRITE, c) for c in commands):
+                    git_call_ids.add(call_id)
                 pr_creates += any(re.match(_ENV + _PR_CREATE, c) for c in commands)
             if "create_pull_request" in name.lower():
                 pr_creates += 1
+        elif ev[0] == "result" and ev[1] in git_call_ids:
+            git_result_shas.update(re.findall(r'(?m)^\[[^\]\n]*?\b([0-9a-f]{7,40})\]', ev[2]))
         elif ev[0] == "result" and ev[1] in contexer_ids_by_call:
             ids = decision_ids(ev[2])
             result_ids.update(ids)
@@ -200,6 +206,7 @@ def observe(events, host):
         "capture_ids_complete": results and not opaque,
         "exploration_before_first_contexer_call": None if opaque else first_contexer_at,
         "git_write_commands": git_writes,
+        "git_result_commits": sorted(git_result_shas),
         "pr_create_commands": pr_creates,
         "tool_results_visible": results,
         "contexer_result_ids": sorted(result_ids) if results and not opaque else None,
@@ -297,7 +304,11 @@ def valid_state(state):
     if not isinstance(captures, list) or not all(isinstance(x, str) for x in captures):
         return False
     carry = state.get("carry", {})
-    return isinstance(carry, dict) and all(type(v) is int and v >= 0 for v in carry.values())
+    if not isinstance(carry, dict):
+        return False
+    commits = carry.get('git_result_commits', [])
+    return (isinstance(commits, list) and all(isinstance(sha, str) and re.fullmatch(r'[0-9a-f]{7,40}', sha) for sha in commits)
+            and all(type(v) is int and v >= 0 for k, v in carry.items() if k != 'git_result_commits'))
 
 
 def write_json(path, data):
@@ -342,7 +353,7 @@ def prune_pending(state):
 
 def build_pending(state, host, session, model, transcript_path, commits_by_repo, attribution,
                   pr_seen, kind):
-    text, _, _ = read_segment(transcript_path, state["review_offset"])
+    text, to_offset, _ = read_segment(transcript_path, state["review_offset"])
     observed = observe(transcript.parse(text, host), host)
     available = bool(transcript_path and Path(transcript_path).is_file())
     observed['transcript_available'] = available
@@ -379,7 +390,7 @@ def build_pending(state, host, session, model, transcript_path, commits_by_repo,
         "repo_key": primary["repo_key"],
         "branch": git(repo, "rev-parse", "--abbrev-ref", "HEAD") if repo else "",
         "remote": git(repo, "remote", "get-url", "origin") if repo else "",
-        "segment": {"from_offset": state["review_offset"], "since": state["review_at"],
+        "segment": {"from_offset": state["review_offset"], "to_offset": to_offset, "since": state["review_at"],
                     "transcript_reset": bool(state.get("transcript_reset"))},
         "trigger": {
             "attribution": attribution,
@@ -490,6 +501,36 @@ def add_carry(state, seg, include_pr=True):
         carry[key] = carry.get(key, 0) + seg[key]
     for key in ("shell", "subagent"):
         carry[key] = carry.get(key, 0) + seg["tool_calls"][key]
+    carry['git_result_commits'] = sorted(set(carry.get('git_result_commits', [])) | set(seg.get('git_result_commits', [])))
+
+
+def unresolved_pending(state, host, session):
+    """Reoffer immutable unlogged evidence; never synthesize a new token for the same sample."""
+    for token, expected in state.get('digests', {}).items():
+        path = ROOT / 'pending' / f'{token}.json'
+        try:
+            pending = json.loads(path.read_text())
+        except FileNotFoundError:
+            continue
+        if (digest(pending) != expected or pending.get('host') != host
+                or pending.get('session_id') != session or pending.get('kind') != 'hook'
+                or time.time() - pending['created_at'] >= PENDING_TTL):
+            continue
+        records = ROOT / 'records' / f"{pending['repo_key']}.jsonl"
+        logged = False
+        if records.is_file():
+            with records.open() as stream:
+                for line in stream:
+                    try:
+                        row = json.loads(line)
+                        logged |= isinstance(row, dict) and row.get('record_key') == f'{session}|{token}'
+                    except ValueError:
+                        continue
+        if logged:
+            path.unlink(missing_ok=True)
+        else:
+            return pending
+    return None
 
 
 def attribute(transcript_path, evidence):
@@ -506,6 +547,10 @@ def attribute(transcript_path, evidence):
 
 
 def review_if_due(state, host, session, data, transcript_path, seg, end):
+    unresolved = unresolved_pending(state, host, session)
+    if unresolved:
+        add_carry(state, seg)
+        return prompt(unresolved)
     carry = state.get("carry", {})
     evidence = {
         "git_write_commands": seg["git_write_commands"] + carry.get("git_write_commands", 0),
@@ -520,7 +565,8 @@ def review_if_due(state, host, session, data, transcript_path, seg, end):
         infos = repos_for([data.get("cwd"), *(data.get("workspace_roots") or [])])
         if not infos:
             infos = repos_for([os.getcwd()])
-        groups = [dict(info, commits=new_commits(info, state["checked_at"], seen))
+        result_shas = sorted(set(seg.get('git_result_commits', [])) | set(carry.get('git_result_commits', [])))
+        groups = [dict(info, commits=new_commits(info, state["checked_at"], seen, result_shas))
                   for info in infos]
         found = [c for g in groups for c in g["commits"]]
         attribution = attribute(transcript_path, evidence)

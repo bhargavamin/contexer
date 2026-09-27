@@ -92,7 +92,8 @@ def outcome_for(rec):
     if not Path(repo).is_dir() and isinstance(canonical, str) and Path(canonical).is_dir():
         repo = canonical
     if not url and rec.get("pr_lookup", "error") != "no_branch":
-        url, status = pr_lookup(repo, rec.get("branch"))
+        url, status = pr_lookup(repo, rec.get("branch"),
+                               [c['sha'] for c in rec.get('trigger', {}).get('commits', [])])
         row["pr_lookup"] = status
     merge = None
     if url:
