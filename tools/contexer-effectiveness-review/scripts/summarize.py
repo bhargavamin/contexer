@@ -11,7 +11,9 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from log_usage import ENUMS, ROOT, SCHEMA, record_paths, validate  # noqa: E402
+from log_usage import ENUMS, ROOT, SCHEMA, LEGACY_SCHEMA, record_paths, validate  # noqa: E402
+import assessment  # noqa: E402
+import measurement  # noqa: E402
 
 MIN_RECORDS = 20
 MIN_ROW = 5
@@ -25,13 +27,13 @@ DIMENSIONS = [
 
 
 def usable(rec):
-    if not isinstance(rec, dict) or rec.get("schema") != SCHEMA:
+    if not isinstance(rec, dict) or rec.get("schema") not in (SCHEMA, LEGACY_SCHEMA):
         return False
     if any(not isinstance(rec.get(k), str) or not rec[k] for k in
            ("record_id", "recorded_at", "repo_key", "session_id", "host")):
         return False
     j = rec.get("judgment")
-    if validate(j):
+    if validate(j, schema=rec["schema"]):
         return False
     trigger = rec.get("trigger")
     if not isinstance(trigger, dict) or not isinstance(trigger.get("commits"), list):
@@ -59,7 +61,7 @@ def dedupe_key(rec):
     return (rec.get('repo_key'), rec.get('host'), rec.get('session_id'), shas or rec.get('record_id'))
 
 
-def load(repo_key, host):
+def load(repo_key, host, kind=None):
     records, skipped, dupes, keys = [], 0, 0, set()
     for path in record_paths(repo_key):
         for line in path.read_text().splitlines():
@@ -72,6 +74,8 @@ def load(repo_key, host):
                 skipped += 1
                 continue
             if host and rec.get("host") != host:
+                continue
+            if kind and rec.get("kind") != kind:
                 continue
             key = dedupe_key(rec)
             if key in keys:
@@ -136,14 +140,20 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-key")
     parser.add_argument("--host")
+    parser.add_argument("--kind", choices=["hook", "manual"])
+    parser.add_argument("--eligible-work", type=int, help="Externally counted eligible segments in this exact cohort")
     args = parser.parse_args()
-    records, outcomes, skipped, dupes = load(args.repo_key, args.host)
+    records, outcomes, skipped, dupes = load(args.repo_key, args.host, args.kind)
     n = len(records)
     print("# Contexer effectiveness report\n")
     if skipped or dupes:
         print(f"Skipped {skipped} unreadable or older-schema record(s) and {dupes} duplicate(s).\n")
     if not n:
         print("No usable records yet.")
+        try:
+            measurement.render(records, args.eligible_work)
+        except ValueError as exc:
+            parser.error(str(exc))
         return
     j = [r["judgment"] for r in records]
     print(f"Records: {n} across {len({r.get('repo_key') for r in records})} repo(s); hosts: "
@@ -159,7 +169,12 @@ def main():
         print(f"\n> Only {n} record(s), under {MIN_RECORDS}: read this as descriptive, "
               "not as a conclusion.")
 
-    print("\n## Verdicts (self-assessed)\n")
+    try:
+        measurement.render(records, args.eligible_work)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    print("\n## Secondary descriptive verdicts (self-assessed)\n")
     for key in ("contexer_effect", "without_contexer", "confidence"):
         c = Counter(x["verdict"].get(key) for x in j)
         print(f"- {key}: {share(c, n, ENUMS['verdict.' + key])}")
@@ -168,11 +183,12 @@ def main():
     facts = [f for x in j for f in x["key_facts"] if isinstance(f, dict)]
     print(f"- source: {share(Counter(f.get('source') for f in facts), len(facts), ENUMS['key_facts.source'])}")
     ctx = [f for f in facts if f.get("source") == "contexer"]
-    print("- Contexer-sourced facts, could the code alone have shown them: "
-          f"{share(Counter(f.get('code_would_reveal') for f in ctx), len(ctx), ENUMS['key_facts.code_would_reveal'])}")
+    recovery_labels = list(dict.fromkeys(assessment.RECOVERY + ENUMS['key_facts.code_would_reveal']))
+    print("- Contexer-sourced facts, assessed recovery labels (legacy labels retained): "
+          f"{share(Counter(f.get('code_would_reveal') for f in ctx), len(ctx), recovery_labels)}")
     other = [f for f in facts if f.get("source") != "contexer"]
-    print("- facts from other sources, could the code alone have shown them: "
-          f"{share(Counter(f.get('code_would_reveal') for f in other), len(other), ENUMS['key_facts.code_would_reveal'])}")
+    print("- facts from other sources, assessed recovery labels (legacy labels retained): "
+          f"{share(Counter(f.get('code_would_reveal') for f in other), len(other), recovery_labels)}")
 
     print("\n## Where Contexer works best, by kind of problem\n")
     print(f"Credited = decisive or helpful (self-assessed). Only values with {MIN_ROW}+ records "

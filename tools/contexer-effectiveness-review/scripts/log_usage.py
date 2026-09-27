@@ -20,9 +20,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import stop_hook  # noqa: E402
 import privacy  # noqa: E402
+import assessment  # noqa: E402
 
 ROOT = stop_hook.ROOT
-SCHEMA = "contexer-effectiveness/v2"
+SCHEMA = "contexer-effectiveness/v3"
+LEGACY_SCHEMA = "contexer-effectiveness/v2"
 
 FEATURES = ["session_start_rules", "autofetch", "get_context", "update_context",
             "capture_reminder", "prompt_constraint_capture", "review_pending", "review_nudge",
@@ -207,7 +209,7 @@ def ids_verified(judgment, observed):
                for i in items)
 
 
-def validate(j, observed=None):
+def validate_base(j, observed=None, allow_empty_features=False):
     errs = []
     if not isinstance(j, dict):
         return ["judgment must be a JSON object"]
@@ -233,7 +235,7 @@ def validate(j, observed=None):
     _check_ids(j, errs)
     if not j.get("key_facts"):
         errs.append("key_facts needs at least one fact that the task's outcome depended on")
-    if not j.get("feature_ratings"):
+    if not j.get("feature_ratings") and not allow_empty_features:
         errs.append("feature_ratings needs every Contexer feature that appeared this segment "
                     "(session start rules appear in almost every session)")
     verdict = j.get("verdict")
@@ -263,6 +265,20 @@ def validate(j, observed=None):
             errs.append(f"key_facts[{i}].contexer_ids must reference contexer_items")
     _check_consistency(j, observed, errs)
     return errs
+
+
+def validate(j, observed=None, schema=SCHEMA):
+    if schema == LEGACY_SCHEMA:
+        return validate_base(j, observed)
+    if schema != SCHEMA:
+        return [f"Unsupported judgment schema: {schema}"]
+    if not isinstance(j, dict):
+        return ["judgment must be a JSON object"]
+    errors = validate_base(assessment.base_projection(j), observed, allow_empty_features=True)
+    errors.extend(assessment.validate(j, observed))
+    if any(privacy.SECRET.search(text) for text in _texts(j)):
+        errors.append("judgment text looks like it contains a secret or credential; remove it")
+    return errors
 
 
 def load_pending(token):

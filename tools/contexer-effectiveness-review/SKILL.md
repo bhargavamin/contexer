@@ -5,8 +5,10 @@ description: Records evidence of whether Contexer helped a coding session, separ
 
 # Contexer effectiveness review
 
-Goal: build a dataset that shows where Contexer beats an LLM reading the code, and where
-the LLM does as well or better. A record that says Contexer did not help is exactly as
+Primary question: when non-code engineering intent matters, does Contexer supply a fact
+that materially changes the action and could not reliably be recovered from the current
+repository and good decision documentation? Separate how often this opportunity occurs
+from success when it occurs. A record that says Contexer did not help is exactly as
 valuable as one that says it did.
 
 Each record has three parts, produced by different means:
@@ -30,7 +32,15 @@ Resolve script paths relative to this skill directory, not the current repositor
 3. Go back over this session since the last review and write the judgment JSON defined in
    [schema.md](schema.md):
    - the task and what kind of problem it was: knowledge needed, where the answer lived, scope;
-   - the facts the outcome depended on, and where each came from;
+   - a stable `task.task_id`, reused for later segments of this same task;
+   - whether a non-code-context opportunity existed, regardless of what Contexer returned;
+   - the facts the outcome depended on, their categories and separately assessed recovery
+     from current code, repository docs, Git history, PR history and external docs;
+   - whether relevant Contexer knowledge existed and surfaced; a failed search does not prove
+     it was never stored, so use `uncertain` without evidence;
+   - whether Contexer was used and changed an action: no change, minor, material, prevented
+     wrong action, or uncertain; identify before/after actions and link material fact ids;
+   - constrained impact class and severity, with uncertainty when evidence is insufficient;
    - every Contexer decision that was surfaced, and how relevant it was;
    - a rating for every Contexer feature that appeared, including ones that did nothing useful;
    - what was missing or wrong;
@@ -54,9 +64,18 @@ Resolve script paths relative to this skill directory, not the current repositor
   from them, never the other way round.
 - **Default to no effect.** When unsure, use `neutral`, `unknown`, `low`. `decisive` means the
   outcome would have been wrong or blocked without it; `helpful` means it saved real steps.
-- **Name the counterfactual.** For each deciding fact, say whether reading the code, docs or git
-  history would have shown it (`code_would_reveal`). Contexer's unique value is the facts where
-  that answer is `no`.
+- **Name the counterfactual.** Assess a capable agent with good decision docs and Git/PR
+  access, not an artificially weak baseline. Use the expanded `code_would_reveal` label and
+  five separate recovery flags. Code suggesting intent is not proof of that intent.
+- **Opportunity is independent of use.** Framework, file layout and visible behavior alone
+  are not non-code opportunities. Rationale, exceptions, migration intent and authority may
+  be. A no-opportunity or uncertain record is valid; do not manufacture an opportunity.
+- **Calls are not impact.** A call or repeated fact is not material help. `helpful` can describe
+  convenience, but conditional success requires a prior fact linked to a material action.
+  Assess severity separately from confidence. Do not claim time, token or dollar savings.
+- **No pretend independent review.** Do not fill secondary assessments yourself. A separate
+  reviewer first seals required facts without the primary verdict or causal claim; attribution
+  is revealed only afterward. Follow the optional process in [README.md](README.md).
 - **No self-credit.** Decisions stored in this same session are marked `created_this_session`
   and cannot support a `helpful` or `decisive` verdict.
 - **Surfaced is not used.** A decision that was injected but did not change what you did is
@@ -80,8 +99,8 @@ Resolve script paths relative to this skill directory, not the current repositor
 
 - `uv run --no-project python scripts/outcomes.py` records PR state, CI result and reverts (including reverts of
   a squash or merge commit) whenever they change. A failed PR lookup is `unknown`, not `no_pr`.
-- `uv run --no-project python scripts/summarize.py [--repo-key KEY] [--host HOST]` prints the report with a
-  denominator on every share. It ranks a problem kind only once it has 5 records, skips
+- `uv run --no-project python scripts/summarize.py [--repo-key KEY] [--host HOST] [--kind hook|manual]` prints opportunity, conditional success, fact recovery, the benefit funnel,
+  severity and feature burden with explicit denominators and unknowns. It ranks a problem kind only once it has 5 records, skips
   unreadable records and counts duplicates once.
 
 Previously absent PRs are checked again on later outcome runs. Failed fetches or git queries
