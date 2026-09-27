@@ -160,7 +160,7 @@ def test_log_writes_one_record_and_refuses_a_duplicate(home, claude_pending):
     assert out.returncode == 0, out.stdout
     records = list((data_dir / "records").glob("*.jsonl"))
     rec = json.loads(records[0].read_text().splitlines()[0])
-    assert rec["schema"] == "contexer-effectiveness/v2" and rec["host"] == "claude"
+    assert rec["schema"] == "contexer-effectiveness/v3" and rec["host"] == "claude"
     assert rec["pr_lookup"] in ("error", "none", "no_branch")
     assert not (data_dir / "pending" / f"{claude_pending}.json").exists()
     state = json.loads((data_dir / "state" / "L.json").read_text())

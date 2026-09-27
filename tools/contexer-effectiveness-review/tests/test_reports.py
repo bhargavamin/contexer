@@ -7,12 +7,13 @@ from test_log_usage import example
 def record(i, question_type, effect, key=None, **judgment_changes):
     j = example()
     j["task"]["question_type"] = question_type
+    j["task"]["task_id"] = f"task-{i}"
     j["verdict"]["contexer_effect"] = effect
     if effect in ('helpful', 'decisive'):
         j['contexer_items'][0].update(relevance=effect, note='Used the stored rule to choose the fix')
         j['key_facts'][0].update(source='contexer', contexer_ids=[j['contexer_items'][0]['id']])
     j.update(judgment_changes)
-    return {"schema": "contexer-effectiveness/v2", "record_id": f"r{i}",
+    return {"schema": "contexer-effectiveness/v3", "record_id": f"r{i}",
             "record_key": key or f"s{i}|abc{i}|0", "recorded_at": f"2026-09-{10 + i:02d}T00:00:00",
             "host": "claude", "session_id": f"s{i}", "repo": "", "repo_key": "demo-1",
             "trigger": {"attribution": "transcript", "commits": [{"sha": f"abc{i}"}],
