@@ -64,10 +64,7 @@ def test_every_package_module_has_an_index_line():
     text = ROOT.read_text(encoding="utf-8")
     modules = {p.stem for p in (REPO / "contexer").glob("*.py")
                if not p.stem.startswith("_")}
-    # Supporting modules the index intentionally leaves to CONTRIBUTING.md's structure table.
-    unindexed_by_design = {"auth", "config", "decision_observability", "hook_host", "share",
-                           "share_policy", "sidecars"}
-    missing = sorted(m for m in modules - unindexed_by_design if f"`{m}.py`" not in text)
+    missing = sorted(m for m in modules if f"`{m}.py`" not in text)
     assert missing == [], f"add a one-line index entry to CLAUDE.md for: {missing}"
 
 

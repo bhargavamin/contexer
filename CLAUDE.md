@@ -105,6 +105,11 @@ A small package (`contexer/`), intentionally minimal. Each module is a cohesive 
 - **`updates.py`** - release-notice fact and policy; never network I/O on the hook path. Declaring a version floor is a manual maintainer act (details in the reference).
 - **`redact.py`** - deterministic egress-only secret redaction; see "Secrets never egress" below.
 - **`remote.py`** / **`team_context.py`** / **`share_status.py`** - Teams protocol adapter, team-context cache, typed share outcomes.
+- **`share.py`** / **`share_policy.py`** - explicit share to Teams (never automatic on capture); local policy state for remembered automatic proposals (no network, no store lock).
+- **`auth.py`** / **`config.py`** - Teams OAuth login and token storage; `~/.contexer/config.toml` profile loader (a leaf).
+- **`sidecars.py`** - the one declaration of every file kept in the store directory, and its lifetime; see Storage below.
+- **`decision_observability.py`** - fail-soft local diagnostics for proposal operations; no network exporter, closed vocabulary.
+- **`hook_host.py`** - stdlib-only host boundary for Claude hook registrations (Cursor envelope guard); see the adapters guide.
 - **`memory_sync.py`** - imports Claude Code memory-tool facts into the store.
 - **`server.py`** - thin FastMCP tool surface; storage and evaluation stay in owner modules.
 - **`cli.py`** - `contexer` console script; subcommands are rows in the `COMMANDS` table.
