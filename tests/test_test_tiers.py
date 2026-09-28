@@ -23,11 +23,15 @@ class _Item:
         return name if name in self.markers else None
 
 
-def _config(*, covering):
-    """The two attributes the hook reads off pytest-cov's registered options."""
-    return types.SimpleNamespace(
+def _config(*, covering, worker=False):
+    """The two attributes the hook reads off pytest-cov's registered options, plus xdist's
+    `workerinput`, which exists only on a worker process's config."""
+    config = types.SimpleNamespace(
         option=types.SimpleNamespace(
             cov_source=["contexer"] if covering else None, no_cov=not covering))
+    if worker:
+        config.workerinput = {"workerid": "gw0"}
+    return config
 
 
 def test_only_bench_files_are_slow():
@@ -74,3 +78,17 @@ def test_perf_selection_runs_without_xdist_workers():
 def test_other_selections_keep_xdist_default_worker_count():
     for markexpr in ("", None, "slow", "not slow and not perf", "not perf"):
         assert conftest.pytest_xdist_auto_num_workers(_selecting(markexpr)) is None
+
+
+def test_perf_tests_are_skipped_in_an_xdist_worker_without_coverage():
+    """`pytest tests/ --no-cov` names no marker, so it keeps -n auto; its perf tests must
+    not be timed beside the other workers."""
+    item = _Item("test_store.py", markers=["perf"])
+    conftest.pytest_collection_modifyitems(_config(covering=False, worker=True), [item])
+    assert "skip" in item.markers
+
+
+def test_xdist_worker_does_not_skip_non_perf_tests():
+    item = _Item("test_store.py")
+    conftest.pytest_collection_modifyitems(_config(covering=False, worker=True), [item])
+    assert item.markers == []

@@ -27,7 +27,8 @@ Everything else in the accuracy benchmarks — retrieval hit/miss, novelty filte
 display caps — stays in the gate, because those assert behaviour, not nanoseconds.
 
 Every run is parallel (`-n auto` in `addopts`) except one that selects `perf`, which
-`tests/conftest.py` forces serial; pass `-n0` yourself to debug a test in one process.
+`tests/conftest.py` forces serial. A parallel run skips `perf` tests even with `--no-cov`, so
+they are only ever timed serially. Pass `-n0` yourself to debug a test in one process.
 
 `uv run pytest tests/` locally is the right command before pushing. It runs everything
 except the `perf` tests, which it skips: `addopts` turns coverage on for every bare run,
