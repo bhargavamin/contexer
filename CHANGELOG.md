@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.49.4](https://github.com/bhargavamin/contexer/compare/v0.49.3...v0.49.4) (2026-09-28)
+
+
+### Documentation
+
+* split CLAUDE.md into an index plus on-demand detail ([#339](https://github.com/bhargavamin/contexer/issues/339)) ([f9b636b](https://github.com/bhargavamin/contexer/commit/f9b636b23adcb217102e7d7f3ede989c418cb07e))
+
 ## [0.49.3](https://github.com/bhargavamin/contexer/compare/v0.49.2...v0.49.3) (2026-09-27)
 
 
