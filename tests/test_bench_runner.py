@@ -100,12 +100,33 @@ class TestSessionEnv:
         assert env["OTEL_EXPORTER_OTLP_PROTOCOL"] == "http/json"
 
 
+def _record_run_module_sleeps(monkeypatch, run_mod):
+    """Record `time.sleep` calls made by benchmarks/run.py itself, and skip them.
+
+    `run_mod.time` is the process-wide `time` module, so a plain patch also captures
+    `subprocess.Popen.wait(timeout=...)`, which busy-loops on sleeps of 1 ms doubling to 50 ms
+    whenever the stub child is slow to exit - routine when the suite runs in parallel workers.
+    Those sleeps say nothing about the OTel flush wait these tests are about.
+    """
+    import sys
+    real_sleep = run_mod.time.sleep
+    sleeps = []
+
+    def sleep(seconds):
+        if sys._getframe(1).f_globals.get("__name__") == run_mod.__name__:
+            sleeps.append(seconds)
+        else:
+            real_sleep(seconds)
+
+    monkeypatch.setattr(run_mod.time, "sleep", sleep)
+    return sleeps
+
+
 class TestRunCampaign:
     def test_stubbed_runs_skip_otel_flush_wait(self, tmp_path, stub_claude, monkeypatch):
         import benchmarks.run as run_mod
 
-        sleeps = []
-        monkeypatch.setattr(run_mod.time, "sleep", sleeps.append)
+        sleeps = _record_run_module_sleeps(monkeypatch, run_mod)
 
         _run_stubbed_campaign(tmp_path / "stub", reps=1, task_ids=["rat-storage"],
                               claude_cmd=stub_claude, seed=5, conditions=("without",))
@@ -115,8 +136,7 @@ class TestRunCampaign:
     def test_live_runs_wait_for_otel_flush(self, tmp_path, stub_claude, monkeypatch):
         import benchmarks.run as run_mod
 
-        sleeps = []
-        monkeypatch.setattr(run_mod.time, "sleep", sleeps.append)
+        sleeps = _record_run_module_sleeps(monkeypatch, run_mod)
 
         run_campaign(tmp_path / "live", reps=1, task_ids=["rat-storage"],
                      claude_cmd=stub_claude, seed=5, conditions=("without",))

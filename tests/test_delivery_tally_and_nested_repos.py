@@ -265,8 +265,15 @@ class TestDeliveryTallyIntegrity:
             t.join()
 
         rows = working_set.read_delivery_tally(tmp_repo)
-        assert set(rows) == {"personal:decision-1", "personal:decision-2"}, rows
+        # A writer can lose every one of its races under load (CI runs the suite in parallel
+        # workers) and then, by design, has no row. The lost-update bug this reproduces is
+        # different: a writer whose write was ACCEPTED vanishing from the file. So the rows
+        # present must be exactly the writers that landed at least one write.
+        assert sum(landed.values()) > 0, landed
+        assert set(rows) == {f"personal:{d}" for d, ok in landed.items() if ok}, (rows, landed)
         for decision_id, accepted in landed.items():
+            if not accepted:
+                continue
             row = rows[f"personal:{decision_id}"]
             # Every accepted write is counted exactly once: no increment is silently merged
             # away by the other writer, which is the corruption the lock exists to prevent.
