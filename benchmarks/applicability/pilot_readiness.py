@@ -36,7 +36,6 @@ SCHEMA_VERSION = 1
 RUNNER_VERSION = "1"
 CANDIDATE_VARIANT = "ordinary_task_v1"
 ARMS = ("baseline", "candidate")
-EVIDENCE_STATUSES = {"pass", "fail", "inconclusive", "not_run"}
 OUTCOME_STATES = {"success", "failure", "unknown"}
 RUN_STATES = {
     "planned", "launch_pending", "started", "completed", "launch_unknown",

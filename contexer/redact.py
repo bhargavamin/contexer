@@ -146,8 +146,3 @@ def scrub(text: str) -> tuple[str, int]:
 def scrub_text(text: str) -> str:
     """Convenience: the redacted text only."""
     return scrub(text)[0]
-
-
-def count_secrets(text: str) -> int:
-    """Convenience: how many secrets scrub would redact (for preview messaging)."""
-    return scrub(text)[1]

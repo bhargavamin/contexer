@@ -172,11 +172,6 @@ def test_scrub_text_convenience():
     assert redact.scrub_text("AKIAIOSFODNN7EXAMPLE") == redact.scrub("AKIAIOSFODNN7EXAMPLE")[0]
 
 
-def test_count_secrets_convenience():
-    assert redact.count_secrets("AKIAIOSFODNN7EXAMPLE here") == 1
-    assert redact.count_secrets("nothing sensitive here") == 0
-
-
 @pytest.mark.parametrize("bad", [None, 123, b"AKIAIOSFODNN7EXAMPLE", ["a"], {"k": "v"}])
 def test_never_raises_on_bad_input(bad):
     # Non-str input must not raise; it returns something string-ish with count 0.

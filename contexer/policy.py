@@ -279,12 +279,6 @@ def rule_selects(rule: Mapping, path: str) -> bool:
     return not paths_glob or fnmatch.fnmatch(path, paths_glob)
 
 
-def source_anchor_matches(anchor: str, path: str) -> bool:
-    """Whether one exact-file or trailing-slash directory anchor governs ``path``."""
-    return bool(anchor and path and (
-        path.startswith(anchor) if anchor.endswith("/") else path == anchor))
-
-
 def source_anchor_hits(anchors, paths) -> set[str]:
     """Named paths governed by source anchors, ignoring malformed legacy values."""
     exact = {anchor for anchor in anchors

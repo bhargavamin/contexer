@@ -30,12 +30,7 @@ from contexer.adapters import claude, cursor, gemini  # noqa: E402
 SCHEMA_VERSION = 1
 RUNNER_VERSION = "2"
 FIXTURE_PATH = Path(__file__).with_name("relevance_cases.json")
-STAGES = {"candidate", "selected", "emitted", "looked_up"}
 TIERS = {"standing_title", "standing_full", "prompt_full", "pointer", "tool_result", "team_delta"}
-STATUSES = {"observed", "absent", "unknown", "unsupported"}
-OUTCOME_RESULTS = {
-    "verified_compliant", "violation_observed", "clarification_appropriate", "unknown"
-}
 FULL_TIERS = {"standing_full", "prompt_full", "tool_result", "team_delta"}
 DELIVERY_STAGES = {"emitted", "looked_up"}
 
