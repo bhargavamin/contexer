@@ -245,8 +245,6 @@ def _open_detached_drainer_diagnostics():
 
 _LOCAL_LOCKS: dict[str, threading.Lock] = {}
 _LOCAL_LOCKS_GUARD = threading.Lock()
-_DETACHED_DRAINER_GUARD = threading.Lock()
-_DETACHED_DRAINER_RUNNING = False
 
 
 def _local_lock(path: Path) -> threading.Lock:
@@ -1555,35 +1553,6 @@ def run_detached_drainer() -> None:
             decision_observability.flush_pending()
         except BaseException:
             pass
-
-
-def start_in_process_drainer(profile: Profile | None = None) -> bool:
-    """Start a daemon thread for an explicitly long-lived caller."""
-    global _DETACHED_DRAINER_RUNNING
-    with _DETACHED_DRAINER_GUARD:
-        if _DETACHED_DRAINER_RUNNING:
-            return False
-        _DETACHED_DRAINER_RUNNING = True
-
-    def run() -> None:
-        global _DETACHED_DRAINER_RUNNING
-        try:
-            drain_once(profile)
-        finally:
-            with _DETACHED_DRAINER_GUARD:
-                _DETACHED_DRAINER_RUNNING = False
-
-    try:
-        threading.Thread(
-            target=run,
-            name="contexer-proposal-drainer",
-            daemon=True,
-        ).start()
-    except Exception:
-        with _DETACHED_DRAINER_GUARD:
-            _DETACHED_DRAINER_RUNNING = False
-        return False
-    return True
 
 
 def start_detached_drainer() -> bool:

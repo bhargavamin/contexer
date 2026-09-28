@@ -15,7 +15,6 @@ from contexer.config import ConfigError, Profile
 
 NOW = "2026-08-30T12:00:00Z"
 FINGERPRINT = "acctfp_v1_7M4Q2PX9C6N8"
-_REAL_START_IN_PROCESS_DRAINER = share_policy.start_in_process_drainer
 
 
 @pytest.fixture(autouse=True)
@@ -1610,22 +1609,3 @@ def test_malformed_drainer_claim_expires_by_file_age(tmp_repo, monkeypatch):
 
     with share_policy.proposal_drainer_lock(blocking=False) as owner:
         assert str(uuid.UUID(owner)) == owner
-
-
-def test_detached_start_returns_before_worker_finishes(tmp_repo, monkeypatch):
-    entered = threading.Event()
-    release = threading.Event()
-    finished = threading.Event()
-
-    def blocked_drain(_profile=None):
-        entered.set()
-        release.wait(timeout=2)
-        finished.set()
-        return []
-
-    monkeypatch.setattr(share_policy, "drain_once", blocked_drain)
-    assert _REAL_START_IN_PROCESS_DRAINER() is True
-    assert entered.wait(timeout=1)
-    assert _REAL_START_IN_PROCESS_DRAINER() is False
-    release.set()
-    assert finished.wait(timeout=1)

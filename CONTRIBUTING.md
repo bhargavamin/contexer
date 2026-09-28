@@ -29,6 +29,10 @@ coverage, and a single file naturally covers ~10%. That flag must stay in `addop
 uv run pytest tests/test_miner.py --no-cov
 ```
 
+`addopts` also runs the suite in parallel (`-n auto`, via pytest-xdist). Add `-n0` when you
+need a single serial process, e.g. for `--pdb` or to see `print` output with `-s`. Runs that
+select `-m perf` are serialised automatically, so their timings are not skewed by other workers.
+
 
 Lint (CI runs the same pinned version; keep the two in step when bumping it):
 

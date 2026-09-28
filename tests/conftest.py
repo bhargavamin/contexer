@@ -54,16 +54,39 @@ def pytest_collection_modifyitems(config, items):
     deselects them; this closes the one configuration that ran them anyway. Applied to the
     marker rather than to the one test that flaked, so all 7 are covered. Get the real
     numbers with `uv run pytest -m perf --no-cov`.
+
+    The same reasoning skips them inside an xdist worker: `addopts` runs `-n auto`, so a
+    coverage-free run that does not name `perf` (`pytest tests/ --no-cov`) would otherwise
+    time them while the other workers saturate the cores. A run that selects `perf` gets no
+    workers (see `pytest_xdist_auto_num_workers`), so the documented command still runs them.
     """
     covering = bool(getattr(config.option, "cov_source", None)) and not getattr(
         config.option, "no_cov", False)
-    skip_perf = pytest.mark.skip(reason="perf timings are meaningless under coverage; "
-                                        "run `pytest -m perf --no-cov`")
+    parallel = hasattr(config, "workerinput")  # set only inside an xdist worker process
+    if covering:
+        skip_perf = pytest.mark.skip(reason="perf timings are meaningless under coverage; "
+                                            "run `pytest -m perf --no-cov`")
+    else:
+        skip_perf = pytest.mark.skip(reason="perf timings are meaningless beside parallel "
+                                            "workers; run `pytest -m perf --no-cov`")
     for item in items:
         if item.path.name.startswith("test_bench_"):
             item.add_marker(pytest.mark.slow)
-        if covering and item.get_closest_marker("perf"):
+        if (covering or parallel) and item.get_closest_marker("perf"):
             item.add_marker(skip_perf)
+
+
+def pytest_xdist_auto_num_workers(config):
+    """Run serially (no xdist workers) whenever the `-m` expression selects `perf` tests.
+
+    `addopts` parallelises every run with `-n auto`, and a latency assertion measured while
+    the other workers saturate the remaining cores is the same coin flip the coverage skip
+    above exists to prevent. Forcing it here keeps every documented `-m perf --no-cov`
+    command correct as written, `-s` distributions included. Returning None defers to
+    xdist's own CPU count for every other selection, including `-m "not slow and not perf"`.
+    """
+    markexpr = (config.getoption("markexpr", "") or "").replace("not perf", "")
+    return 0 if "perf" in markexpr else None
 
 
 @pytest.fixture(autouse=True)
