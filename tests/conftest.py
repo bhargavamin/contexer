@@ -66,6 +66,19 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_perf)
 
 
+def pytest_xdist_auto_num_workers(config):
+    """Run serially (no xdist workers) whenever the `-m` expression selects `perf` tests.
+
+    `addopts` parallelises every run with `-n auto`, and a latency assertion measured while
+    the other workers saturate the remaining cores is the same coin flip the coverage skip
+    above exists to prevent. Forcing it here keeps every documented `-m perf --no-cov`
+    command correct as written, `-s` distributions included. Returning None defers to
+    xdist's own CPU count for every other selection, including `-m "not slow and not perf"`.
+    """
+    markexpr = (config.getoption("markexpr", "") or "").replace("not perf", "")
+    return 0 if "perf" in markexpr else None
+
+
 @pytest.fixture(autouse=True)
 def _quiet_update_check(tmp_path, monkeypatch):
     """Disable the update check for the whole suite, and prove it stays disabled.

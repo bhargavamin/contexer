@@ -54,6 +54,7 @@ required-version = ">=0.8.0"
 dev = [
     "pytest>=9.0.3",
     "pytest-cov>=7.1.0",
+    "pytest-xdist>=3.8",
 ]
 
 [tool.ruff]
@@ -78,13 +79,19 @@ testpaths = ["tests"]
 # flag silently deletes this repo's own "coverage ≥85%" convention (enforced
 # by test_own_repo_coverage_floor_stays_minable). Known cost: subset runs
 # exit 1 on coverage — pass --no-cov (see CONTRIBUTING.md).
-addopts = "--cov=contexer --cov-report=term-missing --cov-fail-under=85"
+# -n auto: the suite is ~6.5k independent tests (each isolates its own tmp store), so it
+# parallelises across cores; pass -n0 to debug one test serially (pdb, -s output). A run that
+# selects `perf` is forced serial by tests/conftest.py, since concurrent workers skew timings.
+addopts = "--cov=contexer --cov-report=term-missing --cov-fail-under=85 -n auto --dist worksteal"
 markers = [
     "slow: benchmark-harness tests (tests/test_bench_*.py), deselected in the PR gate",
     "perf: wall-clock latency assertions — meaningful only on fixed hardware, never in CI",
 ]
 
 [tool.coverage.run]
+# sys.monitoring (PEP 669, Python 3.12+) instead of the settrace tracer: ~2.5x -> ~1.2x overhead
+# on this suite. Line coverage only; revisit if `branch = true` is ever enabled on Python 3.12/3.13.
+core = "sysmon"
 omit = [
     "contexer/server.py",   # MCP entry point — thin wrappers, tested via store
     "contexer/__main__.py", # CLI entry point

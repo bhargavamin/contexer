@@ -59,3 +59,18 @@ def test_coverage_does_not_skip_non_perf_tests():
     item = _Item("test_store.py")
     conftest.pytest_collection_modifyitems(_config(covering=True), [item])
     assert item.markers == []
+
+
+def _selecting(markexpr):
+    return types.SimpleNamespace(getoption=lambda name, default=None: markexpr)
+
+
+def test_perf_selection_runs_without_xdist_workers():
+    """addopts parallelises with -n auto; a timing assertion beside busy workers is noise."""
+    assert conftest.pytest_xdist_auto_num_workers(_selecting("perf")) == 0
+    assert conftest.pytest_xdist_auto_num_workers(_selecting("perf and not slow")) == 0
+
+
+def test_other_selections_keep_xdist_default_worker_count():
+    for markexpr in ("", None, "slow", "not slow and not perf", "not perf"):
+        assert conftest.pytest_xdist_auto_num_workers(_selecting(markexpr)) is None

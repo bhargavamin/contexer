@@ -1,0 +1,105 @@
+{
+  "adversarial_file_attachment": {
+    "anchored": [
+      "src/generated/client.ts"
+    ],
+    "case": "directive names one file, a sibling changes inside the window",
+    "certainty_of_the_wrong_one": "supporting",
+    "intended": [
+      "src/generated/client.ts"
+    ],
+    "wrong_file_attachment_rate": 0.0
+  },
+  "agent_only_reconsiderations": {
+    "agent_only_events": 1,
+    "reconsiderations_opened": 0,
+    "scenarios": 1
+  },
+  "candidate_quality": {
+    "attached_files": 8,
+    "expected_candidates": 16,
+    "precision": 1.0,
+    "produced_candidates": 16,
+    "recall": 1.0,
+    "scenarios": 14,
+    "structural_anchor_recall": 1.0,
+    "structural_expected_files": 6,
+    "structural_matched_files": 6,
+    "uncertain_file_promotion_rate": 0.0,
+    "wrong_file_attachment_rate": 0.0
+  },
+  "corpus_scenarios": 18,
+  "directive_detection": {
+    "false_positives": [],
+    "missed": [],
+    "negatives": 14,
+    "positives": 7,
+    "precision": 1.0,
+    "recall": 1.0
+  },
+  "evidence_loss": {
+    "acknowledged": 23,
+    "duplicate_proposals": 0,
+    "first_pass_proposed": 14,
+    "gap_drops": 0,
+    "loss_rate": 0.0,
+    "recoverable": 23,
+    "scenarios": 14
+  },
+  "hook_append": {
+    "append_median_ms": 0.387,
+    "concurrent_writers": 8,
+    "events_survived": 8
+  },
+  "latency_ms": {
+    "boilerplate_1000_ms": 10.45,
+    "distinct_1000_ms": 133.78,
+    "empty_spool_reconcile_ms": 0.06,
+    "hook_append_ms": 0.387,
+    "note": "aggregate_candidates alone, median of 3 after warm-up (ledger ruling D6)",
+    "realistic_ms": 8.66
+  },
+  "natural_directive_regression": {
+    "cases": 24,
+    "false_negative": 0,
+    "false_negative_ids": [],
+    "false_positive": 1,
+    "false_positive_ids": [
+      "quoted-doc-task"
+    ],
+    "negative": 14,
+    "positive": 10,
+    "precision": 0.9090909090909091,
+    "recall": 1.0,
+    "true_positive": 10
+  },
+  "policy_confusion": {
+    "false_allow": 0,
+    "false_block": 0,
+    "operations": 5,
+    "verdicts": {
+      "armed-pattern-in-scope": "block",
+      "armed-pattern-out-of-scope": "allow",
+      "clean-file-in-scope": "allow",
+      "no-artifact-at-all": "allow",
+      "pending-decision-subject": "allow"
+    }
+  },
+  "review_items_per_realistic_session": 100,
+  "task": "09-adversarial-evals-and-rollout",
+  "teams_lifecycle": {
+    "asserted_by": [
+      "test_a_refused_lifecycle_payload_still_syncs_the_base_decision",
+      "test_a_blocked_delta_stays_durably_pending_in_the_outbox",
+      "test_a_pending_delta_is_not_re_offered_while_the_capability_is_unchanged",
+      "test_a_byte_identical_resend_after_the_inclusive_cursor_is_not_a_new_row",
+      "test_a_delta_refused_DURING_a_drain_survives_the_drain"
+    ],
+    "cited_not_measured": true,
+    "claim": {
+      "duplicate_events_after_retry": 0,
+      "retries_per_refusal": 1
+    },
+    "source": "tests/test_lifecycle_sync.py"
+  }
+}
