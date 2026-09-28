@@ -50,4 +50,8 @@ uvx ruff@0.15.4 check .
   settled fact.
 
 Everything else — module responsibilities, hook behaviour, the storage/revision format, and the
-design constraints you must not violate — is in `CLAUDE.md`.
+design constraints you must not violate — starts in `CLAUDE.md`. It is an index: per-module
+detail is in `docs/architecture.md`, and two folder guides hold the rest. Claude Code loads those
+automatically, so other agents must open them before working in that folder:
+`contexer/adapters/CLAUDE.md` (host adapters, hook registration, MCP config per host) and
+`benchmarks/CLAUDE.md` (Contract 06/07/08 offline boundaries).

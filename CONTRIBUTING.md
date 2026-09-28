@@ -87,6 +87,12 @@ deliberate upward edge - `store` calls `ui.daemon` from inside a function to app
 at session start. It cannot cycle, because `daemon` imports nothing of ours at module scope, and
 that import budget is enforced by a test.
 
+**Agent guidance stays an index.** The root `CLAUDE.md` is loaded into every coding-agent session,
+so it holds only what every session needs, plus a one-line entry per module. A new module gets one
+index line there; its invariants and edge cases go in its docstring or `docs/architecture.md`,
+and host-specific detail goes in `contexer/adapters/CLAUDE.md`. `tests/test_claude_md.py` caps the
+root file's size and checks that the section names code comments cite still exist.
+
 ---
 
 ## Code style
