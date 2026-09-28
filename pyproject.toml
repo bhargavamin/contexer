@@ -43,6 +43,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["contexer"]
+# Folder guides for coding agents working in this repo; not runtime data for installed users.
+exclude = ["contexer/**/CLAUDE.md"]
 
 [tool.uv]
 # Pin a uv floor so an older uv can't silently rewrite uv.lock back to an
