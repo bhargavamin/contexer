@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "fixture_version": "1.0.5",
+  "fixture_version": "1.1.0",
   "reference_revision": "5676247f358dc6a0c099d8eb8eb94623bad04bb0",
   "cases": [
     {
@@ -1763,6 +1763,507 @@
         }
       ],
       "forbidden_outputs": []
+    },
+    {
+      "case_id": "R19-anchor-overflow-relevance",
+      "family": "R19",
+      "description": "Six decisions anchor one file, twice the prompt cap; the one the task needs is stored last. Every anchored title present with at most three full bodies is only satisfiable when the overflow is named",
+      "repo_id": "synthetic/r19",
+      "checkout_id": "checkout-r19",
+      "host": "claude",
+      "surface": "prompt_hook",
+      "session_id": "session-r19",
+      "request_id": "request-r19",
+      "decisions": [
+        {
+          "decision_id": "r19-retry",
+          "revision_id": "rev-r19-retry-a",
+          "content": "R19_RETRY_BODY Share retries back off exponentially up to thirty seconds.",
+          "title": "Back off share retries exponentially",
+          "status": "approved",
+          "subtype": "constraint",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R19_RETRY_BODY",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human",
+          "source_files": [
+            "src/sharing/outbox.py"
+          ]
+        },
+        {
+          "decision_id": "r19-facade",
+          "revision_id": "rev-r19-facade-a",
+          "content": "R19_FACADE_BODY Sharing code reads stored decisions only through the store facade.",
+          "title": "Read decisions through the store facade",
+          "status": "approved",
+          "subtype": "constraint",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R19_FACADE_BODY",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human",
+          "source_files": [
+            "src/sharing/outbox.py"
+          ]
+        },
+        {
+          "decision_id": "r19-wire",
+          "revision_id": "rev-r19-wire-a",
+          "content": "R19_WIRE_BODY Outbound source file lists use repo-relative POSIX paths.",
+          "title": "Send source files as repo-relative paths",
+          "status": "approved",
+          "subtype": "constraint",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R19_WIRE_BODY",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human",
+          "source_files": [
+            "src/sharing/outbox.py"
+          ]
+        },
+        {
+          "decision_id": "r19-redact",
+          "revision_id": "rev-r19-redact-a",
+          "content": "R19_REDACT_BODY Redaction runs where content leaves the machine, never on local capture.",
+          "title": "Redact at the wire boundary only",
+          "status": "approved",
+          "subtype": "constraint",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R19_REDACT_BODY",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human",
+          "source_files": [
+            "src/sharing/outbox.py"
+          ]
+        },
+        {
+          "decision_id": "r19-preview",
+          "revision_id": "rev-r19-preview-a",
+          "content": "R19_PREVIEW_BODY Share previews never include raw credentials.",
+          "title": "Keep share previews credential-free",
+          "status": "approved",
+          "subtype": "constraint",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R19_PREVIEW_BODY",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human",
+          "source_files": [
+            "src/sharing/outbox.py"
+          ]
+        },
+        {
+          "decision_id": "r19-batch",
+          "revision_id": "rev-r19-batch-a",
+          "content": "R19_BATCH_BODY Batch accounting counts each failed batch once, not each row, and keeps the outbox entry for the next retry.",
+          "title": "Count share failures once per batch",
+          "status": "approved",
+          "subtype": "constraint",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R19_BATCH_BODY",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human",
+          "source_files": [
+            "src/sharing/outbox.py"
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "action_id": "task",
+          "kind": "prompt",
+          "prompt": "Refactor the batch failure accounting in src/sharing/outbox.py",
+          "session_id": "session-r19"
+        }
+      ],
+      "applicable": [
+        {
+          "decision_id": "r19-batch",
+          "revision_id": "rev-r19-batch-a",
+          "required_tier": "prompt_full",
+          "authority": "approved"
+        }
+      ],
+      "desired_assertions": [
+        {
+          "key": "needed-anchor-delivered",
+          "kind": "contains_decision",
+          "action_id": "task",
+          "decision_id": "r19-batch",
+          "revision_id": "rev-r19-batch-a",
+          "tier": "prompt_full",
+          "known_gap": "anchor-slots-follow-store-order",
+          "owner": "bhargavamin/contexer#341"
+        },
+        {
+          "key": "anchor-retry-at-least-named",
+          "kind": "contains_text",
+          "action_id": "task",
+          "text": "Back off share retries exponentially",
+          "known_gap": "overflow-anchors-unnamed",
+          "owner": "bhargavamin/contexer#341"
+        },
+        {
+          "key": "anchor-facade-at-least-named",
+          "kind": "contains_text",
+          "action_id": "task",
+          "text": "Read decisions through the store facade",
+          "known_gap": "overflow-anchors-unnamed",
+          "owner": "bhargavamin/contexer#341"
+        },
+        {
+          "key": "anchor-wire-at-least-named",
+          "kind": "contains_text",
+          "action_id": "task",
+          "text": "Send source files as repo-relative paths",
+          "known_gap": "overflow-anchors-unnamed",
+          "owner": "bhargavamin/contexer#341"
+        },
+        {
+          "key": "anchor-redact-at-least-named",
+          "kind": "contains_text",
+          "action_id": "task",
+          "text": "Redact at the wire boundary only",
+          "known_gap": "overflow-anchors-unnamed",
+          "owner": "bhargavamin/contexer#341"
+        },
+        {
+          "key": "anchor-preview-at-least-named",
+          "kind": "contains_text",
+          "action_id": "task",
+          "text": "Keep share previews credential-free",
+          "known_gap": "overflow-anchors-unnamed",
+          "owner": "bhargavamin/contexer#341"
+        },
+        {
+          "key": "anchor-batch-at-least-named",
+          "kind": "contains_text",
+          "action_id": "task",
+          "text": "Count share failures once per batch",
+          "known_gap": "overflow-anchors-unnamed",
+          "owner": "bhargavamin/contexer#341"
+        },
+        {
+          "key": "full-injections-capped",
+          "kind": "observation_count",
+          "action_id": "task",
+          "stage": "emitted",
+          "decision_only": true,
+          "maximum": 3
+        },
+        {
+          "key": "authority-not-pending",
+          "kind": "omits_text",
+          "metric": "authority",
+          "action_id": "task",
+          "text": "[pending]"
+        }
+      ],
+      "forbidden_outputs": [],
+      "reference_observation": {
+        "commit": "473bf424e30de51b79df5503038b1d026dc6f4e9",
+        "gap_key": "anchor-slots-follow-store-order",
+        "observed": "retry, facade and wire delivered in full; batch, redact and preview neither delivered nor named"
+      },
+      "outcome_unknown_reason": "retrieval_only"
+    },
+    {
+      "case_id": "R20-startup-rule-redelivery",
+      "family": "R20",
+      "description": "A constraint preloaded in full at session start is re-delivered by the prompt router and displaces an unseen decision the task needs",
+      "repo_id": "synthetic/r20",
+      "checkout_id": "checkout-r20",
+      "host": "claude",
+      "surface": "session_start",
+      "session_id": "session-r20",
+      "request_id": "request-r20",
+      "decisions": [
+        {
+          "decision_id": "r20-constraint",
+          "revision_id": "rev-r20-constraint-a",
+          "content": "R20_CONSTRAINT_BODY Invoice totals are rounded once, after tax is applied.",
+          "title": "Round invoice totals once, after tax",
+          "status": "approved",
+          "subtype": "constraint",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R20_CONSTRAINT_BODY",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human",
+          "source_files": [
+            "src/billing/invoice.py"
+          ]
+        },
+        {
+          "decision_id": "r20-convention",
+          "revision_id": "rev-r20-convention-a",
+          "content": "R20_CONVENTION_BODY Invoice payload fields use snake_case names.",
+          "title": "Name invoice payload fields in snake_case",
+          "status": "approved",
+          "subtype": "convention",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R20_CONVENTION_BODY",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human",
+          "source_files": [
+            "src/billing/invoice.py"
+          ]
+        },
+        {
+          "decision_id": "r20-numbering",
+          "revision_id": "rev-r20-numbering-a",
+          "content": "R20_NUMBERING_BODY Invoice numbers come from a single database sequence.",
+          "title": "Allocate invoice numbers from one sequence",
+          "status": "approved",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R20_NUMBERING_BODY",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human",
+          "source_files": [
+            "src/billing/invoice.py"
+          ]
+        },
+        {
+          "decision_id": "r20-credit",
+          "revision_id": "rev-r20-credit-a",
+          "content": "R20_CREDIT_BODY Issued invoices are immutable; corrections are separate credit note documents.",
+          "title": "Correct issued invoices with credit notes",
+          "status": "approved",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R20_CREDIT_BODY",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human",
+          "source_files": [
+            "src/billing/invoice.py"
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "action_id": "start",
+          "kind": "session_start",
+          "tier": "standing_full",
+          "session_id": "session-r20"
+        },
+        {
+          "action_id": "task",
+          "kind": "prompt",
+          "prompt": "Add credit note support to src/billing/invoice.py",
+          "session_id": "session-r20"
+        },
+        {
+          "action_id": "other-session",
+          "kind": "prompt",
+          "prompt": "Add credit note support to src/billing/invoice.py",
+          "session_id": "session-r20-b"
+        }
+      ],
+      "applicable": [
+        {
+          "decision_id": "r20-constraint",
+          "revision_id": "rev-r20-constraint-a",
+          "required_tier": "standing_full",
+          "authority": "approved"
+        },
+        {
+          "decision_id": "r20-credit",
+          "revision_id": "rev-r20-credit-a",
+          "required_tier": "prompt_full",
+          "authority": "approved"
+        }
+      ],
+      "desired_assertions": [
+        {
+          "key": "constraint-preloaded",
+          "kind": "contains_decision",
+          "action_id": "start",
+          "decision_id": "r20-constraint",
+          "revision_id": "rev-r20-constraint-a",
+          "tier": "standing_full"
+        },
+        {
+          "key": "preloaded-constraint-not-repeated",
+          "kind": "omits_decision",
+          "action_id": "task",
+          "decision_id": "r20-constraint",
+          "known_gap": "startup-rules-not-credited",
+          "owner": "bhargavamin/contexer#342"
+        },
+        {
+          "key": "needed-decision-gets-freed-slot",
+          "kind": "contains_decision",
+          "action_id": "task",
+          "decision_id": "r20-credit",
+          "revision_id": "rev-r20-credit-a",
+          "tier": "prompt_full",
+          "known_gap": "startup-rules-not-credited",
+          "owner": "bhargavamin/contexer#342"
+        },
+        {
+          "key": "other-session-still-receives-constraint",
+          "kind": "contains_decision",
+          "action_id": "other-session",
+          "decision_id": "r20-constraint",
+          "revision_id": "rev-r20-constraint-a",
+          "tier": "prompt_full"
+        }
+      ],
+      "delivery_expectations": [
+        {
+          "action_id": "start",
+          "decision_id": "r20-constraint",
+          "revision_id": "rev-r20-constraint-a"
+        },
+        {
+          "action_id": "task",
+          "decision_id": "r20-credit",
+          "revision_id": "rev-r20-credit-a"
+        },
+        {
+          "action_id": "other-session",
+          "decision_id": "r20-constraint",
+          "revision_id": "rev-r20-constraint-a"
+        }
+      ],
+      "forbidden_outputs": [],
+      "reference_observation": {
+        "commit": "473bf424e30de51b79df5503038b1d026dc6f4e9",
+        "gap_key": "startup-rules-not-credited",
+        "observed": "constraint delivered at start and again at the prompt; credit-note decision dropped by the cap"
+      },
+      "outcome_unknown_reason": "retrieval_only"
+    },
+    {
+      "case_id": "R21-anchor-versus-task-match",
+      "family": "R21",
+      "description": "A task needs one anchored decision and one found only by its wording; unrelated anchors outrank the second",
+      "repo_id": "synthetic/r21",
+      "checkout_id": "checkout-r21",
+      "host": "claude",
+      "surface": "prompt_hook",
+      "session_id": "session-r21",
+      "request_id": "request-r21",
+      "decisions": [
+        {
+          "decision_id": "r21-atomic",
+          "revision_id": "rev-r21-atomic-a",
+          "content": "R21_ATOMIC_BODY The index sidecar is written through a temp file and renamed.",
+          "title": "Write the index sidecar atomically",
+          "status": "approved",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R21_ATOMIC_BODY",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human",
+          "source_files": [
+            "src/search/indexer.py"
+          ]
+        },
+        {
+          "decision_id": "r21-version",
+          "revision_id": "rev-r21-version-a",
+          "content": "R21_VERSION_BODY The index payload records a schema version for self-healing.",
+          "title": "Version the index payload",
+          "status": "approved",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R21_VERSION_BODY",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human",
+          "source_files": [
+            "src/search/indexer.py"
+          ]
+        },
+        {
+          "decision_id": "r21-fields",
+          "revision_id": "rev-r21-fields-a",
+          "content": "R21_FIELDS_BODY Title terms get a separate field so stemming changes stay isolated per field.",
+          "title": "Index titles in their own field",
+          "status": "approved",
+          "subtype": "architecture",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R21_FIELDS_BODY",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human",
+          "source_files": [
+            "src/search/indexer.py"
+          ]
+        },
+        {
+          "decision_id": "r21-deterministic",
+          "revision_id": "rev-r21-deterministic-a",
+          "content": "R21_DETERMINISTIC_BODY Tokenizer stemming uses a pure-Python rule table so results match across platforms.",
+          "title": "Keep tokenizer stemming deterministic",
+          "status": "approved",
+          "subtype": "constraint",
+          "timestamp": "2026-01-15T12:00:00+00:00",
+          "marker": "R21_DETERMINISTIC_BODY",
+          "occurrence_count": 1,
+          "created_by": "human",
+          "source": "human"
+        }
+      ],
+      "actions": [
+        {
+          "action_id": "task",
+          "kind": "prompt",
+          "prompt": "Add stemming to the tokenizer in src/search/indexer.py",
+          "session_id": "session-r21"
+        }
+      ],
+      "applicable": [
+        {
+          "decision_id": "r21-fields",
+          "revision_id": "rev-r21-fields-a",
+          "required_tier": "prompt_full",
+          "authority": "approved"
+        },
+        {
+          "decision_id": "r21-deterministic",
+          "revision_id": "rev-r21-deterministic-a",
+          "required_tier": "prompt_full",
+          "authority": "approved"
+        }
+      ],
+      "desired_assertions": [
+        {
+          "key": "anchored-need-delivered",
+          "kind": "contains_decision",
+          "action_id": "task",
+          "decision_id": "r21-fields",
+          "revision_id": "rev-r21-fields-a",
+          "tier": "prompt_full"
+        },
+        {
+          "key": "task-matched-need-delivered",
+          "kind": "contains_decision",
+          "action_id": "task",
+          "decision_id": "r21-deterministic",
+          "revision_id": "rev-r21-deterministic-a",
+          "tier": "prompt_full",
+          "known_gap": "anchor-tier-outranks-task-match",
+          "owner": "unfiled: anchor tier always precedes BM25 (design, see #341)"
+        }
+      ],
+      "forbidden_outputs": [],
+      "reference_observation": {
+        "commit": "473bf424e30de51b79df5503038b1d026dc6f4e9",
+        "gap_key": "anchor-tier-outranks-task-match",
+        "observed": "three anchored decisions fill the cap; the unanchored stemming constraint is dropped"
+      },
+      "outcome_unknown_reason": "retrieval_only"
     }
   ]
 }
