@@ -6414,6 +6414,33 @@ def _index_file_lookup(repo_path: str, index: dict, file_artifacts: list[str]) -
     return hits
 
 
+_OVERFLOW_NAMED_CAP = 5     # anchored decisions named past the full-text slots (#341)
+
+
+def _anchor_overflow_pointer(overflow: list[dict], files: list[str], index: dict) -> str:
+    """One line naming anchored decisions that did not fit the full-text slots (#341).
+
+    Without it they vanish silently, and a later prompt naming the same file shows the next
+    ones instead. Names only, never bodies, so the per-prompt cap still bounds full text.
+    """
+    docs = index.get("docs", {})
+    named = []
+    for request in overflow[:_OVERFLOW_NAMED_CAP]:
+        doc = (docs.get(request["id"]) or {}) if request.get("scope") == "personal" else {}
+        # The same status tags a full render carries, so a name never reads as approved policy.
+        tag = {"suggested": " [suggested]", "pending_approval": " [pending]"}.get(
+            doc.get("status"), "")
+        title = doc.get("title")
+        named.append(f"{title}{tag} (id={request['id'][:8]})" if title
+                     else f"id={request['id'][:8]}")
+    extra = len(overflow) - len(named)
+    more = f" (+{extra} more)" if extra > 0 else ""
+    # Not "anchored to <file>": with several files in the prompt, which one matched is unknown.
+    return (f"[Contexer] {_pl(len(overflow), 'more decision')} anchored to files in this "
+            f"prompt not shown: {'; '.join(named)}{more} - "
+            f"call get_context(files={files!r}) if relevant.")
+
+
 def _prompt_file_hits(
     repo_path: str,
     prompt: str,
@@ -6609,6 +6636,23 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
                   "personal", r[0],
                   (index.get("docs", {}).get(r[0]) or {}).get("guidance_fingerprint"))]
 
+    # #341: anchored decisions compete for the slots by relevance to this prompt, with store
+    # order breaking ties (stable sort). Approved constraints lead, as at session start: a
+    # "never X" on the named file matters even when the prompt's wording is about something
+    # else. A pending one has no such authority and must not displace approved guidance.
+    scores = {r[0]: r[1] for r in ranked}
+    docs = index.get("docs", {})
+
+    def _anchor_order(request: dict) -> tuple[int, float]:
+        if request.get("scope") != "personal":
+            return (1, 0.0)
+        doc = docs.get(request["id"]) or {}
+        approved_constraint = (doc.get("subtype") == "constraint"
+                               and doc.get("status") == "approved")
+        return (0 if approved_constraint else 1,
+                -scores.get(request["id"], 0.0))
+
+    anchor_requests.sort(key=_anchor_order)
     strong: list[str | dict] = list(anchor_requests)
     strong_ids = {
         request.get("id") if isinstance(request, dict) else request for request in strong
@@ -6657,6 +6701,7 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
                 strong.append(did)
                 strong_ids.add(did)
     strong = strong[:_STRONG_CAP]
+    overflow = [request for request in anchor_requests if request not in strong]
     if strong:
         try:
             from contexer import decision_impact
@@ -6677,6 +6722,8 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
                     "call Contexer's get_context with concise subject keywords before reading files; "
                     "do not substitute another memory, graph, or search tool)\n"
                     f"{rendered}")
+            if overflow:
+                text += "\n" + _anchor_overflow_pointer(overflow, file_artifacts_prompt, index)
             if observe_impact:
                 try:
                     decision_impact.append(repo_path, decision_impact.guidance_envelope(
