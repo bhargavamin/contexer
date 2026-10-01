@@ -901,7 +901,7 @@ class TestAnchorOverflow:
         assert "Count failed batches once per batch" in text
         assert text.count("because the sync worker relies on it") == 2
         assert all(title in text for title in titles)
-        assert "2 more decisions anchored to src/outbox.py" in text
+        assert "2 more decisions anchored to files in this prompt not shown" in text
 
     def test_anchored_constraint_leads_even_when_the_prompt_words_differ(self, tmp_repo):
         for title in ("Add credit notes as separate documents", "Number credit notes in sequence",
@@ -930,3 +930,5 @@ class TestAnchorOverflow:
             tmp_repo, "Refactor the batch failure accounting in src/outbox.py", "pending")
 
         assert "Count failed batches once per batch" in text
+        # Overflow names keep their status, so an unreviewed rule never reads as policy.
+        assert text.count("[pending] (id=") == 1

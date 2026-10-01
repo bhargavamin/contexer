@@ -6360,14 +6360,18 @@ def _anchor_overflow_pointer(overflow: list[dict], files: list[str], index: dict
     docs = index.get("docs", {})
     named = []
     for request in overflow[:_OVERFLOW_NAMED_CAP]:
-        title = ((docs.get(request["id"]) or {}).get("title")
-                 if request.get("scope") == "personal" else "")
-        named.append(f"{title} (id={request['id'][:8]})" if title
+        doc = (docs.get(request["id"]) or {}) if request.get("scope") == "personal" else {}
+        # The same status tags a full render carries, so a name never reads as approved policy.
+        tag = {"suggested": " [suggested]", "pending_approval": " [pending]"}.get(
+            doc.get("status"), "")
+        title = doc.get("title")
+        named.append(f"{title}{tag} (id={request['id'][:8]})" if title
                      else f"id={request['id'][:8]}")
     extra = len(overflow) - len(named)
     more = f" (+{extra} more)" if extra > 0 else ""
-    return (f"[Contexer] {_pl(len(overflow), 'more decision')} anchored to "
-            f"{', '.join(files[:3])} not shown: {'; '.join(named)}{more} - "
+    # Not "anchored to <file>": with several files in the prompt, which one matched is unknown.
+    return (f"[Contexer] {_pl(len(overflow), 'more decision')} anchored to files in this "
+            f"prompt not shown: {'; '.join(named)}{more} - "
             f"call get_context(files={files!r}) if relevant.")
 
 
