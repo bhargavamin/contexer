@@ -24,8 +24,8 @@ index into `seed_decisions`):
 
 | Task | Needs | Check passes only if |
 | --- | --- | --- |
-| `retr-batch` | batch results as `{'items', 'failed'}` | `fetch_records_batch([1, 0, 2])` puts `0` in `failed`, two items |
-| `retr-cache` | `lru_cache(maxsize=256)` | `fetch_record_{seed}_0.cache_info().maxsize == 256` |
+| `retr-batch` | batch results as `{'items', 'failed'}` | `fetch_records_batch([1, 0, -3, 2])` puts exactly `0` and `-3` in `failed`, and `items` holds record dicts with ids `1` and `2` |
+| `retr-cache` | `lru_cache(maxsize=256)` | every cache in the module reports `maxsize == 256`, and repeating `fetch_record_{seed}_0(5)` hits one |
 | `retr-audit` | epoch-millisecond `at_ms` | `record_audit_entry(...)['at_ms']` is a current int in ms |
 | `retr-errors` | `RecordInputError(ValueError)` | id `0` raises `RecordInputError`; id `1` still returns |
 
