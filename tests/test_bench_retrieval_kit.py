@@ -198,10 +198,37 @@ class TestSeeding:
         assert all(both.count(i["content"]) == 1 for i in items)
         assert "Never log record ids" in (split / "AGENTS.md").read_text()
 
-    def test_with_prev_without_a_source_is_refused(self, tmp_path):
+    @pytest.mark.parametrize("sources", [None, {"with_prev": ""}, {"with_prev": "  "}])
+    def test_with_prev_without_a_source_is_refused(self, tmp_path, sources):
         with pytest.raises(ValueError, match="with_prev"):
             run.run_campaign(tmp_path / "c", reps=1, conditions=("with", "with_prev"),
-                             tasks_file=TASKS_FILE, wait_for_otel=False)
+                             contexer_sources=sources, tasks_file=TASKS_FILE,
+                             wait_for_otel=False)
+        assert not (tmp_path / "c").exists()
+
+    def test_a_refused_seed_names_itself_in_the_row_error(self, tmp_path, monkeypatch):
+        def fake_run(args, **kw):
+            if args[:3] == ["uv", "run", "python"]:
+                raise subprocess.CalledProcessError(
+                    1, args, stderr=b"Traceback ...\nAssertionError: seed not stored: Caches")
+        monkeypatch.setattr(run.subprocess, "run", fake_run)
+        with pytest.raises(RuntimeError, match="seed not stored: Caches"):
+            run._condition_b_setup(str(tmp_path), tmp_path / "home", "",
+                                   seed_decisions=seeding.seed_items(TASKS[0], SEED))
+
+    def test_an_output_dir_never_mixes_task_files(self, tmp_path):
+        out = tmp_path / "camp"
+        out.mkdir()
+        (out / "runs.jsonl").write_text('{"task_id": "conv-endpoint"}\n')
+        (out / "campaign.json").write_text(json.dumps({"tasks_sha256": "0" * 64}))
+        with pytest.raises(ValueError, match="different task file"):
+            run.run_campaign(out, reps=1, conditions=("without",), tasks_file=TASKS_FILE,
+                             wait_for_otel=False)
+        # A legacy campaign (no recorded hash) only ever ran tasks.json: refused too.
+        (out / "campaign.json").write_text(json.dumps({"model": "m"}))
+        with pytest.raises(ValueError, match="different task file"):
+            run.run_campaign(out, reps=1, conditions=("without",), tasks_file=TASKS_FILE,
+                             wait_for_otel=False)
 
 
 class TestReporting:
@@ -343,3 +370,8 @@ def test_stub_campaign_runs_the_task_file(tmp_path):
     meta = json.loads((out.parent / "campaign.json").read_text())
     assert meta["tasks_file"] == str(TASKS_FILE)
     assert meta["tasks_sha256"] == hashlib.sha256(TASKS_FILE.read_bytes()).hexdigest()
+    # Re-running the same task file into the same directory keeps appending.
+    run.run_campaign(tmp_path / "camp", reps=1, task_ids=["retr-errors"],
+                     claude_cmd=str(stub), seed=SEED, model="stub-model",
+                     conditions=("without",), wait_for_otel=False, tasks_file=TASKS_FILE)
+    assert len(out.read_text().splitlines()) == 3

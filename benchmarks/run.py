@@ -90,8 +90,14 @@ def _condition_b_setup(repo: str, home: Path, seed_decision: str, source: Path =
                      f"source_files={item['source_files'] or None!r})\n"
                      f"assert (_r[0] if isinstance(_r, tuple) else _r), "
                      f"{('seed not stored: ' + item['content'][:60])!r}\n")
-    subprocess.run(["uv", "run", "python", "-c", code], env=env, check=True,
-                   capture_output=True, cwd=src)
+    try:
+        subprocess.run(["uv", "run", "python", "-c", code], env=env, check=True,
+                       capture_output=True, cwd=src)
+    except subprocess.CalledProcessError as exc:
+        # The row records this message: name the refused seed (or the real exception), not
+        # the CalledProcessError repr, which only repeats the whole generated script.
+        tail = (exc.stderr or b"").decode(errors="replace").strip().splitlines()[-3:]
+        raise RuntimeError("contexer seed setup failed: " + " | ".join(tail)) from exc
 
 
 def _condition_c_setup(work: Path, seed_decision: str,
@@ -213,18 +219,27 @@ def run_campaign(out_dir: Path, reps: int = 3, task_ids=None, claude_cmd: str = 
     isn't one of `_CONTEXER_CONDITIONS`. Omitted/empty: unchanged behavior.
     `tasks_file` swaps in another task list (e.g. `retrieval_tasks.json`)."""
     contexer_sources = contexer_sources or {}
-    if "with_prev" in conditions and "with_prev" not in contexer_sources:
-        # Without a source it gets neither rules files nor an install: a bare arm that the
-        # report would still label as a Contexer version comparison.
+    if "with_prev" in conditions and not str(contexer_sources.get("with_prev") or "").strip():
+        # Without a source (or with an empty one) it gets neither rules files nor an
+        # install: a bare arm the report would still label as a version comparison.
         raise ValueError("condition 'with_prev' needs --contexer-sources with_prev=<checkout>")
-    out_dir.mkdir(parents=True, exist_ok=True)
     tasks_path = tasks_file or TASKS_FILE
+    tasks_sha = hashlib.sha256(tasks_path.read_bytes()).hexdigest()
     out = out_dir / "runs.jsonl"
-    (out_dir / "campaign.json").write_text(json.dumps({
+    meta_path = out_dir / "campaign.json"
+    if out.exists() and out.stat().st_size and meta_path.exists():
+        # Rows append to runs.jsonl while campaign.json is rewritten: appending another task
+        # set's rows would leave mixed results under metadata naming only the new one.
+        previous = json.loads(meta_path.read_text()).get("tasks_sha256")
+        if previous != tasks_sha and (previous or tasks_path != TASKS_FILE):
+            raise ValueError(f"{out_dir} already holds runs from a different task file; "
+                             "use a new --out directory")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    meta_path.write_text(json.dumps({
         "model": model, "seed": seed, "reps": reps, "conditions": list(conditions),
         "contexer_sources": contexer_sources,
         "tasks_file": str(tasks_path),
-        "tasks_sha256": hashlib.sha256(tasks_path.read_bytes()).hexdigest(),
+        "tasks_sha256": tasks_sha,
         "managed_settings_present": _MANAGED_SETTINGS.exists(),
         "started_at": datetime.now(timezone.utc).isoformat()}, indent=2))
     tasks = _load_tasks(task_ids, tasks_file)
