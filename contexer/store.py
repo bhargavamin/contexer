@@ -5276,12 +5276,33 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     from contexer import bootstrap
     data = bootstrap.refresh_for_session(repo_path, data)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
-    if source == "compact" and session_id:
-        # Rehydrate from this exact applicability view. Loading inside the replay helper
-        # used to race ahead of refresh, so a now-withheld inference could be emitted and
-        # credited before session start learned that its evidence had disappeared.
-        compact_rehydrated = _rehydrate_working_set(
-            repo_path, session_id, local_snapshot=data)
+
+    def _rehydrate(full_local: list[dict], full_global: list[dict]) -> str:
+        """Credit the rules this payload renders in full, and on compaction replay the rest.
+
+        Rehydrate from this exact applicability view. Loading inside the replay helper used
+        to race ahead of refresh, so a now-withheld inference could be emitted and credited
+        before session start learned that its evidence had disappeared. Rules rendered in
+        full here are credited (#342) and kept out of the replay, so it never repeats them
+        or spends its slots on them."""
+        if not session_id:
+            return ""
+        credit = _startup_receipts(data, full_local, full_global)
+        if source != "compact":
+            if credit:
+                try:   # bookkeeping: a failed write must never cost the session its context
+                    from contexer import working_set
+                    working_set.record_deliveries(repo_path, session_id, credit)
+                except Exception:
+                    pass
+            return ""
+        return _rehydrate_working_set(repo_path, session_id, local_snapshot=data,
+                                      skip={(r["scope"], r["id"]) for r in credit},
+                                      credit=credit)
+
+    # A global rule with an open proposal renders standing-side only here, so it is not a
+    # full delivery of the guidance the prompt router would show.
+    global_full = [d for d in global_rules if not conflicts.has_open_conflict(d)]
 
     # Read before the no-context branch below, because the reconsideration lane is the one
     # that can be non-empty when `decisions` is empty: a repo whose only decision was RETIRED
@@ -5298,7 +5319,8 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
             # This branch is reachable exactly when reconciliation stored no decision, which is
             # what a `partial`/`error` pass looks like from here - so it is the branch where
             # dropping the diagnostic would hide it in the case it was written for.
-            return {"status": reconcile_note.strip(), "context": compact_rehydrated}
+            return {"status": reconcile_note.strip(), "context": _rehydrate([], [])}
+        compact_rehydrated = _rehydrate([], global_full)
         _arm_offer(repo_path)
         lines = _build_bootstrap_context(repo_path)
         sys_parts = []
@@ -5336,6 +5358,7 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     deferred_count = len(trusted) - len(pre_loaded)
 
     sys_parts = []
+    full_local: list[dict] = []
     if global_rules:
         sys_parts.append("## Global rules (apply to ALL repos):")
         for d in global_rules:
@@ -5355,6 +5378,8 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
             title, body, extras = conflicts._conflict_view(d)
             sys_parts.append(
                 f"- [{d.get('subtype', '')}]{status_tag}{update_tag}{_recur_suffix(d)} {title}{id_tag}")
+            if d.get("subtype") == "constraint" or extras:
+                full_local.append(d)   # rendered in full (a missing body means the title is all)
             # Startup-size guard: full bodies for every rule once overflowed the host's
             # additionalContext limit, which silently truncates the whole injection.
             # Constraints keep their body (the "never do X" detail must be present before
@@ -5371,6 +5396,7 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
             sys_parts.append(
                 "(Convention/pattern rules are titles only - call get_context for any rule's "
                 "full reasoning.)")
+    compact_rehydrated = _rehydrate(full_local, global_full)
     if global_rules or pre_loaded:
         if any(conflicts.has_open_conflict(d) for d in pre_loaded):
             sys_parts.append(f"\n{conflicts._CONFLICT_GUIDE}")  # blank line off the decision bullets
@@ -5952,7 +5978,9 @@ def _standing_topic_map(repo_path: str, decisions: list) -> str:
 
 
 def _rehydrate_working_set(repo_path: str, session_id: str,
-                           *, local_snapshot: dict | None = None) -> str:
+                           *, local_snapshot: dict | None = None,
+                           skip: set[tuple[str, str]] | None = None,
+                           credit: list[dict] | None = None) -> str:
     """Reset pre-compaction credit and replay up to ten historical full deliveries.
 
     Selection uses history, including legacy ID-only hints. Credit is cleared before
@@ -5967,6 +5995,8 @@ def _rehydrate_working_set(repo_path: str, session_id: str,
     rows = list(state["records"])
     history = working_set.restoration_history(state)
     if not history:
+        if credit:
+            working_set.record_deliveries(repo_path, session_id, credit)
         return ""
 
     # A successful write invalidates every old-window fingerprint, including rows omitted
@@ -5974,14 +6004,50 @@ def _rehydrate_working_set(repo_path: str, session_id: str,
     cleared = [{"scope": r["scope"], "id": r["id"], "fingerprint": None} for r in rows]
     working_set.write(repo_path, session_id, cleared, state["injected"])
 
+    if skip:
+        # A legacy ID-only hint resolves local-first in the renderer, so match it the same way.
+        local_ids = {e.get("id") for e in (local_snapshot or load(repo_path)).get("entries", [])
+                     if e.get("type") == "decision"}
+
+        def _scoped(item: str | dict) -> tuple[str, str]:
+            if isinstance(item, dict):
+                return item["scope"], item["id"]
+            return ("personal" if item in local_ids else "global"), item
+
+        history = [item for item in history if _scoped(item) not in skip]
     recent = history[-_REHYDRATE_CAP:]
     rendered, receipts = _render_prompt_decisions_with_records(
         repo_path, recent, active_only=True, local_snapshot=local_snapshot,
         check_bootstrap_sources=True)
-    if not rendered:
-        return ""
-    working_set.record_deliveries(repo_path, session_id, receipts)
-    return "## Rehydrated working context:\n" + rendered
+    # `credit` (rules the caller rendered in full) goes first, so the replay's own receipts
+    # stay newest and are never the ones the bounded ledger evicts.
+    if credit or receipts:
+        working_set.record_deliveries(repo_path, session_id, [*(credit or []), *receipts])
+    return "## Rehydrated working context:\n" + rendered if rendered else ""
+
+
+def _startup_receipts(data: dict, full_local: list[dict],
+                      global_rules: list[dict]) -> list[dict]:
+    """Delivery receipts for rules session start rendered with full text (#342).
+
+    Only full-text renders earn credit: constraints and open-conflict rules locally, and global
+    rules without an open proposal. Title-only conventions and patterns stay uncredited so a
+    prompt can still deliver their bodies. Fingerprints use the same snapshots the prompt
+    router compares against. Best-effort: on failure nothing is credited, so the worst case
+    is a repeated rule.
+    """
+    try:
+        receipts = [{"scope": "personal", "id": d["id"],
+                     "fingerprint": _guidance_fingerprint(d, data)}
+                    for d in full_local if d.get("id")]
+        if global_rules:
+            global_data = load_global()
+            receipts += [{"scope": "global", "id": d["id"],
+                          "fingerprint": _guidance_fingerprint(d, global_data)}
+                         for d in global_rules if d.get("id")]
+        return receipts
+    except Exception:
+        return []
 
 
 def migrate_worktree_strays(repo_path: str) -> int:

@@ -57,7 +57,7 @@ def test_report_schema_and_version_provenance(report):
     assert len(report["code_revision"]) == 40
     assert len(report["fixture_sha256"]) == 64
     assert len(report["runner_sha256"]) == 64
-    assert report["fixture_version"] == "1.1.1"
+    assert report["fixture_version"] == "1.1.2"
     assert report["runner_version"] == "3"
 
 
@@ -65,7 +65,6 @@ def test_only_registered_gaps_remain(report):
     assert report["summary"]["unexpected_failures"] == []
     assert {item["gap"] for item in report["summary"]["known_gaps"]} == {
         "ordinary-task-trigger-gap",
-        "startup-rules-not-credited",
         "anchor-tier-outranks-task-match",
     }
 
@@ -84,7 +83,6 @@ def test_only_registered_gaps_remain(report):
                 marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason=reason),
             )
             for family, key, reason in (
-                ("R20", "preloaded-constraint-not-repeated", "startup-rules-not-credited; #342"),
                 ("R21", "task-matched-need-delivered", "anchor-tier-outranks-task-match"),
             )
         ],
@@ -431,7 +429,7 @@ def test_main_writes_only_when_output_is_explicit(tmp_path, capsys):
     before = set(tmp_path.iterdir())
     assert baseline.main(["--format", "text"]) == 0
     assert set(tmp_path.iterdir()) == before
-    assert "known gaps: 3" in capsys.readouterr().out
+    assert "known gaps: 2" in capsys.readouterr().out
     output = tmp_path / "report.json"
     assert baseline.main(["--format", "json", "--output", str(output)]) == 0
     assert json.loads(output.read_text(encoding="utf-8"))["schema_version"] == 1
