@@ -67,14 +67,14 @@ them) both appear. Recorded on 2026-10-01 at seed 0:
 
 | Contexer | Needed decision in full | Named only | Missing | Startup rules re-sent |
 | --- | --- | --- | --- | --- |
+| this checkout (#350, #353) | 3/4 | 1 (`retr-cache`) | 0 | 0 |
 | `72b73f3` (#347) | 3/4 | 1 (`retr-cache`) | 0 | 2 (the convention) |
 | `1d8701b` (before) | 1/4 | 0 | 3 | 8 (constraint and convention, every task) |
 
-Two known gaps show here, both kept on purpose so the live run measures them:
-
-- `retr-cache` is only named: the ranker has no stemmer, so "caching" shares no token with
-  "Caches"/"lru_cache" (#351). The live run shows whether the pointer is enough.
-- The short convention is shown whole at startup and sent again at the prompt (#350).
+One known gap shows here, kept on purpose so the live run measures it: `retr-cache` is only
+named, because the ranker has no stemmer, so "caching" shares no token with
+"Caches"/"lru_cache" (#351). The live run shows whether the pointer is enough. The startup
+re-send (#350) is fixed in this checkout.
 
 A seed the measured version refuses to store is reported as `not_stored` and counted as
 missing; the live `with` arm fails setup on it rather than running without the decision.

@@ -320,9 +320,8 @@ class TestDeliveryPreview:
             assert row["seeded_ids"][constraint] in row["startup_full_ids"]
             assert row["seeded_ids"][constraint] not in row["repeated_from_startup"]
 
-    @pytest.mark.xfail(strict=True, reason="bhargavamin/contexer#350: a short convention "
-                       "shown whole at startup is re-sent at the prompt")
     def test_no_startup_rule_is_delivered_twice(self, preview):
+        # #350: a short convention shown whole at startup is credited too.
         assert preview["summary"]["repeated_from_startup"] == 0
 
     def test_snapshot_mode_replays_a_frozen_store(self, golden, tmp_path, monkeypatch):
