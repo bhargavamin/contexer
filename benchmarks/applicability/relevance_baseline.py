@@ -28,7 +28,7 @@ from contexer import retrieval, revisions, store, working_set  # noqa: E402
 from contexer.adapters import claude, cursor, gemini  # noqa: E402
 
 SCHEMA_VERSION = 1
-RUNNER_VERSION = "2"
+RUNNER_VERSION = "3"
 FIXTURE_PATH = Path(__file__).with_name("relevance_cases.json")
 TIERS = {"standing_title", "standing_full", "prompt_full", "pointer", "tool_result", "team_delta"}
 FULL_TIERS = {"standing_full", "prompt_full", "tool_result", "team_delta"}
@@ -81,9 +81,9 @@ def validate_fixture(data: dict[str, Any]) -> None:
             or any(not isinstance(case_id, str) or not case_id.strip() for case_id in ids)
             or len(ids) != len(set(ids))):
         raise FixtureError("case_id values must be unique non-empty strings")
-    required_families = {f"R{i:02d}" for i in range(1, 19)}
+    required_families = {f"R{i:02d}" for i in range(1, 22)}
     if {case.get("family") for case in cases} != required_families:
-        raise FixtureError("fixture must contain exactly scenario families R01-R18")
+        raise FixtureError("fixture must contain exactly scenario families R01-R21")
     decision_ids: set[str] = set()
     revision_ids: set[str] = set()
     for case in cases:
@@ -99,7 +99,7 @@ def validate_fixture(data: dict[str, Any]) -> None:
         # Non-EMPTY, not merely a list: a case with zero assertions is measured as a pass,
         # so a fixture stripped of its assertions renders a CLEANER report than the real one
         # (0 unexpected failures, 0 known gaps). The floor makes a hollowed corpus fail here
-        # rather than pass the gate - see validate_fixture's "exactly R01-R18" family check,
+        # rather than pass the gate - see validate_fixture's "exactly R01-R21" family check,
         # which is the same idea one level up.
         if not isinstance(case.get("desired_assertions"), list) or not case["desired_assertions"]:
             raise FixtureError(f"{case['case_id']}: desired_assertions must be non-empty")
@@ -421,7 +421,8 @@ def _run_action(
             repo, action.get("source", ""), action.get("session_id", case["session_id"])
         )
         text = payload.get("context", "")
-        detail.update({"text": text, "status_text": payload.get("status", "")})
+        detail.update({"text": text, "status_text": payload.get("status", ""),
+                       "source": action.get("source", "")})
         return _observations_from_text(
             case, action, repo, text, stage="emitted", tier=action.get("tier", "standing_full"),
             status="observed" if text else "absent", evidence_source="store.session_start_payload",
@@ -749,6 +750,7 @@ def _metrics(cases: list[dict[str, Any]]) -> dict[str, Any]:
     def ratio(num: int, den: int) -> float | None:
         return num / den if den else None
 
+    repeats = _repeat_full_deliveries(cases)
     return {
         "full_guidance_precision": {
             "numerator": len(applicable_full), "denominator": len(emitted_full),
@@ -796,7 +798,69 @@ def _metrics(cases: list[dict[str, Any]]) -> dict[str, Any]:
             "numerator": checked_cases, "denominator": len(cases),
             "ratio": ratio(checked_cases, len(cases)),
         },
+        "repeat_full_deliveries": {
+            "count": sum(repeats.values()), "by_case": dict(sorted(repeats.items())),
+        },
+        "output_chars": _output_chars(cases),
     }
+
+
+# Hook surfaces push text into the model's context unasked; `lookup` is the model's own call.
+_HOOK_ACTION_KINDS = {"prompt", "session_start", "compact", "adapter_prompt"}
+
+
+def _starts_fresh_context(detail: dict[str, Any]) -> bool:
+    """Whether an action begins a context window the model has not already seen: a
+    compaction or any session start except `resume`, which reloads the prior conversation."""
+    return detail["kind"] == "compact" or (
+        detail["kind"] == "session_start" and detail.get("source") != "resume")
+
+
+def _repeat_full_deliveries(cases: list[dict[str, Any]]) -> dict[str, int]:
+    """Full hook deliveries of a (decision, revision) the same session already received in full.
+
+    A fresh context window (see `_starts_fresh_context`) empties what the model still holds,
+    so a restore after one is not a repeat; a new revision is new guidance, so it is not a
+    repeat either. Explicit lookups are the model's own request (stage `looked_up`) and never
+    count."""
+    counts: dict[str, int] = {}
+    for case in cases:
+        by_action: dict[str, list[dict[str, Any]]] = {}
+        for obs in case["observations"]:
+            by_action.setdefault(obs["action_id"], []).append(obs)
+        seen: dict[str | None, set[tuple[Any, ...]]] = {}
+        for detail in case.get("action_details", []):
+            observations = by_action.get(detail["action_id"], [])
+            if _starts_fresh_context(detail):
+                for session in {obs.get("session_id") for obs in observations}:
+                    seen[session] = set()
+            for obs in observations:
+                if (obs["stage"] != "emitted" or obs["status"] != "observed"
+                        or not obs.get("decision_id") or obs["tier"] not in FULL_TIERS):
+                    continue
+                identity = (obs["decision_id"], obs.get("revision_id"), obs.get("proposal_id"))
+                delivered = seen.setdefault(obs.get("session_id"), set())
+                if identity in delivered:
+                    counts[case["case_id"]] = counts.get(case["case_id"], 0) + 1
+                delivered.add(identity)
+    return counts
+
+
+def _output_chars(cases: list[dict[str, Any]]) -> dict[str, int]:
+    """Characters each surface put in front of the model: the context-size cost of a policy.
+
+    Measured on the normalized report text (the sandbox path replaced by `repo_id`) so the
+    figure is deterministic across runs; adapter rows count the `additionalContext` the model
+    receives, not the developer-only `systemMessage`."""
+    totals = {"hook_emitted": 0, "tool_result": 0}
+    for case in cases:
+        for detail in case.get("action_details", []):
+            text = detail.get("text") or ""
+            if detail["kind"] in _HOOK_ACTION_KINDS:
+                totals["hook_emitted"] += len(text)
+            elif detail["kind"] == "lookup":
+                totals["tool_result"] += len(text)
+    return totals
 
 
 def _delivery_expectations(case: dict[str, Any]) -> list[dict[str, Any]]:

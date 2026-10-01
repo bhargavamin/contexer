@@ -31,11 +31,11 @@ def _assertion(report, family, key):
     return next(item for item in case["assertions"] if item["key"] == key)
 
 
-def test_fixture_covers_all_eighteen_families(fixture_data):
+def test_fixture_covers_all_twenty_one_families(fixture_data):
     assert {case["family"] for case in fixture_data["cases"]} == {
-        f"R{i:02d}" for i in range(1, 19)
+        f"R{i:02d}" for i in range(1, 22)
     }
-    assert len(fixture_data["cases"]) == 18
+    assert len(fixture_data["cases"]) == 21
 
 
 def test_fixture_has_stable_identity_and_applicability_fields(fixture_data):
@@ -57,14 +57,18 @@ def test_report_schema_and_version_provenance(report):
     assert len(report["code_revision"]) == 40
     assert len(report["fixture_sha256"]) == 64
     assert len(report["runner_sha256"]) == 64
-    assert report["fixture_version"] == "1.0.5"
-    assert report["runner_version"] == "2"
+    assert report["fixture_version"] == "1.1.0"
+    assert report["runner_version"] == "3"
 
 
 def test_only_registered_gaps_remain(report):
     assert report["summary"]["unexpected_failures"] == []
     assert {item["gap"] for item in report["summary"]["known_gaps"]} == {
         "ordinary-task-trigger-gap",
+        "anchor-slots-follow-store-order",
+        "overflow-anchors-unnamed",
+        "startup-rules-not-credited",
+        "anchor-tier-outranks-task-match",
     }
 
 
@@ -76,6 +80,21 @@ def test_only_registered_gaps_remain(report):
             marks=pytest.mark.xfail(strict=True, raises=AssertionError,
                                     reason="ordinary-task-trigger-gap; later experiment"),
         ),
+        *[
+            pytest.param(
+                family, key,
+                marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason=reason),
+            )
+            for family, key, reason in (
+                ("R19", "needed-anchor-delivered", "anchor-slots-follow-store-order; #341"),
+                ("R19", "anchor-redact-at-least-named", "overflow-anchors-unnamed; #341"),
+                ("R19", "anchor-preview-at-least-named", "overflow-anchors-unnamed; #341"),
+                ("R19", "anchor-batch-at-least-named", "overflow-anchors-unnamed; #341"),
+                ("R20", "preloaded-constraint-not-repeated", "startup-rules-not-credited; #342"),
+                ("R20", "needed-decision-gets-freed-slot", "startup-rules-not-credited; #342"),
+                ("R21", "task-matched-need-delivered", "anchor-tier-outranks-task-match"),
+            )
+        ],
     ],
 )
 def test_desired_behavior_known_gaps_are_narrow(report, family, key):
@@ -101,7 +120,7 @@ def test_case_order_does_not_change_results(fixture_data):
 def test_invalid_fixture_fails_before_execution(fixture_data):
     invalid = copy.deepcopy(fixture_data)
     invalid["cases"].pop()
-    with pytest.raises(baseline.FixtureError, match="R01-R18"):
+    with pytest.raises(baseline.FixtureError, match="R01-R21"):
         baseline.validate_fixture(invalid)
 
 
@@ -144,6 +163,88 @@ def test_zero_denominators_are_null():
     assert metrics["full_guidance_precision"]["ratio"] is None
     assert metrics["required_guidance_coverage"]["ratio"] is None
     assert metrics["whole_case_coverage"]["supported"]["ratio"] is None
+    assert metrics["repeat_full_deliveries"] == {"count": 0, "by_case": {}}
+    assert metrics["output_chars"] == {"hook_emitted": 0, "tool_result": 0}
+
+
+def _obs(action_id, decision_id, *, session="s", tier="prompt_full", revision="rev-a"):
+    return {"action_id": action_id, "session_id": session, "stage": "emitted",
+            "status": "observed", "decision_id": decision_id, "revision_id": revision,
+            "proposal_id": None, "tier": tier}
+
+
+def _repeat_case(kinds, observations):
+    return {"case_id": "synthetic", "observations": observations,
+            "action_details": [{"action_id": a, "kind": k} for a, k in kinds.items()]}
+
+
+def test_repeat_full_delivery_counts_same_session_redelivery():
+    case = _repeat_case(
+        {"start": "session_start", "task": "prompt"},
+        [_obs("start", "d1", tier="standing_full"), _obs("task", "d1")],
+    )
+    assert baseline._repeat_full_deliveries([case]) == {"synthetic": 1}
+
+
+@pytest.mark.parametrize("second", [
+    pytest.param(_obs("task", "d1", session="other"), id="other-session"),
+    pytest.param(_obs("task", "d1", revision="rev-b"), id="new-revision"),
+    pytest.param(_obs("task", "d1", tier="pointer"), id="pointer-only"),
+    pytest.param({**_obs("look", "d1"), "stage": "looked_up"}, id="explicit-lookup"),
+])
+def test_repeat_full_delivery_ignores_legitimate_second_views(second):
+    case = _repeat_case(
+        {"start": "session_start", "task": "prompt", "look": "lookup"},
+        [_obs("start", "d1", tier="standing_full"), second],
+    )
+    assert baseline._repeat_full_deliveries([case]) == {}
+
+
+def test_repeat_full_delivery_resets_after_compaction():
+    case = _repeat_case(
+        {"task": "prompt", "compact": "compact"},
+        [_obs("task", "d1"), _obs("compact", "d1", tier="standing_full")],
+    )
+    assert baseline._repeat_full_deliveries([case]) == {}
+
+
+def test_repeat_full_delivery_after_compaction_restore_still_counts():
+    # The restore resets only its own session, and the restored rule is then held again.
+    case = _repeat_case(
+        {"task": "prompt", "other": "prompt", "compact": "compact", "again": "prompt",
+         "other-again": "prompt"},
+        [_obs("task", "d1"), _obs("other", "d1", session="s2"),
+         _obs("compact", "d1", tier="standing_full"), _obs("again", "d1"),
+         _obs("other-again", "d1", session="s2")],
+    )
+    assert baseline._repeat_full_deliveries([case]) == {"synthetic": 2}
+
+
+@pytest.mark.parametrize(("source", "expected"), [
+    ("compact", {}), ("clear", {}), ("startup", {}), ("resume", {"synthetic": 1}),
+])
+def test_repeat_full_delivery_session_start_resets_unless_resumed(source, expected):
+    case = _repeat_case({"task": "prompt", "start": "session_start"},
+                        [_obs("task", "d1"), _obs("start", "d1", tier="standing_full")])
+    case["action_details"][1]["source"] = source
+    assert baseline._repeat_full_deliveries([case]) == expected
+
+
+def test_repeats_only_come_from_cases_with_a_registered_gap(report):
+    # Not a literal count: once #342 is fixed the R20 repeat disappears and this still holds.
+    gap_cases = {gap["case_id"] for gap in report["summary"]["known_gaps"]}
+    by_case = report["summary"]["metrics"]["repeat_full_deliveries"]["by_case"]
+    assert set(by_case) <= gap_cases
+
+
+def test_output_chars_split_hook_pushes_from_model_lookups():
+    case = {"observations": [], "action_details": [
+        {"action_id": "p", "kind": "prompt", "text": "abc"},
+        {"action_id": "s", "kind": "session_start", "text": "de"},
+        {"action_id": "l", "kind": "lookup", "text": "fghi"},
+        {"action_id": "a", "kind": "approve_proposal"},
+    ]}
+    assert baseline._output_chars([case]) == {"hook_emitted": 5, "tool_result": 4}
 
 
 @pytest.mark.parametrize(
@@ -337,7 +438,7 @@ def test_main_writes_only_when_output_is_explicit(tmp_path, capsys):
     before = set(tmp_path.iterdir())
     assert baseline.main(["--format", "text"]) == 0
     assert set(tmp_path.iterdir()) == before
-    assert "known gaps: 1" in capsys.readouterr().out
+    assert "known gaps: 8" in capsys.readouterr().out
     output = tmp_path / "report.json"
     assert baseline.main(["--format", "json", "--output", str(output)]) == 0
     assert json.loads(output.read_text(encoding="utf-8"))["schema_version"] == 1
