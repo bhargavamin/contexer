@@ -57,7 +57,7 @@ def test_report_schema_and_version_provenance(report):
     assert len(report["code_revision"]) == 40
     assert len(report["fixture_sha256"]) == 64
     assert len(report["runner_sha256"]) == 64
-    assert report["fixture_version"] == "1.1.2"
+    assert report["fixture_version"] == "1.1.3"
     assert report["runner_version"] == "3"
 
 

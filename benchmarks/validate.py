@@ -38,23 +38,24 @@ TOKEN_PARTS = ("tokens_in", "tokens_out", "tokens_cache_read", "tokens_cache_wri
 PAIRED_METRICS = ("tokens_total", "cost_usd", "turns", "tool_calls", "duration_ms")
 MEDIAN_METRICS = ("tokens_total", "cost_usd", "turns", "tool_calls",
                   "duration_ms", "violations", "rationale", "success")
-EDITING_KINDS = ("convention", "efficiency", "continuity")
+EDITING_KINDS = ("convention", "efficiency", "continuity", "retrieval")
 # memory_campaign.py's headline tasks (memory_tasks.json's "headline": true).
 # Kept as a literal, like EDITING_KINDS above, so this validator notices drift.
 MEMORY_HEADLINE_TASKS = ("sup-current", "cont-log")
 # Stable display order for known conditions; unknown names are appended.
 CONDITION_ORDER = ("without", "agentsmd", "claudemd", "claudemd_agentsmd",
-                   "memory", "with", "claudemd_with")
+                   "memory", "with_prev", "with", "claudemd_with")
 # The condition pairs that matter, first arm vs second arm. claudemd_with-vs-claudemd
 # is the adoption question: contexer's marginal value on an already-documented repo.
 # agentsmd-vs-claudemd measures whether the assistant honors AGENTS.md like CLAUDE.md.
 # with-vs-memory is the memory campaign's headline comparison; memory-vs-without
-# says whether the memory tool beat a bare agent at all. A pair whose conditions
+# says whether the memory tool beat a bare agent at all. with-vs-with_prev compares two
+# contexer versions (`with_prev` installed via --contexer-sources). A pair whose conditions
 # are not both present in a campaign is skipped, so these are inert elsewhere.
 PAIRS = (("with", "without"), ("with", "claudemd"), ("claudemd", "without"),
          ("claudemd_with", "claudemd"), ("agentsmd", "claudemd"),
          ("claudemd_agentsmd", "claudemd"), ("with", "memory"),
-         ("memory", "without"))
+         ("memory", "without"), ("with", "with_prev"))
 
 
 def _conditions_present(rows):

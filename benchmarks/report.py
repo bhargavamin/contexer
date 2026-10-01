@@ -14,10 +14,10 @@ from pathlib import Path
 METRICS = ["tokens_total", "cost_usd", "turns", "tool_calls", "duration_ms",
            "violations", "rationale", "success"]
 _CONDITION_ORDER = ("without", "agentsmd", "claudemd", "claudemd_agentsmd",
-                    "with", "claudemd_with")
+                    "with_prev", "with", "claudemd_with")
 _COMPARISONS = (("with", "without"), ("with", "claudemd"),
                 ("claudemd_with", "claudemd"), ("agentsmd", "claudemd"),
-                ("claudemd_agentsmd", "claudemd"))
+                ("claudemd_agentsmd", "claudemd"), ("with", "with_prev"))
 _RATIONALE_NOTE = ("_Note: rationale 0.0 can mean the information was unavailable "
                    "to that condition, not model failure — see per-condition design._")
 
@@ -225,6 +225,23 @@ def render(runs_path: Path) -> str:
     if rat and any(_median([r for r in rat if r["condition"] == c], "rationale") == 0.0
                    for c in conds if any(r["condition"] == c for r in rat)):
         lines += ["", _RATIONALE_NOTE]
+
+    # Decision-dependent tasks: the median of a 0/1 success column says nothing, so these
+    # get success counts per task and a pooled Wilson cell per condition (the headline).
+    retr = [r for r in ok if r.get("kind") == "retrieval"]
+    if retr:
+        rconds = [c for c in conds if any(r["condition"] == c for r in retr)]
+        lines += ["", "## Decision-dependent tasks (success k/n, 95% Wilson)", "",
+                  "| task | " + " | ".join(rconds) + " |", "|" + "---|" * (1 + len(rconds))]
+        for task_id in sorted({r["task_id"] for r in retr}):
+            cells = [_wilson_cell([r for r in retr
+                                   if r["task_id"] == task_id and r["condition"] == c])
+                     for c in rconds]
+            lines.append(f"| {task_id} | " + " | ".join(cells) + " |")
+        pooled = [_wilson_cell([r for r in retr if r["condition"] == c]) for c in rconds]
+        lines.append("| **pooled (headline)** | " + " | ".join(pooled) + " |")
+        lines += ["", "_The pooled interval treats every task x rep row as independent; "
+                  "tasks differ in base rate, so cite it only when the per-task cells agree._"]
 
     chains = sorted({r["chain"] for r in ok if r["chain"]})
     for chain in chains:

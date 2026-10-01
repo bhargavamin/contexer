@@ -67,6 +67,10 @@ uv run python -m benchmarks.run --reps 4 --tasks rat-storage,rat-errors,cont-log
   --model claude-sonnet-5 --conditions contexer_pre_v1,contexer_v1 \
   --contexer-sources "contexer_pre_v1=/path/to/old-checkout,contexer_v1=." \
   --out benchmarks/artifacts/my-ab
+
+# decision-dependent tasks (a stored decision changes the right answer); free offline
+# delivery preview first — full runbook: benchmarks/RETRIEVAL_CAMPAIGN.md
+uv run --frozen python benchmarks/replay_delivery.py tasks
 ```
 
 The harness lives in `benchmarks/` (runner, scorers, validator, fixture generator, task definitions). Campaign artifacts — one JSONL row per session plus validator output — are in `benchmarks/artifacts/`. Provenance note: `contexer_sources` paths recorded in the engine-A/B campaign metadata (`campaign6-retrieval-v1`, `campaign8-paraphrase`) are machine-local checkout paths; they correspond to the git tags `v0.19.0` and `v0.20.0` — check out those tags to reproduce the arms.

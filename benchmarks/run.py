@@ -13,6 +13,7 @@ os.environ passthrough) so CLAUDE_CONFIG_DIR / XDG_CONFIG_HOME cannot leak the
 developer's real config; the model is pinned per campaign; an embedded OTLP
 receiver independently re-measures tokens/cost per run (telemetry_ok)."""
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -23,7 +24,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from benchmarks import score
+from benchmarks import score, seeding
 from benchmarks.fixtures.generate import build_webapi
 from benchmarks.otel import OtelReceiver
 
@@ -46,8 +47,8 @@ def _session_env(home: Path, otel_port: int) -> dict:
     return env
 
 
-def _load_tasks(task_ids):
-    tasks = json.loads(TASKS_FILE.read_text())
+def _load_tasks(task_ids, tasks_file: Path = None):
+    tasks = json.loads((tasks_file or TASKS_FILE).read_text())
     if task_ids is None:
         # Paraphrase variants (prompt-sensitivity probes) never run by default —
         # they'd double-count their base task in campaign aggregates.
@@ -57,7 +58,8 @@ def _load_tasks(task_ids):
     return sorted(picked, key=lambda t: (t["chain"], t["step"]))
 
 
-def _condition_b_setup(repo: str, home: Path, seed_decision: str, source: Path = None) -> None:
+def _condition_b_setup(repo: str, home: Path, seed_decision: str, source: Path = None,
+                       seed_decisions: list = None) -> None:
     """contexer install + bootstrap + optional decision seed, in a child process
     whose HOME is the isolated one (store paths must resolve inside it). `source`
     is the contexer checkout `uv run` installs from (its cwd resolves the pyproject
@@ -75,12 +77,25 @@ def _condition_b_setup(repo: str, home: Path, seed_decision: str, source: Path =
     if seed_decision:
         code += (f"store.update_decision({repo!r}, {seed_decision!r}, 'bench-seed', "
                  "'constraint', created_by='human')\n")
+    if seed_decisions:
+        # Seeded in list order (`seeding.seed_items`), so the task file controls store order.
+        # A seed the store refuses (novelty, quality gate, an older version's rules) fails
+        # setup loudly: the static-file arm always gets every seed, so a silent drop here
+        # would break arm parity without leaving a trace.
+        # This script runs inside the SOURCE checkout (an older one for `with_prev`), so it
+        # must not import anything from this harness: the stored check is inlined.
+        for item in seed_decisions:
+            code += (f"_r = store.update_decision({repo!r}, {item['content']!r}, "
+                     f"'bench-seed', {item['subtype']!r}, created_by='human', "
+                     f"source_files={item['source_files'] or None!r})\n"
+                     f"assert (_r[0] if isinstance(_r, tuple) else _r), "
+                     f"{('seed not stored: ' + item['content'][:60])!r}\n")
     subprocess.run(["uv", "run", "python", "-c", code], env=env, check=True,
                    capture_output=True, cwd=src)
 
 
 def _condition_c_setup(work: Path, seed_decision: str,
-                       filenames: tuple = ("CLAUDE.md",)) -> None:
+                       filenames: tuple = ("CLAUDE.md",), seed_decisions: list = None) -> None:
     """The honest competitor: NO contexer — static rules file(s) in the work repo
     carrying the same knowledge condition "with" receives. Content mimics how these
     files are commonly written in the wild: CLAUDE.md as project overview + commands
@@ -93,8 +108,15 @@ def _condition_c_setup(work: Path, seed_decision: str,
     capture mid-session decisions, and that asymmetry IS the thing measured."""
     from contexer import miner
     convs = [c["content"] for c in miner.mine_conventions(str(work))]
-    is_rule = bool(seed_decision) and seed_decision.lower().startswith(
-        ("never", "always", "don't", "do not"))
+    # Every seed the contexer arm stores, so both arms carry the same knowledge.
+    seeds = ([seed_decision] if seed_decision else []) + [
+        item["content"] for item in seed_decisions or []]
+
+    def _is_rule(text: str) -> bool:
+        return text.lower().startswith(("never", "always", "don't", "do not"))
+
+    rule_seeds = [s for s in seeds if _is_rule(s)]
+    decision_seeds = [s for s in seeds if not _is_rule(s)]
 
     overview = [
         "# Project: record service", "",
@@ -107,21 +129,22 @@ def _condition_c_setup(work: Path, seed_decision: str,
         "- `app/` — service modules",
         "- `tests/` — pytest suite, plain asserts", "",
     ]
-    decisions = ["## Key decisions", "", f"- {seed_decision}", ""] if seed_decision else []
+    def _section(heading: str, items: list) -> list:
+        return [heading, ""] + [f"- {s}" for s in items] + [""] if items else []
+
     conventions = ["## Code style", ""] + [f"- {c}" for c in convs] + [""]
     testing = ["## Testing", "",
                "- Run `uv run pytest tests/ -q` before finishing any task.", ""]
-    rules = ["## Rules", "", f"- {seed_decision}", ""] if seed_decision else []
 
     if set(filenames) == {"CLAUDE.md", "AGENTS.md"}:
-        claude_lines = overview + ([] if is_rule else decisions)
+        claude_lines = overview + _section("## Key decisions", decision_seeds)
         agents_lines = (["# AGENTS.md", "",
                          "Guidance for AI coding agents working in this repository.", ""]
-                        + conventions + testing + (rules if is_rule else []))
+                        + conventions + testing + _section("## Rules", rule_seeds))
         (work / "CLAUDE.md").write_text("\n".join(claude_lines) + "\n")
         (work / "AGENTS.md").write_text("\n".join(agents_lines) + "\n")
         return
-    body = overview + decisions + conventions + testing
+    body = overview + _section("## Key decisions", seeds) + conventions + testing
     text = "\n".join(body) + "\n"
     for name in filenames:
         (work / name).write_text(text)
@@ -182,20 +205,29 @@ def _telemetry_check(row: dict, snap: dict):
 def run_campaign(out_dir: Path, reps: int = 3, task_ids=None, claude_cmd: str = "claude",
                  seed: int = 0, model: str = "",
                  conditions: tuple = ("without", "claudemd", "with"),
-                 contexer_sources: dict = None, wait_for_otel: bool = True) -> Path:
+                 contexer_sources: dict = None, wait_for_otel: bool = True,
+                 tasks_file: Path = None) -> Path:
     """`contexer_sources` maps condition name -> contexer checkout path (see
     `_condition_b_setup`), for A/B comparisons across contexer versions. A
     condition present in the map installs contexer from that path even if it
-    isn't one of `_CONTEXER_CONDITIONS`. Omitted/empty: unchanged behavior."""
+    isn't one of `_CONTEXER_CONDITIONS`. Omitted/empty: unchanged behavior.
+    `tasks_file` swaps in another task list (e.g. `retrieval_tasks.json`)."""
     contexer_sources = contexer_sources or {}
+    if "with_prev" in conditions and "with_prev" not in contexer_sources:
+        # Without a source it gets neither rules files nor an install: a bare arm that the
+        # report would still label as a Contexer version comparison.
+        raise ValueError("condition 'with_prev' needs --contexer-sources with_prev=<checkout>")
     out_dir.mkdir(parents=True, exist_ok=True)
+    tasks_path = tasks_file or TASKS_FILE
     out = out_dir / "runs.jsonl"
     (out_dir / "campaign.json").write_text(json.dumps({
         "model": model, "seed": seed, "reps": reps, "conditions": list(conditions),
         "contexer_sources": contexer_sources,
+        "tasks_file": str(tasks_path),
+        "tasks_sha256": hashlib.sha256(tasks_path.read_bytes()).hexdigest(),
         "managed_settings_present": _MANAGED_SETTINGS.exists(),
         "started_at": datetime.now(timezone.utc).isoformat()}, indent=2))
-    tasks = _load_tasks(task_ids)
+    tasks = _load_tasks(task_ids, tasks_file)
     singles = [t for t in tasks if not t["chain"]]
     chains: dict[str, list] = {}
     for t in tasks:
@@ -273,13 +305,14 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
         # "claudemd_with" (condition D) layers contexer on top of a pre-existing
         # CLAUDE.md — the adoption question for repos that already maintain one.
         if not task["chain"] or task["step"] <= 1:
+            seeds = seeding.seed_items(task, seed)
             files = _FILE_CONDITIONS.get(condition)
             if files:
-                _condition_c_setup(work, task["seed_decision"], files)
+                _condition_c_setup(work, task["seed_decision"], files, seed_decisions=seeds)
             src = (contexer_sources or {}).get(condition)
             if condition in _CONTEXER_CONDITIONS or src:
                 _condition_b_setup(str(work), home, task["seed_decision"],
-                                   Path(src) if src else None)
+                                   Path(src) if src else None, seed_decisions=seeds)
         rx.reset()
         row["ts"] = time.time()  # stamped when the session starts (post-setup)
         # Pre-session HEAD: sessions may commit their edits, which would vanish
@@ -342,6 +375,9 @@ if __name__ == "__main__":
     ap.add_argument("--out", default="benchmarks/artifacts/dev")
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--tasks", default="")
+    ap.add_argument("--tasks-file", default="",
+                    help="task list to run instead of benchmarks/tasks.json "
+                         "(e.g. benchmarks/retrieval_tasks.json)")
     ap.add_argument("--claude-cmd", default="claude")
     ap.add_argument("--model", default="")
     ap.add_argument("--seed", type=int, default=0)
@@ -365,4 +401,5 @@ if __name__ == "__main__":
         print("WARNING: no --model pinned; the report will flag mixed models.", file=sys.stderr)
     print(run_campaign(Path(a.out), reps=a.reps, task_ids=ids,
                        claude_cmd=a.claude_cmd, seed=a.seed, model=a.model,
-                       conditions=conds, contexer_sources=sources))
+                       conditions=conds, contexer_sources=sources,
+                       tasks_file=Path(a.tasks_file) if a.tasks_file else None))
