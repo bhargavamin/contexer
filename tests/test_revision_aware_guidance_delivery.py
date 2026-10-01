@@ -877,3 +877,58 @@ class TestCompactionDeliveryBoundary:
         assert rendered in payload["context"]
         # Explicit residual limitation: the old row may survive when reset/receipt writes fail.
         assert working_set.records(tmp_repo, sid) == receipts
+
+
+class TestAnchorOverflow:
+    """#341: anchors beyond the full-text cap are ranked by relevance and named, not dropped."""
+
+    def _anchor(self, repo, content, title, subtype="architecture"):
+        return store.update_decision(
+            repo, content, SESSION, subtype, created_by="human", title=title,
+            source_files=["src/outbox.py"])[1]
+
+    def test_relevant_anchor_wins_a_slot_and_the_rest_are_named(self, tmp_repo):
+        titles = ["Store outbox rows in arrival order", "Serialize outbox payloads as JSON",
+                  "Keep outbox files under the user cache", "Expire outbox rows after a week"]
+        for title in titles:
+            self._anchor(tmp_repo, f"{title} because the sync worker relies on it", title)
+        self._anchor(tmp_repo, "Count failed batches once per batch, not per row",
+                     "Count batch failures once")
+
+        text = store.get_context_for_prompt(
+            tmp_repo, "Refactor the batch failure accounting in src/outbox.py", "overflow")
+
+        assert "Count failed batches once per batch" in text
+        assert text.count("because the sync worker relies on it") == 2
+        assert all(title in text for title in titles)
+        assert "2 more decisions anchored to files in this prompt not shown" in text
+
+    def test_anchored_constraint_leads_even_when_the_prompt_words_differ(self, tmp_repo):
+        for title in ("Add credit notes as separate documents", "Number credit notes in sequence",
+                      "Store credit notes with the invoice"):
+            self._anchor(tmp_repo, f"{title} for credit note support", title)
+        self._anchor(tmp_repo, "Round totals once, after tax is applied",
+                     "Round totals once after tax", subtype="constraint")
+
+        text = store.get_context_for_prompt(
+            tmp_repo, "Add credit note support to src/outbox.py", "constraint-first")
+
+        assert "Round totals once, after tax is applied" in text
+
+    def test_pending_constraints_do_not_displace_the_needed_decision(self, tmp_repo):
+        self._anchor(tmp_repo, "Count failed batches once per batch, not per row",
+                     "Count batch failures once")
+        for content in ("Keep outbox rows in arrival order for the sync worker",
+                        "Serialize payloads as JSON so older clients can read them",
+                        "Expire stale rows after seven days to bound disk use"):
+            stored, _ = store.update_decision(
+                tmp_repo, content, SESSION, "constraint", created_by="ai",
+                source_files=["src/outbox.py"])
+            assert stored
+
+        text = store.get_context_for_prompt(
+            tmp_repo, "Refactor the batch failure accounting in src/outbox.py", "pending")
+
+        assert "Count failed batches once per batch" in text
+        # Overflow names keep their status, so an unreviewed rule never reads as policy.
+        assert text.count("[pending] (id=") == 1

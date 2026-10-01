@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "fixture_version": "1.1.0",
+  "fixture_version": "1.1.1",
   "reference_revision": "5676247f358dc6a0c099d8eb8eb94623bad04bb0",
   "cases": [
     {
@@ -1895,57 +1895,43 @@
           "action_id": "task",
           "decision_id": "r19-batch",
           "revision_id": "rev-r19-batch-a",
-          "tier": "prompt_full",
-          "known_gap": "anchor-slots-follow-store-order",
-          "owner": "bhargavamin/contexer#341"
+          "tier": "prompt_full"
         },
         {
           "key": "anchor-retry-at-least-named",
           "kind": "contains_text",
           "action_id": "task",
-          "text": "Back off share retries exponentially",
-          "known_gap": "overflow-anchors-unnamed",
-          "owner": "bhargavamin/contexer#341"
+          "text": "Back off share retries exponentially"
         },
         {
           "key": "anchor-facade-at-least-named",
           "kind": "contains_text",
           "action_id": "task",
-          "text": "Read decisions through the store facade",
-          "known_gap": "overflow-anchors-unnamed",
-          "owner": "bhargavamin/contexer#341"
+          "text": "Read decisions through the store facade"
         },
         {
           "key": "anchor-wire-at-least-named",
           "kind": "contains_text",
           "action_id": "task",
-          "text": "Send source files as repo-relative paths",
-          "known_gap": "overflow-anchors-unnamed",
-          "owner": "bhargavamin/contexer#341"
+          "text": "Send source files as repo-relative paths"
         },
         {
           "key": "anchor-redact-at-least-named",
           "kind": "contains_text",
           "action_id": "task",
-          "text": "Redact at the wire boundary only",
-          "known_gap": "overflow-anchors-unnamed",
-          "owner": "bhargavamin/contexer#341"
+          "text": "Redact at the wire boundary only"
         },
         {
           "key": "anchor-preview-at-least-named",
           "kind": "contains_text",
           "action_id": "task",
-          "text": "Keep share previews credential-free",
-          "known_gap": "overflow-anchors-unnamed",
-          "owner": "bhargavamin/contexer#341"
+          "text": "Keep share previews credential-free"
         },
         {
           "key": "anchor-batch-at-least-named",
           "kind": "contains_text",
           "action_id": "task",
-          "text": "Count share failures once per batch",
-          "known_gap": "overflow-anchors-unnamed",
-          "owner": "bhargavamin/contexer#341"
+          "text": "Count share failures once per batch"
         },
         {
           "key": "full-injections-capped",
@@ -2104,9 +2090,7 @@
           "action_id": "task",
           "decision_id": "r20-credit",
           "revision_id": "rev-r20-credit-a",
-          "tier": "prompt_full",
-          "known_gap": "startup-rules-not-credited",
-          "owner": "bhargavamin/contexer#342"
+          "tier": "prompt_full"
         },
         {
           "key": "other-session-still-receives-constraint",
