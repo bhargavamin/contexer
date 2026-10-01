@@ -882,26 +882,54 @@ class TestCompactionDeliveryBoundary:
 class TestStartupDeliveryCredit:
     """#342: rules session start renders in full count as delivered for that session."""
 
-    def test_full_startup_rules_are_credited_and_title_only_rules_are_not(self, tmp_repo):
+    def test_full_startup_rules_are_credited_and_clipped_rules_are_not(self, tmp_repo):
         constraint = store.update_decision(
             tmp_repo, "Never round invoice totals before tax because audits recompute them",
             SESSION, "constraint", created_by="human", source_files=["billing.py"])[1]
+        # Longer than a title: startup shows only "Name billing jobs with the invoice_ prefix."
         store.update_decision(
-            tmp_repo, "Name billing jobs with the invoice_ prefix so dashboards group them",
-            SESSION, "convention", created_by="human", source_files=["billing.py"])[1]
+            tmp_repo, "Name billing jobs with the invoice_ prefix. Dashboards group scheduled "
+            "work by that prefix, so a job named any other way silently drops out of the "
+            "billing view.", SESSION, "convention", created_by="human",
+            source_files=["billing.py"])[1]
         gid = store.update_global_decision(
             "Never log customer card numbers in any service", SESSION, "constraint",
             created_by="human")[1]
         sid = "startup-credit"
 
-        store._local_session_start_payload(tmp_repo, "startup", sid, "claude")
+        start = store._local_session_start_payload(tmp_repo, "startup", sid, "claude")
 
+        assert "silently drops out" not in start["context"]
         credited = {(r["scope"], r["id"]) for r in working_set.records(tmp_repo, sid)
                     if r["fingerprint"]}
         assert credited == {("personal", constraint), ("global", gid)}
         prompt = store.get_context_for_prompt(tmp_repo, "fix the bug in billing.py", sid)
         assert "Never round invoice totals" not in prompt
-        assert "invoice_ prefix" in prompt
+        assert "silently drops out of the billing view" in prompt
+
+    def test_a_rule_whose_title_is_its_whole_content_is_credited(self, tmp_repo):
+        # #350: no body to clip, so the one-line startup bullet IS the full guidance.
+        convention = store.update_decision(
+            tmp_repo, "Name billing jobs with the invoice_ prefix so dashboards group them",
+            SESSION, "convention", created_by="human", source_files=["billing.py"])[1]
+        needed = store.update_decision(
+            tmp_repo, "Correct issued invoices with separate credit note documents",
+            SESSION, "architecture", created_by="human", source_files=["billing.py"])[1]
+        sid = "short-rule-credit"
+
+        start = store._local_session_start_payload(tmp_repo, "startup", sid, "claude")
+
+        assert "Name billing jobs with the invoice_ prefix so dashboards group them" in (
+            start["context"])
+        assert ("personal", convention) in {
+            (r["scope"], r["id"]) for r in working_set.records(tmp_repo, sid)
+            if r["fingerprint"]}
+        prompt = store.get_context_for_prompt(
+            tmp_repo, "Add credit note support to billing.py", sid)
+        assert "invoice_ prefix" not in prompt
+        assert "separate credit note documents" in prompt
+        assert ("personal", needed) in {(r["scope"], r["id"])
+                                        for r in working_set.records(tmp_repo, sid)}
 
     def _credited(self, repo, sid):
         return {(r["scope"], r["id"]): r["fingerprint"]
@@ -1010,6 +1038,8 @@ class TestAnchorOverflow:
         assert text.count("because the sync worker relies on it") == 2
         assert all(title in text for title in titles)
         assert "2 more decisions anchored to files in this prompt not shown" in text
+        # #353: the path's bare basename is matched on but not listed a second time.
+        assert "call get_context(files=['src/outbox.py']) if relevant." in text
 
     def test_anchored_constraint_leads_even_when_the_prompt_words_differ(self, tmp_repo):
         for title in ("Add credit notes as separate documents", "Number credit notes in sequence",
@@ -1040,3 +1070,32 @@ class TestAnchorOverflow:
         assert "Count failed batches once per batch" in text
         # Overflow names keep their status, so an unreviewed rule never reads as policy.
         assert text.count("[pending] (id=") == 1
+
+
+class TestPointerFiles:
+    """#353: pointers name each prompt file once, though matching uses path and basename."""
+
+    @pytest.mark.parametrize(("prompt", "shown"), [
+        ("fix src/sharing/outbox.py", ["src/sharing/outbox.py"]),
+        ("compare src/a/utils.py with lib/utils.py", ["src/a/utils.py", "lib/utils.py"]),
+        ("check billing.py logic", ["billing.py"]),
+        ("fix contexer/guard_engine.py and contexer.store",
+         ["contexer/guard_engine.py", "contexer.store"]),
+        # A bare name the prompt also states on its own is the root-level file, not a tail.
+        ("fix billing.py and src/billing.py", ["billing.py", "src/billing.py"]),
+        ("check `billing.py` and lib/billing.py", ["billing.py", "lib/billing.py"]),
+    ])
+    def test_a_basename_split_off_a_path_is_dropped(self, prompt, shown):
+        from contexer import guard_engine
+        files = list(dict.fromkeys(guard_engine._guard_content_artifacts(prompt)))
+        assert store._pointer_files(files, prompt) == shown
+
+    def test_mention_pointer_lists_the_file_once(self, tmp_repo):
+        store.update_decision(
+            tmp_repo, "Discount calculations live in app/billing.py and must round half up",
+            SESSION, "architecture")   # pairs only through the shared basename: pointer tier
+        text, meta = store.get_context_for_prompt_with_meta(
+            tmp_repo, "check src/billing.py logic", "mention-pointer")
+        assert text.startswith("[Contexer] Related stored decisions mention src/billing.py:")
+        assert "call get_context(files=['src/billing.py']) if relevant." in text
+        assert meta["topics"] == ["src/billing.py"]

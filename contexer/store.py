@@ -5378,8 +5378,11 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
             title, body, extras = conflicts._conflict_view(d)
             sys_parts.append(
                 f"- [{d.get('subtype', '')}]{status_tag}{update_tag}{_recur_suffix(d)} {title}{id_tag}")
-            if d.get("subtype") == "constraint" or extras:
-                full_local.append(d)   # rendered in full (a missing body means the title is all)
+            if body is None or d.get("subtype") == "constraint" or extras:
+                # Rendered in full: a constraint or open conflict keeps its body, and a rule
+                # whose title IS its whole content (no body) is complete as a one-line title.
+                # Only a clipped body stays uncredited, so a prompt can still deliver it (#350).
+                full_local.append(d)
             # Startup-size guard: full bodies for every rule once overflowed the host's
             # additionalContext limit, which silently truncates the whole injection.
             # Constraints keep their body (the "never do X" detail must be present before
@@ -6030,9 +6033,10 @@ def _startup_receipts(data: dict, full_local: list[dict],
                       global_rules: list[dict]) -> list[dict]:
     """Delivery receipts for rules session start rendered with full text (#342).
 
-    Only full-text renders earn credit: constraints and open-conflict rules locally, and global
-    rules without an open proposal. Title-only conventions and patterns stay uncredited so a
-    prompt can still deliver their bodies. Fingerprints use the same snapshots the prompt
+    Only full-text renders earn credit: locally, constraints, open-conflict rules and rules
+    whose title is their whole content (#350); globally, rules without an open proposal.
+    Conventions and patterns whose body was clipped to a title stay uncredited so a prompt can
+    still deliver that body. Fingerprints use the same snapshots the prompt
     router compares against. Best-effort: on failure nothing is credited, so the worst case
     is a repeated rule.
     """
@@ -6417,7 +6421,21 @@ def _index_file_lookup(repo_path: str, index: dict, file_artifacts: list[str]) -
 _OVERFLOW_NAMED_CAP = 5     # anchored decisions named past the full-text slots (#341)
 
 
-def _anchor_overflow_pointer(overflow: list[dict], files: list[str], index: dict) -> str:
+def _pointer_files(files: list[str], prompt: str) -> list[str]:
+    """The prompt's files as a pointer names them: a bare name the extractor split off a longer
+    path in the same list is dropped, so `src/a/outbox.py` is not followed by `outbox.py`
+    (#353). A bare name the prompt also states on its own is a separate root-level file and
+    stays, since `get_context(files=...)` matches a bare name only to that exact path."""
+    def standalone(name: str) -> bool:
+        return re.search(rf"(?<![\w./-]){re.escape(name)}(?![\w-])", prompt) is not None
+
+    return [f for f in files
+            if "/" in f or standalone(f)
+            or not any(g != f and g.endswith("/" + f) for g in files)]
+
+
+def _anchor_overflow_pointer(overflow: list[dict], files: list[str], index: dict,
+                            prompt: str = "") -> str:
     """One line naming anchored decisions that did not fit the full-text slots (#341).
 
     Without it they vanish silently, and a later prompt naming the same file shows the next
@@ -6438,7 +6456,7 @@ def _anchor_overflow_pointer(overflow: list[dict], files: list[str], index: dict
     # Not "anchored to <file>": with several files in the prompt, which one matched is unknown.
     return (f"[Contexer] {_pl(len(overflow), 'more decision')} anchored to files in this "
             f"prompt not shown: {'; '.join(named)}{more} - "
-            f"call get_context(files={files!r}) if relevant.")
+            f"call get_context(files={_pointer_files(files, prompt)!r}) if relevant.")
 
 
 def _prompt_file_hits(
@@ -6723,7 +6741,8 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
                     "do not substitute another memory, graph, or search tool)\n"
                     f"{rendered}")
             if overflow:
-                text += "\n" + _anchor_overflow_pointer(overflow, file_artifacts_prompt, index)
+                text += "\n" + _anchor_overflow_pointer(
+                    overflow, file_artifacts_prompt, index, prompt)
             if observe_impact:
                 try:
                     decision_impact.append(repo_path, decision_impact.guidance_envelope(
@@ -6772,10 +6791,11 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
         more = f" (+{extra} more)" if extra > 0 else ""
         _retrieval_log(repo_path, {"e": "pointer", "topics": file_artifacts_prompt,
                                    "sid": session_id, "ts": time.time()})
+        shown_files = _pointer_files(file_artifacts_prompt, prompt)
         text = (f"[Contexer] Related stored decisions mention "
-                f"{', '.join(file_artifacts_prompt[:3])}: {named}{more} - "
-                f"call get_context(files={file_artifacts_prompt!r}) if relevant.")
-        meta = {"kind": "pointer", "count": len(mention_hits), "topics": file_artifacts_prompt}
+                f"{', '.join(shown_files[:3])}: {named}{more} - "
+                f"call get_context(files={shown_files!r}) if relevant.")
+        meta = {"kind": "pointer", "count": len(mention_hits), "topics": shown_files}
         if task_origin:
             meta["origin"] = retrieval._ORDINARY_TASK_VARIANT
         return text, meta
