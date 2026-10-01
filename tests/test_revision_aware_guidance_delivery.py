@@ -877,3 +877,166 @@ class TestCompactionDeliveryBoundary:
         assert rendered in payload["context"]
         # Explicit residual limitation: the old row may survive when reset/receipt writes fail.
         assert working_set.records(tmp_repo, sid) == receipts
+
+
+class TestStartupDeliveryCredit:
+    """#342: rules session start renders in full count as delivered for that session."""
+
+    def test_full_startup_rules_are_credited_and_title_only_rules_are_not(self, tmp_repo):
+        constraint = store.update_decision(
+            tmp_repo, "Never round invoice totals before tax because audits recompute them",
+            SESSION, "constraint", created_by="human", source_files=["billing.py"])[1]
+        store.update_decision(
+            tmp_repo, "Name billing jobs with the invoice_ prefix so dashboards group them",
+            SESSION, "convention", created_by="human", source_files=["billing.py"])[1]
+        gid = store.update_global_decision(
+            "Never log customer card numbers in any service", SESSION, "constraint",
+            created_by="human")[1]
+        sid = "startup-credit"
+
+        store._local_session_start_payload(tmp_repo, "startup", sid, "claude")
+
+        credited = {(r["scope"], r["id"]) for r in working_set.records(tmp_repo, sid)
+                    if r["fingerprint"]}
+        assert credited == {("personal", constraint), ("global", gid)}
+        prompt = store.get_context_for_prompt(tmp_repo, "fix the bug in billing.py", sid)
+        assert "Never round invoice totals" not in prompt
+        assert "invoice_ prefix" in prompt
+
+    def _credited(self, repo, sid):
+        return {(r["scope"], r["id"]): r["fingerprint"]
+                for r in working_set.records(repo, sid) if r["fingerprint"]}
+
+    def test_global_credit_matches_the_prompt_router_fingerprint(self, tmp_repo):
+        gid = store.update_global_decision(
+            "Never log customer card numbers in any service", SESSION, "constraint",
+            created_by="human")[1]
+        sid = "global-fingerprint"
+        # No local decisions: the bootstrap-offer branch renders the global rule too.
+        store._local_session_start_payload(tmp_repo, "startup", sid, "claude")
+        _, receipts = store._render_prompt_decisions_with_records(tmp_repo, [gid])
+        assert self._credited(tmp_repo, sid) == {("global", gid): receipts[0]["fingerprint"]}
+
+    def test_open_conflict_rule_is_credited_with_its_conflict_view(self, tmp_repo):
+        did = store.update_decision(
+            tmp_repo, "Name billing jobs with the invoice_ prefix so dashboards group them",
+            SESSION, "convention", created_by="human")[1]
+        _propose(tmp_repo, did, "Name billing jobs with the bill_ prefix instead")
+        sid = "conflict-credit"
+        store._local_session_start_payload(tmp_repo, "startup", sid, "claude")
+        _, receipts = store._render_prompt_decisions_with_records(tmp_repo, [did])
+        assert self._credited(tmp_repo, sid) == {("personal", did): receipts[0]["fingerprint"]}
+
+    def test_compaction_replays_the_working_set_not_startup_rules(self, tmp_repo):
+        constraint_ids = [
+            _approved_direct(tmp_repo, f"Constraint body number {n} for the billing ledger")
+            for n in range(12)]
+        data = store.load(tmp_repo)
+        for entry in data["entries"]:
+            entry["subtype"] = "constraint"
+        store.save(tmp_repo, data)
+        needed = _approved(tmp_repo, "Use checkout reservation leases for inventory consistency",
+                           source_files=["checkout.py"])
+        sid = "compact-twice"
+        store._local_session_start_payload(tmp_repo, "startup", sid, "claude")
+        assert "checkout reservation leases" in store.get_context_for_prompt(
+            tmp_repo, "fix the bug in checkout.py", sid)
+
+        for _ in range(2):
+            payload = store._local_session_start_payload(tmp_repo, "compact", sid, "claude")
+            assert payload["context"].count("Constraint body number 3 ") == 1
+            replay = payload["context"].split("## Rehydrated working context:")[1]
+            assert "checkout reservation leases" in replay
+        # Startup rules stay credited after compaction, so the next prompt doesn't resend them.
+        assert {("personal", needed), ("personal", constraint_ids[3])} <= set(
+            self._credited(tmp_repo, sid))
+
+    def test_startup_credit_never_evicts_the_replayed_working_set(self, tmp_repo, monkeypatch):
+        for rule in ("Never log customer card numbers", "Always pin dependency versions",
+                     "Never commit generated secrets files", "Prefer UTC timestamps everywhere",
+                     "Keep public APIs backward compatible", "Run migrations before deploys"):
+            assert store.update_global_decision(rule, SESSION, "constraint",
+                                                created_by="human")[0]
+        needed = _approved(tmp_repo, "Use checkout reservation leases for inventory consistency",
+                           source_files=["checkout.py"])
+        sid = "ledger-cap"
+        store._local_session_start_payload(tmp_repo, "startup", sid, "claude")
+        store.get_context_for_prompt(tmp_repo, "fix the bug in checkout.py", sid)
+        monkeypatch.setattr(store, "MAX_ENTRIES", 5)   # fewer ledger rows than startup credits
+
+        for _ in range(2):
+            payload = store._local_session_start_payload(tmp_repo, "compact", sid, "claude")
+            assert "checkout reservation leases" in payload["context"].split(
+                "## Rehydrated working context:")[1]
+        assert ("personal", needed) in self._credited(tmp_repo, sid)
+
+    def test_legacy_hint_resolves_local_first_against_the_skip_set(self, tmp_repo):
+        local_id = _approved_direct(tmp_repo, "Use checkout reservation leases for inventory")
+        global_data = store.load_global()
+        twin = store._new_decision_entry(
+            "Never log customer card numbers in any service", SESSION, "constraint",
+            created_by="human")
+        twin["id"] = local_id
+        global_data["entries"].append(twin)
+        store.save_global(global_data)
+        sid = "legacy-twin"
+        working_set.add_hints(tmp_repo, sid, [local_id])
+
+        payload = store._local_session_start_payload(tmp_repo, "compact", sid, "claude")
+
+        assert "Use checkout reservation leases" in payload["context"].split(
+            "## Rehydrated working context:")[1]
+
+class TestAnchorOverflow:
+    """#341: anchors beyond the full-text cap are ranked by relevance and named, not dropped."""
+
+    def _anchor(self, repo, content, title, subtype="architecture"):
+        return store.update_decision(
+            repo, content, SESSION, subtype, created_by="human", title=title,
+            source_files=["src/outbox.py"])[1]
+
+    def test_relevant_anchor_wins_a_slot_and_the_rest_are_named(self, tmp_repo):
+        titles = ["Store outbox rows in arrival order", "Serialize outbox payloads as JSON",
+                  "Keep outbox files under the user cache", "Expire outbox rows after a week"]
+        for title in titles:
+            self._anchor(tmp_repo, f"{title} because the sync worker relies on it", title)
+        self._anchor(tmp_repo, "Count failed batches once per batch, not per row",
+                     "Count batch failures once")
+
+        text = store.get_context_for_prompt(
+            tmp_repo, "Refactor the batch failure accounting in src/outbox.py", "overflow")
+
+        assert "Count failed batches once per batch" in text
+        assert text.count("because the sync worker relies on it") == 2
+        assert all(title in text for title in titles)
+        assert "2 more decisions anchored to files in this prompt not shown" in text
+
+    def test_anchored_constraint_leads_even_when_the_prompt_words_differ(self, tmp_repo):
+        for title in ("Add credit notes as separate documents", "Number credit notes in sequence",
+                      "Store credit notes with the invoice"):
+            self._anchor(tmp_repo, f"{title} for credit note support", title)
+        self._anchor(tmp_repo, "Round totals once, after tax is applied",
+                     "Round totals once after tax", subtype="constraint")
+
+        text = store.get_context_for_prompt(
+            tmp_repo, "Add credit note support to src/outbox.py", "constraint-first")
+
+        assert "Round totals once, after tax is applied" in text
+
+    def test_pending_constraints_do_not_displace_the_needed_decision(self, tmp_repo):
+        self._anchor(tmp_repo, "Count failed batches once per batch, not per row",
+                     "Count batch failures once")
+        for content in ("Keep outbox rows in arrival order for the sync worker",
+                        "Serialize payloads as JSON so older clients can read them",
+                        "Expire stale rows after seven days to bound disk use"):
+            stored, _ = store.update_decision(
+                tmp_repo, content, SESSION, "constraint", created_by="ai",
+                source_files=["src/outbox.py"])
+            assert stored
+
+        text = store.get_context_for_prompt(
+            tmp_repo, "Refactor the batch failure accounting in src/outbox.py", "pending")
+
+        assert "Count failed batches once per batch" in text
+        # Overflow names keep their status, so an unreviewed rule never reads as policy.
+        assert text.count("[pending] (id=") == 1
