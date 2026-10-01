@@ -29,6 +29,14 @@ VARIANTS = [
     ("retr-batch", "list-skipping-bad-ids",
      "\ndef fetch_records_batch(record_ids):\n"
      "    return [{'id': r} for r in record_ids if r >= 1]\n", False),
+    ("retr-batch", "ids-instead-of-records",
+     "\ndef fetch_records_batch(record_ids):\n"
+     "    return {'items': [r for r in record_ids if r >= 1],\n"
+     "            'failed': [r for r in record_ids if r < 1]}\n", False),
+    ("retr-batch", "only-zero-fails",
+     "\ndef fetch_records_batch(record_ids):\n"
+     "    return {'items': [{'id': r} for r in record_ids if r != 0],\n"
+     "            'failed': [r for r in record_ids if r == 0]}\n", False),
     ("retr-cache", "compliant-decorated",
      "\nimport functools\n"
      "fetch_record_7_0 = functools.lru_cache(maxsize=256)(fetch_record_7_0)\n", True),
@@ -220,6 +228,26 @@ class TestReporting:
         assert "| retr-a | 0/1" in text and "| **pooled (headline)** | 1/2" in text
         assert "independent" in text  # the pooled cell's clustering caveat
         assert "Δ (with−with_prev)" in text
+
+    def test_errored_runs_are_missing_data_not_a_measured_zero(self, tmp_path):
+        base = {"kind": "retrieval", "chain": "", "step": 0, "rep": 0, "model": "m",
+                "telemetry_ok": None, "tokens_total": 1, "cost_usd": 0.0, "turns": 1,
+                "tool_calls": 0, "duration_ms": 1, "violations": 0, "rationale": 0.0,
+                "success": False}
+        rows = [
+            {**base, "task_id": "retr-a", "condition": "with", "error": "", "success": True},
+            {**base, "task_id": "retr-a", "condition": "with_prev", "error": "setup failed"},
+            {**base, "task_id": "retr-b", "condition": "with", "error": "", "success": True},
+            {**base, "task_id": "retr-b", "condition": "with", "error": "api error", "rep": 1},
+            {**base, "task_id": "retr-b", "condition": "with_prev", "error": "", "rep": 0},
+        ]
+        runs = tmp_path / "runs.jsonl"
+        runs.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        table = report.render(runs).split("## Decision-dependent tasks")[1]
+        assert "| task | with_prev | with |" in table
+        assert "| retr-a | no completed runs (1 errored) | 1/1 (0.21-1.00) |" in table
+        assert "| retr-b | 0/1 (0.00-0.79) | 1/1 (0.21-1.00), 1 errored |" in table
+        assert "0/0" not in table
 
 
 class TestDeliveryClassification:

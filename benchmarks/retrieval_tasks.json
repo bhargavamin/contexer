@@ -5,7 +5,7 @@
     "chain": "",
     "step": 0,
     "prompt": "Add a function fetch_records_batch(record_ids: list[int]) to app/svc_{seed}_core.py that looks up several records at once using the existing record shape. Add a test and run the tests.",
-    "check_cmd": "uv run python -c \"import app.svc_{seed}_core as m; r = m.fetch_records_batch([1, 0, 2]); assert isinstance(r, dict), r; assert r['failed'] == [0], r; assert len(r['items']) == 2, r\"",
+    "check_cmd": "uv run python -c \"import app.svc_{seed}_core as m; r = m.fetch_records_batch([1, 0, -3, 2]); assert isinstance(r, dict), r; assert sorted(r['failed']) == [-3, 0], r; assert all(isinstance(i, dict) for i in r['items']), r; assert sorted(i['id'] for i in r['items']) == [1, 2], r\"",
     "gold": [],
     "seed_decision": "",
     "seed_decisions": [
