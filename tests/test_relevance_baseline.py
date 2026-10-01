@@ -57,7 +57,7 @@ def test_report_schema_and_version_provenance(report):
     assert len(report["code_revision"]) == 40
     assert len(report["fixture_sha256"]) == 64
     assert len(report["runner_sha256"]) == 64
-    assert report["fixture_version"] == "1.1.0"
+    assert report["fixture_version"] == "1.1.1"
     assert report["runner_version"] == "3"
 
 
@@ -67,7 +67,6 @@ def test_only_registered_gaps_remain(report):
         "ordinary-task-trigger-gap",
         "anchor-slots-follow-store-order",
         "overflow-anchors-unnamed",
-        "startup-rules-not-credited",
         "anchor-tier-outranks-task-match",
     }
 
@@ -90,8 +89,6 @@ def test_only_registered_gaps_remain(report):
                 ("R19", "anchor-redact-at-least-named", "overflow-anchors-unnamed; #341"),
                 ("R19", "anchor-preview-at-least-named", "overflow-anchors-unnamed; #341"),
                 ("R19", "anchor-batch-at-least-named", "overflow-anchors-unnamed; #341"),
-                ("R20", "preloaded-constraint-not-repeated", "startup-rules-not-credited; #342"),
-                ("R20", "needed-decision-gets-freed-slot", "startup-rules-not-credited; #342"),
                 ("R21", "task-matched-need-delivered", "anchor-tier-outranks-task-match"),
             )
         ],
@@ -438,7 +435,7 @@ def test_main_writes_only_when_output_is_explicit(tmp_path, capsys):
     before = set(tmp_path.iterdir())
     assert baseline.main(["--format", "text"]) == 0
     assert set(tmp_path.iterdir()) == before
-    assert "known gaps: 8" in capsys.readouterr().out
+    assert "known gaps: 6" in capsys.readouterr().out
     output = tmp_path / "report.json"
     assert baseline.main(["--format", "json", "--output", str(output)]) == 0
     assert json.loads(output.read_text(encoding="utf-8"))["schema_version"] == 1

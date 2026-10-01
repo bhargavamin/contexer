@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "fixture_version": "1.1.0",
+  "fixture_version": "1.1.1",
   "reference_revision": "5676247f358dc6a0c099d8eb8eb94623bad04bb0",
   "cases": [
     {
@@ -2094,9 +2094,7 @@
           "key": "preloaded-constraint-not-repeated",
           "kind": "omits_decision",
           "action_id": "task",
-          "decision_id": "r20-constraint",
-          "known_gap": "startup-rules-not-credited",
-          "owner": "bhargavamin/contexer#342"
+          "decision_id": "r20-constraint"
         },
         {
           "key": "needed-decision-gets-freed-slot",
@@ -2104,9 +2102,7 @@
           "action_id": "task",
           "decision_id": "r20-credit",
           "revision_id": "rev-r20-credit-a",
-          "tier": "prompt_full",
-          "known_gap": "startup-rules-not-credited",
-          "owner": "bhargavamin/contexer#342"
+          "tier": "prompt_full"
         },
         {
           "key": "other-session-still-receives-constraint",
