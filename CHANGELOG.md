@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.49.5](https://github.com/bhargavamin/contexer/compare/v0.49.4...v0.49.5) (2026-10-01)
+
+
+### Bug Fixes
+
+* **retrieval:** rank anchor overflow and credit startup rules ([#341](https://github.com/bhargavamin/contexer/issues/341), [#342](https://github.com/bhargavamin/contexer/issues/342)) ([#347](https://github.com/bhargavamin/contexer/issues/347)) ([72b73f3](https://github.com/bhargavamin/contexer/commit/72b73f3b347c713a14b44854d226d89a79ee5f27))
+
 ## [0.49.4](https://github.com/bhargavamin/contexer/compare/v0.49.3...v0.49.4) (2026-09-28)
 
 
