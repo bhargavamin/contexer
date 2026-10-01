@@ -1075,16 +1075,20 @@ class TestAnchorOverflow:
 class TestPointerFiles:
     """#353: pointers name each prompt file once, though matching uses path and basename."""
 
-    @pytest.mark.parametrize(("files", "shown"), [
-        (["src/sharing/outbox.py", "outbox.py"], ["src/sharing/outbox.py"]),
-        (["src/a/utils.py", "lib/utils.py", "utils.py"], ["src/a/utils.py", "lib/utils.py"]),
-        (["billing.py"], ["billing.py"]),
-        (["contexer/guard_engine.py", "guard_engine.py", "contexer.store"],
+    @pytest.mark.parametrize(("prompt", "shown"), [
+        ("fix src/sharing/outbox.py", ["src/sharing/outbox.py"]),
+        ("compare src/a/utils.py with lib/utils.py", ["src/a/utils.py", "lib/utils.py"]),
+        ("check billing.py logic", ["billing.py"]),
+        ("fix contexer/guard_engine.py and contexer.store",
          ["contexer/guard_engine.py", "contexer.store"]),
-        (["src/outbox.py", "box.py"], ["src/outbox.py", "box.py"]),
+        # A bare name the prompt also states on its own is the root-level file, not a tail.
+        ("fix billing.py and src/billing.py", ["billing.py", "src/billing.py"]),
+        ("check `billing.py` and lib/billing.py", ["billing.py", "lib/billing.py"]),
     ])
-    def test_a_basename_already_in_a_path_is_dropped(self, files, shown):
-        assert store._pointer_files(files) == shown
+    def test_a_basename_split_off_a_path_is_dropped(self, prompt, shown):
+        from contexer import guard_engine
+        files = list(dict.fromkeys(guard_engine._guard_content_artifacts(prompt)))
+        assert store._pointer_files(files, prompt) == shown
 
     def test_mention_pointer_lists_the_file_once(self, tmp_repo):
         store.update_decision(

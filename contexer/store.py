@@ -6421,16 +6421,21 @@ def _index_file_lookup(repo_path: str, index: dict, file_artifacts: list[str]) -
 _OVERFLOW_NAMED_CAP = 5     # anchored decisions named past the full-text slots (#341)
 
 
-def _pointer_files(files: list[str]) -> list[str]:
-    """The prompt's files as a pointer names them: a bare name that a longer path in the same
-    list already ends with is dropped, so `src/a/outbox.py` is not followed by `outbox.py`
-    (#353). The artifact extractor yields both on purpose, for matching; the pointer and its
-    suggested `get_context(files=...)` call need each file once."""
+def _pointer_files(files: list[str], prompt: str) -> list[str]:
+    """The prompt's files as a pointer names them: a bare name the extractor split off a longer
+    path in the same list is dropped, so `src/a/outbox.py` is not followed by `outbox.py`
+    (#353). A bare name the prompt also states on its own is a separate root-level file and
+    stays, since `get_context(files=...)` matches a bare name only to that exact path."""
+    def standalone(name: str) -> bool:
+        return re.search(rf"(?<![\w./-]){re.escape(name)}(?![\w-])", prompt) is not None
+
     return [f for f in files
-            if "/" in f or not any(g != f and g.endswith("/" + f) for g in files)]
+            if "/" in f or standalone(f)
+            or not any(g != f and g.endswith("/" + f) for g in files)]
 
 
-def _anchor_overflow_pointer(overflow: list[dict], files: list[str], index: dict) -> str:
+def _anchor_overflow_pointer(overflow: list[dict], files: list[str], index: dict,
+                            prompt: str = "") -> str:
     """One line naming anchored decisions that did not fit the full-text slots (#341).
 
     Without it they vanish silently, and a later prompt naming the same file shows the next
@@ -6451,7 +6456,7 @@ def _anchor_overflow_pointer(overflow: list[dict], files: list[str], index: dict
     # Not "anchored to <file>": with several files in the prompt, which one matched is unknown.
     return (f"[Contexer] {_pl(len(overflow), 'more decision')} anchored to files in this "
             f"prompt not shown: {'; '.join(named)}{more} - "
-            f"call get_context(files={_pointer_files(files)!r}) if relevant.")
+            f"call get_context(files={_pointer_files(files, prompt)!r}) if relevant.")
 
 
 def _prompt_file_hits(
@@ -6736,7 +6741,8 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
                     "do not substitute another memory, graph, or search tool)\n"
                     f"{rendered}")
             if overflow:
-                text += "\n" + _anchor_overflow_pointer(overflow, file_artifacts_prompt, index)
+                text += "\n" + _anchor_overflow_pointer(
+                    overflow, file_artifacts_prompt, index, prompt)
             if observe_impact:
                 try:
                     decision_impact.append(repo_path, decision_impact.guidance_envelope(
@@ -6785,7 +6791,7 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
         more = f" (+{extra} more)" if extra > 0 else ""
         _retrieval_log(repo_path, {"e": "pointer", "topics": file_artifacts_prompt,
                                    "sid": session_id, "ts": time.time()})
-        shown_files = _pointer_files(file_artifacts_prompt)
+        shown_files = _pointer_files(file_artifacts_prompt, prompt)
         text = (f"[Contexer] Related stored decisions mention "
                 f"{', '.join(shown_files[:3])}: {named}{more} - "
                 f"call get_context(files={shown_files!r}) if relevant.")
