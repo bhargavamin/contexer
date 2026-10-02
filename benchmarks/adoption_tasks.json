@@ -476,14 +476,20 @@
     "step": 0,
     "prompt": "Speed up repeated calls to fetch_record_{seed}_0 in app/svc_{seed}_core.py by caching its results. Run the tests after.",
     "check_cmd": "uv run python -c \"import app.svc_{seed}_core as m; cs = [v for v in vars(m).values() if hasattr(v, 'cache_info')]; assert cs and all(c.cache_info().maxsize == 256 for c in cs), [c.cache_info() for c in cs]\"",
-    "functional_cmd": "uv run python -c \"import app.svc_{seed}_core as m; a = m.fetch_record_{seed}_0(5); b = m.fetch_record_{seed}_0(5); assert a == {'id': 5, 'slot': 0} and b == a, (a, b); cs = [v for v in vars(m).values() if hasattr(v, 'cache_info')]; assert a is b or sum(c.cache_info().hits for c in cs) >= 1, 'repeated call was not served from a cache'\"",
+    "functional_cmd": "uv run python -c \"import app.svc_{seed}_core as m; n = len(m._LOADS); a = m.fetch_record_{seed}_0(5); b = m.fetch_record_{seed}_0(5); assert a == {'id': 5, 'slot': 0} and b == a, (a, b); assert len(m._LOADS) - n == 1, f'{len(m._LOADS) - n} loads for two identical calls'\"",
     "gold": [],
     "seed_decision": "",
     "class": "K3",
     "tag": "convention",
     "plausible_wrong": "functools.cache or lru_cache(maxsize=None), the usual default for memoising",
     "forbids_action": false,
-    "fixture_files": [],
+    "fixture_files": [
+      {
+        "path": "app/svc_{seed}_core.py",
+        "old": "def fetch_record_{seed}_0(record_id: int) -> dict:\n    \"\"\"Fetches record 0 for service {seed}.\"\"\"\n    return {\"id\": record_id, \"slot\": 0}",
+        "new": "_LOADS = []\n\n\ndef _load_record(record_id: int, slot: int) -> dict:\n    \"\"\"Reads one record from storage (a stub in this repository; real reads are slow).\"\"\"\n    _LOADS.append((record_id, slot))\n    return {\"id\": record_id, \"slot\": slot}\n\n\ndef fetch_record_{seed}_0(record_id: int) -> dict:\n    \"\"\"Fetches record 0 for service {seed}.\"\"\"\n    return _load_record(record_id, 0)"
+      }
+    ],
     "store_order_seed": 20261002,
     "seed_decisions": [
       {

@@ -68,6 +68,20 @@ KIT = [
     ("adopt-k3-cache", "compliant",
      "\nimport functools\nfetch_record_7_0 = functools.lru_cache(maxsize=256)(fetch_record_7_0)\n",
      True, True),
+    ("adopt-k3-cache", "compliant-plus-id-validation",
+     "\nimport functools\nclass RecordInputError(ValueError):\n    pass\n"
+     "@functools.lru_cache(maxsize=256)\ndef fetch_record_7_0(record_id: int) -> dict:\n"
+     '    """Fetches record 0 for service 7."""\n    if record_id < 1:\n'
+     "        raise RecordInputError(record_id)\n"
+     "    return _load_record(record_id, 0)\n", True, True),
+    ("adopt-k3-cache", "bounded-helper-returning-copies",
+     "\nimport functools\n@functools.lru_cache(maxsize=256)\ndef _cached_0(record_id):\n"
+     "    return _load_record(record_id, 0)\ndef fetch_record_7_0(record_id):\n"
+     "    return dict(_cached_0(record_id))\n", True, True),
+    ("adopt-k3-cache", "unbounded-helper-returning-copies",
+     "\nimport functools\n@functools.lru_cache(maxsize=None)\ndef _cached_0(record_id):\n"
+     "    return _load_record(record_id, 0)\ndef fetch_record_7_0(record_id):\n"
+     "    return dict(_cached_0(record_id))\n", False, True),
     ("adopt-k3-cache", "unbounded-lru",
      "\nimport functools\nfetch_record_7_0 = functools.lru_cache(maxsize=None)(fetch_record_7_0)\n",
      False, True),
@@ -75,20 +89,12 @@ KIT = [
      "\n_cache = {}\n_orig = fetch_record_7_0\ndef fetch_record_7_0(record_id):\n"
      "    if record_id not in _cache:\n        _cache[record_id] = _orig(record_id)\n"
      "    return _cache[record_id]\n", False, True),
-    ("adopt-k3-cache", "compliant-plus-id-validation",
-     "\nimport functools\nclass RecordInputError(ValueError):\n    pass\n"
-     "@functools.lru_cache(maxsize=256)\ndef fetch_record_7_0(record_id: int) -> dict:\n"
-     '    """Fetches record 0 for service 7."""\n    if record_id < 1:\n'
-     "        raise RecordInputError(record_id)\n"
-     '    return {"id": record_id, "slot": 0}\n', True, True),
-    ("adopt-k3-cache", "bounded-helper-returning-copies",
-     "\nimport functools\n@functools.lru_cache(maxsize=256)\ndef _cached_0(record_id):\n"
-     "    return {'id': record_id, 'slot': 0}\ndef fetch_record_7_0(record_id):\n"
-     "    return dict(_cached_0(record_id))\n", True, True),
-    ("adopt-k3-cache", "unbounded-helper-returning-copies",
-     "\nimport functools\n@functools.lru_cache(maxsize=None)\ndef _cached_0(record_id):\n"
-     "    return {'id': record_id, 'slot': 0}\ndef fetch_record_7_0(record_id):\n"
-     "    return dict(_cached_0(record_id))\n", False, True),
+    # A correct cache that rebuilds a fresh dict per call (no shared mutable record, no
+    # cache_info): the load count is the only sign of caching, and it must pass functional.
+    ("adopt-k3-cache", "hand-rolled-fresh-dicts",
+     "\n_rows = {}\ndef fetch_record_7_0(record_id):\n    if record_id not in _rows:\n"
+     "        rec = _load_record(record_id, 0)\n        _rows[record_id] = (rec['id'], rec['slot'])\n"
+     "    rid, slot = _rows[record_id]\n    return {'id': rid, 'slot': slot}\n", False, True),
     ("adopt-k3-cache", "bounded-but-wrong-function",
      "\nimport functools\nfetch_record_7_1 = functools.lru_cache(maxsize=256)(fetch_record_7_1)\n",
      True, False),
