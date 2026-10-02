@@ -43,7 +43,8 @@ EDITING_KINDS = ("convention", "efficiency", "continuity", "retrieval")
 # Kept as a literal, like EDITING_KINDS above, so this validator notices drift.
 MEMORY_HEADLINE_TASKS = ("sup-current", "cont-log")
 # Stable display order for known conditions; unknown names are appended.
-CONDITION_ORDER = ("without", "agentsmd", "claudemd", "claudemd_agentsmd",
+CONDITION_ORDER = ("without", "agentsmd", "claudemd", "claudemd_full", "docs_indexed",
+                   "claudemd_agentsmd",
                    "memory", "with_prev", "with", "claudemd_with")
 # The condition pairs that matter, first arm vs second arm. claudemd_with-vs-claudemd
 # is the adoption question: contexer's marginal value on an already-documented repo.
@@ -55,7 +56,10 @@ CONDITION_ORDER = ("without", "agentsmd", "claudemd", "claudemd_agentsmd",
 PAIRS = (("with", "without"), ("with", "claudemd"), ("claudemd", "without"),
          ("claudemd_with", "claudemd"), ("agentsmd", "claudemd"),
          ("claudemd_agentsmd", "claudemd"), ("with", "memory"),
-         ("memory", "without"), ("with", "with_prev"))
+         ("memory", "without"), ("with", "with_prev"),
+         # The adoption campaign's documentation competitors.
+         ("with", "claudemd_full"), ("with", "docs_indexed"), ("claudemd_full", "without"),
+         ("docs_indexed", "without"))
 
 
 def _conditions_present(rows):

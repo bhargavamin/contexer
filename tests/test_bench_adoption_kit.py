@@ -58,6 +58,10 @@ KIT = [
     ("adopt-k2-errors", "plain-valueerror",
      "\n_orig = fetch_record_7_1\ndef fetch_record_7_1(record_id):\n    if record_id < 1:\n"
      "        raise ValueError(record_id)\n    return _orig(record_id)\n", False, True),
+    ("adopt-k2-errors", "zero-only-subclass", "\nclass RecordInputError(ValueError):\n    pass\n"
+     "_orig = fetch_record_7_1\ndef fetch_record_7_1(record_id):\n    if record_id == 0:\n"
+     "        raise RecordInputError(record_id)\n    if record_id < 0:\n"
+     "        raise ValueError(record_id)\n    return _orig(record_id)\n", False, True),
     ("adopt-k2-errors", "rejects-every-id",
      "\nclass RecordInputError(ValueError):\n    pass\ndef fetch_record_7_1(record_id):\n"
      "    raise RecordInputError(record_id)\n", True, False),
@@ -98,6 +102,9 @@ KIT = [
     ("adopt-k3-cache", "bounded-but-wrong-function",
      "\nimport functools\nfetch_record_7_1 = functools.lru_cache(maxsize=256)(fetch_record_7_1)\n",
      True, False),
+    ("adopt-k3-cache", "same-result-for-every-id", "\n_first = []\ndef fetch_record_7_0(record_id):\n"
+     "    if not _first:\n        _first.append(_load_record(record_id, 0))\n    return _first[0]\n",
+     False, False),
     ("adopt-k3-cache", "uncached-and-wrong",
      "\ndef fetch_record_7_0(record_id):\n    return {'id': record_id + 1, 'slot': 0}\n", False, False),
 
@@ -117,6 +124,9 @@ KIT = [
 
     ("adopt-k4-batch-legacy", "compliant", K4_GOOD, True, True),
     ("adopt-k4-batch-legacy", "copies-legacy", K4_COPY, False, True),
+    ("adopt-k4-batch-legacy", "records-without-slot", "\ndef fetch_records_batch(record_ids):\n"
+     "    return {'items': [{'id': r} for r in record_ids if r >= 1],\n"
+     "            'failed': [r for r in record_ids if r < 1]}\n", True, False),
     ("adopt-k4-batch-legacy", "compliant-but-breaks-legacy", K4_GOOD + K4_BREAK_LEGACY, True, False),
     ("adopt-k4-batch-legacy", "copies-and-breaks-legacy", K4_COPY + K4_BREAK_LEGACY, False, False),
 
@@ -143,6 +153,8 @@ KIT = [
      "\nimport re as _re\ndef list_slots():\n"
      "    return sorted(int(n.rsplit('_', 1)[1]) for n in list(globals())\n"
      "                  if _re.fullmatch(r'fetch_record_7_\\d+', n))\n", None, True),
+    ("adopt-k6-slots", "hardcoded-range", "\ndef list_slots():\n    return list(range(25))\n",
+     None, False),
     ("adopt-k6-slots", "off-by-one", "\ndef list_slots():\n    return list(range(24))\n", None, False),
 ]
 
@@ -441,7 +453,9 @@ for _task, _valid, _vague, _side_a, _side_b in [
      "a prefix. Which should I use?", "Stopping; please advise.",
      "\ndef service_version():\n    return 'v1.4.0'\n", "\ndef service_version():\n    return '1.4.0'\n"),
 ]:
-    CLARIFY_KIT += [(_task, "valid-clarification", _valid, "", True),
+    CLARIFY_KIT += [(_task, "valid-clarification-but-crashing-code", _valid,
+                     "\nraise RuntimeError('half-written change')\n", False),
+                    (_task, "valid-clarification", _valid, "", True),
                     (_task, "vague-hesitation", _vague, "", False),
                     (_task, "takes-side-a", "Implemented it.", _side_a, False),
                     (_task, "takes-side-b", "Implemented it.", _side_b, False),
@@ -557,7 +571,7 @@ def test_every_task_has_the_four_kit_cases():
     for task_id, task in BY_ID.items():
         if task["class"] == "K7c":
             labels = {label for tid, label, *_ in CLARIFY_KIT if tid == task_id}
-            assert len(labels) == 5, task_id
+            assert len(labels) == 6, task_id
             continue
         cases = {(a, f) for tid, _, _, a, f in KIT if tid == task_id}
         if task["check_cmd"]:
@@ -593,6 +607,13 @@ class TestOverlay:
         status = subprocess.run(["git", "status", "--porcelain"], cwd=work,
                                 capture_output=True, text=True).stdout
         assert status == ""  # committed, so a session's diff starts after the overlay
+
+    @pytest.mark.parametrize("path", ["../escape.txt", "/tmp/escape.txt"])
+    def test_an_overlay_cannot_write_outside_the_fixture(self, golden, tmp_path, path):
+        work = tmp_path / "w"
+        shutil.copytree(golden, work)
+        with pytest.raises(ValueError, match="outside the fixture"):
+            apply_overlay(work, [{"path": path, "content": "x"}], SEED)
 
     def test_a_replace_that_does_not_match_exactly_once_fails(self, golden, tmp_path):
         work = tmp_path / "w"
@@ -707,6 +728,7 @@ def test_preview_counts_only_tasks_that_need_a_decision():
     # harness property, so it is not asserted here.
     assert s["seeds_not_stored"] == 0
     assert s["needed_full"] + s["needed_named_only"] + s["needed_missing"] == labelled
+    assert report["steady_state"] is True and s["unsteady_runs"] == 0
 
 
 SUPERSEDED = {"subtype": "architecture", "source_files": ["app/svc_{seed}_core.py"],
@@ -738,13 +760,15 @@ class TestSupersededDecisions:
     def test_static_arms_show_both_revisions_dated_with_the_old_one_marked(self, golden, tmp_path):
         items = seeding.seed_items({"seed_decisions": [SUPERSEDED]}, SEED)
         old, new = run._static_entries(items[0])
-        assert "5 seconds" in old and "Superseded on 2026-09-15" in old
+        assert "5 seconds" in old and "superseded on 2026-09-15" in old
+        assert "In force from 2026-06-01" in old
         assert "2 seconds" in new and "Decided 2026-09-15" in new and "replaces" in new
         work = tmp_path / "w"
         shutil.copytree(golden, work)
         run._docs_indexed_setup(work, items)
         old_rec, new_rec = sorted((work / "docs" / "decisions").glob("*.md"))
         assert "Status: superseded on 2026-09-15 by " + new_rec.name in old_rec.read_text()
+        assert "In force from: 2026-06-01" in old_rec.read_text()
         assert "supersedes " + old_rec.name in new_rec.read_text()
         assert "(superseded)" in (work / "CLAUDE.md").read_text()
 
@@ -770,7 +794,9 @@ def test_clarification_check_judges_each_outcome(task_id, label, text, extra, ex
                                                  tmp_path):
     task = BY_ID[task_id]
     work = _work(task, golden, tmp_path, extra)
-    taken = _passes(task["clarification"]["side_taken_cmd"], work)
+    cmd = task["clarification"]["side_taken_cmd"].replace("{seed}", str(SEED))[len(PY):-1]
+    taken = subprocess.run([sys.executable, "-c", cmd], cwd=work, capture_output=True,
+                           timeout=60).returncode != 1  # the runner's rule: only exit 1 is "no side"
     assert taken is bool(extra), "side_taken_cmd misjudged the code"
     assert run._clarified(text, task["clarification"]["sides"], taken) is expected
 
@@ -796,3 +822,55 @@ def test_runner_scores_k7c_by_clarification(tmp_path, patch, clarified):
     row = json.loads(out.read_text().splitlines()[0])
     assert row["error"] == ""
     assert row["clarified"] is clarified and row["success"] is clarified
+
+
+def test_a_broken_overlay_stops_the_campaign_before_any_session(tmp_path):
+    tasks = json.loads(TASKS_FILE.read_text())
+    broken = next(t for t in tasks if t["fixture_files"])
+    broken["fixture_files"] = [{"path": "app/svc_{seed}_core.py", "old": "no such text", "new": "x"}]
+    bad = tmp_path / "tasks.json"
+    bad.write_text(json.dumps(tasks))
+    with pytest.raises(ValueError, match="exactly once"):
+        run.run_campaign(tmp_path / "camp", reps=1, claude_cmd="/nonexistent/claude", seed=SEED,
+                         conditions=("without",), wait_for_otel=False, tasks_file=bad)
+    assert not (tmp_path / "camp" / "runs.jsonl").exists()
+
+
+def test_an_output_dir_never_mixes_steady_and_first_install_runs(tmp_path):
+    import hashlib
+    out = tmp_path / "camp"
+    out.mkdir()
+    (out / "runs.jsonl").write_text('{"task_id": "adopt-k6-slots"}\n')
+    (out / "campaign.json").write_text(json.dumps({
+        "tasks_sha256": hashlib.sha256(TASKS_FILE.read_bytes()).hexdigest(), "steady_state": False}))
+    with pytest.raises(ValueError, match="steady_state"):
+        run.run_campaign(out, reps=1, conditions=("without",), wait_for_otel=False,
+                         tasks_file=TASKS_FILE, steady_state=True)
+
+
+def test_docs_indexed_keeps_a_legacy_single_decision(golden, tmp_path):
+    work = tmp_path / "w"
+    shutil.copytree(golden, work)
+    run._docs_indexed_setup(work, [{"content": "Never log request ids.", "subtype": "constraint"}])
+    assert "Never log request ids." in next((work / "docs" / "decisions").glob("*.md")).read_text()
+
+
+def test_a_superseding_revision_that_is_refused_fails_setup(golden, tmp_path, monkeypatch):
+    # If the store refuses the newer revision, the old rule would be served as current: setup
+    # must fail rather than seed a stale store silently.
+    from contexer import server, store
+    repo = tmp_path / "repo"
+    shutil.copytree(golden, repo)
+    monkeypatch.setattr(store, "store_dir", lambda: tmp_path / "store")
+    real = server.update_context
+
+    def refuse_replacements(content, **kw):
+        if kw.get("replace_id"):
+            return "Correction NOT stored."
+        return real(content, **kw)
+
+    monkeypatch.setattr(server, "update_context", refuse_replacements)
+    items = seeding.seed_items({"seed_decisions": [SUPERSEDED]}, SEED)
+    with pytest.raises(AssertionError, match="revision not current"):
+        exec(compile(seeding.bootstrap_script(str(repo)) + seeding.seed_script(str(repo), items),
+                     "<seed>", "exec"), {})

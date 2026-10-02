@@ -169,8 +169,9 @@ def _static_entries(item: dict) -> list[str]:
     current = titled(item)
     if not item.get("history"):
         return [current]
-    lines = [f"{titled(old)} (Superseded on {item.get('date') or 'a later date'} by: "
-             f"{_decision_title(item)}.)" for old in item["history"]]
+    lines = [f"{titled(old)} (In force from {old.get('date') or 'an earlier date'}; superseded on "
+             f"{item.get('date') or 'a later date'} by: {_decision_title(item)}.)"
+             for old in item["history"]]
     lines.append(f"{current} (Decided {item.get('date') or 'later'}; replaces the earlier rule "
                  f"\"{_decision_title(item['history'][-1])}\".)")
     return lines
@@ -217,7 +218,8 @@ def _docs_indexed_setup(work: Path, seed_decisions: list) -> None:
         for position, (name, title, revision, status) in enumerate(names):
             if status == "superseded":
                 status_line = (f"- Status: superseded on {item.get('date') or 'a later date'} by "
-                               f"{names[-1][0]}")
+                               f"{names[-1][0]}\n- In force from: "
+                               f"{revision.get('date') or 'an earlier date'}")
             elif len(names) > 1:
                 status_line = (f"- Status: accepted ({item.get('date') or 'later'}), supersedes "
                                f"{names[position - 1][0]}")
@@ -361,10 +363,15 @@ def run_campaign(out_dir: Path, reps: int = 3, task_ids=None, claude_cmd: str = 
     if out.exists() and out.stat().st_size and meta_path.exists():
         # Rows append to runs.jsonl while campaign.json is rewritten: appending another task
         # set's rows would leave mixed results under metadata naming only the new one.
-        previous = json.loads(meta_path.read_text()).get("tasks_sha256")
+        previous_meta = json.loads(meta_path.read_text())
+        previous = previous_meta.get("tasks_sha256")
         if previous != tasks_sha and (previous or tasks_path != TASKS_FILE):
             raise ValueError(f"{out_dir} already holds runs from a different task file; "
                              "use a new --out directory")
+        if previous_meta.get("steady_state", False) != steady_state:
+            # Steady-state and first-install sessions measure different things; never mix them.
+            raise ValueError(f"{out_dir} already holds runs with steady_state="
+                             f"{previous_meta.get('steady_state', False)}; use a new --out directory")
     out_dir.mkdir(parents=True, exist_ok=True)
     meta_path.write_text(json.dumps({
         "model": model, "seed": seed, "reps": reps, "conditions": list(conditions),
@@ -387,6 +394,14 @@ def run_campaign(out_dir: Path, reps: int = 3, task_ids=None, claude_cmd: str = 
             td = Path(td)
             golden = build_webapi(td / "golden", seed=seed)
             baseline = _mine_baseline(str(golden))
+            # Apply every task's fixture overlay once before any paid session, so a broken overlay
+            # stops the campaign instead of turning into one errored row per session.
+            for task in tasks:
+                if task.get("fixture_files"):
+                    probe = td / f"overlay-check-{task['id']}"
+                    shutil.copytree(golden, probe)
+                    apply_overlay(probe, task["fixture_files"], seed)
+                    shutil.rmtree(probe, ignore_errors=True)
             # Rep outermost, condition INNERMOST: conditions alternate in time so
             # drift / cache warming cannot masquerade as a condition effect.
             for rep in range(reps):
@@ -477,7 +492,9 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
             if files:
                 _condition_c_setup(work, task["seed_decision"], files, seed_decisions=seeds)
             if condition == "docs_indexed":
-                _docs_indexed_setup(work, seeds)
+                legacy = ([{"content": task["seed_decision"], "subtype": "constraint"}]
+                          if task["seed_decision"] else [])
+                _docs_indexed_setup(work, legacy + seeds)
             src = (contexer_sources or {}).get(condition)
             if condition in _CONTEXER_CONDITIONS or src:
                 ids = _condition_b_setup(str(work), home, task["seed_decision"],
@@ -541,8 +558,10 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
         if clarification:
             # K7c: the correct outcome is to stop and name the conflict, never to implement.
             taken_cmd = clarification["side_taken_cmd"].replace("{seed}", str(seed))
+            # Exit 1 alone means "no side taken"; 0 (a side) or anything else (the check crashed on
+            # code the session wrote) means the session acted instead of stopping.
             taken = subprocess.run(taken_cmd, shell=True, cwd=work, capture_output=True,
-                                   timeout=600, env=_session_env(home, 0)).returncode == 0
+                                   timeout=600, env=_session_env(home, 0)).returncode != 1
             row["clarified"] = _clarified(str(res.get("result", "")), clarification["sides"],
                                           taken)
             row["success"] = row["clarified"]

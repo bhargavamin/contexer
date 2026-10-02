@@ -163,6 +163,12 @@ def replay_tasks(tasks_file: Path, seed: int, steady: bool = False) -> dict:
                     exec(compile(seeding.seed_script(repo, items), "<seed>", "exec"), scope)
                 except AssertionError as exc:  # a seed this version refused
                     refusal = str(exc)
+                unsteady = False
+                if steady and not refusal:
+                    try:  # the same gate run.py applies: the bootstrap prompt must be silent
+                        exec(compile(seeding.steady_check_script(repo), "<steady>", "exec"), {})
+                    except AssertionError:
+                        unsteady = True
                 done = [_short(i) for i in scope.get("seeded_ids", [])]
                 # A refusal aborts the live arm's setup, so no decision of this run counts.
                 ids = [None] * len(items) if refusal else done + [None] * (len(items) - len(done))
@@ -174,10 +180,10 @@ def replay_tasks(tasks_file: Path, seed: int, steady: bool = False) -> dict:
                              "needed_style": items[index]["style"] if index is not None else "",
                              "seeded_ids": ids, "needed_id": needed,
                              "needed": _verdict(index is not None, needed, result),
-                             "refusal": refusal, **result})
+                             "refusal": refusal, "unsteady": unsteady, **result})
     labelled = [r for r in rows if r["needed"] != "unlabelled"]
     return {
-        "mode": "tasks", "tasks_file": str(tasks_file), "seed": seed,
+        "mode": "tasks", "tasks_file": str(tasks_file), "seed": seed, "steady_state": steady,
         "contexer": _contexer_revision(), "tasks": rows,
         "summary": {
             "needed_full": sum(r["needed"] == "full" for r in rows), "tasks": len(labelled),
@@ -188,6 +194,7 @@ def replay_tasks(tasks_file: Path, seed: int, steady: bool = False) -> dict:
             "repeated_from_startup": sum(len(r["repeated_from_startup"]) for r in rows),
             "prompt_chars": sum(r["prompt_chars"] for r in rows),
             "by_style": _by_style(rows),
+            "unsteady_runs": sum(r["unsteady"] for r in rows),
         },
     }
 
@@ -216,6 +223,9 @@ def render_text(report: dict) -> str:
         for style, counts in s["by_style"].items():
             lines.append(f"  {style or 'single'} style: full {counts['full']}/{counts['tasks']}, "
                          f"named only {counts['named']}, missing {counts['missing']}")
+        if s["unsteady_runs"]:
+            lines.append(f"WARNING: {s['unsteady_runs']} run(s) still had the bootstrap prompt due "
+                         "after steady-state setup; run.py would refuse them")
         if s["seeds_not_stored"]:
             lines.append(f"WARNING: {s['seeds_not_stored']} seed(s) refused by this version's "
                          "store; its live arm would fail setup")

@@ -72,7 +72,13 @@ def seed_script(repo: str, items: list[dict]) -> str:
                 "if str(e.get('id', '')).startswith(_m.group(1)))\n"
                 "if _e.get('proposed_revision'):\n"
                 f"    _ok, _msg = store.approve_decision({repo!r}, _m.group(1), 'approve')\n"
-                f"    assert _ok, {'revision not approved: ' + revision['content'][:60]!r} + ' -> ' + _msg")
+                f"    assert _ok, {'revision not approved: ' + revision['content'][:60]!r} + ' -> ' + _msg\n"
+                # Verify it took: a refused update would leave the old rule served as current.
+                "from contexer import revisions as _revisions\n"
+                f"_e = next(e for e in store.load({repo!r})['entries'] "
+                "if str(e.get('id', '')).startswith(_m.group(1)))\n"
+                f"assert {revision['content'][:60]!r} in _revisions.current_content(_e), "
+                f"{'revision not current: ' + revision['content'][:60]!r} + ' -> ' + _r[:300]")
         lines.append("seeded_ids.append(_m.group(1))")
     return "\n".join(lines) + "\n"
 
