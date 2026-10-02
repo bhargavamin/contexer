@@ -14,6 +14,7 @@ campaign; the `contexer` package is resolved from the `--project` checkout:
 `tasks` builds the benchmark fixture repo, seeds each task's `seed_decisions` exactly as
 `run.py` does for the contexer arm, then runs SessionStart and the prompt hook, and reports
 whether the task's `needed_decision` arrived in full, only named in a pointer, or not at all.
+It runs once per writing style (rep), matching what each live rep seeds.
 `snapshot` replays a real session's frozen decision store against one prompt.
 
 This file deliberately does not put the repository root on sys.path: the `contexer` it
@@ -104,8 +105,34 @@ def _deliver(repo: str, prompt: str, session_id: str) -> dict:
         "prompt_chars": len(text), "prompt_kind": meta.get("kind"),
         "prompt_full_ids": prompt_full, "prompt_named_ids": named,
         "repeated_from_startup": [i for i in prompt_full if i in start_full],
-        "prompt_text": text,
+        "startup_text": start_text, "prompt_text": text,
     }
+
+
+def _verdict(labelled: bool, needed: str | None, result: dict) -> str:
+    """How the task's needed decision (short id, None if never stored) reached the agent."""
+    if not labelled:
+        return "unlabelled"
+    if needed is None:
+        return "not_stored"  # the live arm would fail setup
+    if needed in result["prompt_full_ids"] or needed in result["startup_full_ids"]:
+        return "full"
+    if needed in result["prompt_named_ids"]:
+        return "named"
+    return "missing"
+
+
+def _by_style(rows: list[dict]) -> dict:
+    """Per author style: rows, and how many delivered the needed decision full/named/missing."""
+    by_style = {}
+    for row in rows:
+        counts = by_style.setdefault(row["needed_style"], {"full": 0, "named": 0, "missing": 0,
+                                                           "tasks": 0})
+        counts["tasks"] += 1
+        key = "missing" if row["needed"] in ("missing", "not_stored") else row["needed"]
+        if key in counts:
+            counts[key] += 1
+    return by_style
 
 
 def replay_tasks(tasks_file: Path, seed: int) -> dict:
@@ -114,47 +141,48 @@ def replay_tasks(tasks_file: Path, seed: int) -> dict:
         raise SystemExit(f"{tasks_file}: no task carries seed_decisions")
     build_webapi = _load("generate", "fixtures/generate.py").build_webapi
     seeding = _load("seeding", "seeding.py")
+    # One pass per writing style: rep r is what a live campaign's rep r seeds.
+    reps = max(len(s.get("variants") or [s]) for t in tasks for s in t["seed_decisions"])
     rows = []
     with (tempfile.TemporaryDirectory(prefix="contexer-replay-") as tmp,
           _sandbox_store(Path(tmp) / ".contexer")):
         tmp_path = Path(tmp)
         from contexer import server
-        for task in tasks:
-            repo = str(build_webapi(tmp_path / task["id"], seed=seed).resolve())
-            # Same order as run.py's contexer arm: bootstrap first, then the seeds.
-            server.bootstrap_context(repo_path=repo)
-            ids = []
-            for item in seeding.seed_items(task, seed):  # the same writes run.py makes
-                stored, entry_id = store.update_decision(
-                    repo, item["content"], "bench-seed", item["subtype"], created_by="human",
-                    source_files=item["source_files"] or None)
-                ids.append(_short(entry_id) if stored and entry_id else None)
-            prompt = task["prompt"].replace("{seed}", str(seed))
-            result = _deliver(repo, prompt, f"replay-{task['id']}")
-            needed = ids[task["needed_decision"]] if "needed_decision" in task else None
-            if "needed_decision" not in task:
-                verdict = "unlabelled"
-            elif needed is None:
-                verdict = "not_stored"  # a seed this version refused: the arm lacks it
-            elif needed in result["prompt_full_ids"] or needed in result["startup_full_ids"]:
-                verdict = "full"
-            elif needed in result["prompt_named_ids"]:
-                verdict = "named"
-            else:
-                verdict = "missing"
-            rows.append({"task_id": task["id"], "seeded_ids": ids, "needed_id": needed,
-                         "needed": verdict, **result})
-    full = sum(r["needed"] == "full" for r in rows)
+        for rep in range(reps):
+            for task in tasks:
+                repo = str(build_webapi(tmp_path / f"{task['id']}-rep{rep}", seed=seed)
+                           .resolve())
+                # Same order as run.py's contexer arm: bootstrap first, then the seeds.
+                server.bootstrap_context(repo_path=repo)
+                items = seeding.seed_items(task, seed, rep)
+                scope = {}
+                refusal = ""
+                try:  # the same writes run.py makes
+                    exec(compile(seeding.seed_script(repo, items), "<seed>", "exec"), scope)
+                except AssertionError as exc:  # a seed this version refused
+                    refusal = str(exc)
+                done = [_short(i) for i in scope.get("seeded_ids", [])]
+                ids = done + [None] * (len(items) - len(done))
+                prompt = task["prompt"].replace("{seed}", str(seed))
+                result = _deliver(repo, prompt, f"replay-{task['id']}-{rep}")
+                index = task.get("needed_decision")
+                needed = ids[index] if index is not None else None
+                rows.append({"task_id": task["id"], "rep": rep,
+                             "needed_style": items[index]["style"] if index is not None else "",
+                             "seeded_ids": ids, "needed_id": needed,
+                             "needed": _verdict(index is not None, needed, result),
+                             "refusal": refusal, **result})
     return {
         "mode": "tasks", "tasks_file": str(tasks_file), "seed": seed,
         "contexer": _contexer_revision(), "tasks": rows,
         "summary": {
-            "needed_full": full, "tasks": len(rows),
+            "needed_full": sum(r["needed"] == "full" for r in rows), "tasks": len(rows),
             "needed_named_only": sum(r["needed"] == "named" for r in rows),
             "needed_missing": sum(r["needed"] in ("missing", "not_stored") for r in rows),
             "seeds_not_stored": sum(i is None for r in rows for i in r["seeded_ids"]),
             "repeated_from_startup": sum(len(r["repeated_from_startup"]) for r in rows),
             "prompt_chars": sum(r["prompt_chars"] for r in rows),
+            "by_style": _by_style(rows),
         },
     }
 
@@ -179,11 +207,17 @@ def render_text(report: dict) -> str:
                      f"(named only {s['needed_named_only']}, missing {s['needed_missing']}); "
                      f"startup rules repeated: {s['repeated_from_startup']}; "
                      f"prompt chars: {s['prompt_chars']}")
+        for style, counts in s["by_style"].items():
+            lines.append(f"  {style or 'single'} style: full {counts['full']}/{counts['tasks']}, "
+                         f"named only {counts['named']}, missing {counts['missing']}")
         if s["seeds_not_stored"]:
             lines.append(f"WARNING: {s['seeds_not_stored']} seed(s) refused by this version's "
                          "store; its live arm would fail setup")
         for row in report["tasks"]:
-            lines.append(f"- {row['task_id']}: needed {row['needed']}, full "
+            if row["refusal"]:
+                lines.append(f"  refused ({row['task_id']} rep {row['rep']}): {row['refusal']}")
+            lines.append(f"- {row['task_id']} rep {row['rep']} ({row['needed_style']}): "
+                         f"needed {row['needed']}, full "
                          f"{row['prompt_full_ids']}, named {row['prompt_named_ids']}, "
                          f"repeated {row['repeated_from_startup']}")
     else:
