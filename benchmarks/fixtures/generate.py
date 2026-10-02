@@ -66,3 +66,26 @@ def build_webapi(dest: Path, seed: int = 0) -> Path:
     _sh("git", "add", "-A", cwd=dest)
     _commit(dest, "feat: service scaffold")
     return dest
+
+
+def apply_overlay(dest: Path, overlay: list | None, seed: int = 0) -> None:
+    """Apply a task's `fixture_files` to a fixture repo and commit them, so a session's diff
+    starts after the overlay. Each entry is {path, content} (write), {path, append}, or
+    {path, old, new} (replace one exact occurrence); `{seed}` is filled in everywhere."""
+    if not overlay:
+        return
+    for entry in overlay:
+        target = dest / entry["path"].replace("{seed}", str(seed))
+        fill = {k: v.replace("{seed}", str(seed)) for k, v in entry.items() if k != "path"}
+        if "content" in fill:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(fill["content"])
+        elif "append" in fill:
+            target.write_text(target.read_text() + fill["append"])
+        else:
+            text = target.read_text()
+            if text.count(fill["old"]) != 1:
+                raise ValueError(f"overlay replace for {target} must match exactly once")
+            target.write_text(text.replace(fill["old"], fill["new"]))
+    _sh("git", "add", "-A", cwd=dest)
+    _commit(dest, "chore: task fixture")
