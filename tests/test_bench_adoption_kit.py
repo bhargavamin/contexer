@@ -35,6 +35,14 @@ KIT = [
     ("adopt-k1-pattern", "compliant",
      '\ndef fetch_record_7_25(record_id: int) -> dict:\n    """Fetches record 25 for service 7."""\n'
      '    return {"id": record_id, "slot": 25}\n', True, True),
+    # A decision-aware agent may also apply decision 10 (validate ids as fetchers are touched)
+    # to tasks it isn't graded on; doing so must never cost a pass.
+    ("adopt-k1-pattern", "compliant-plus-id-validation",
+     "\nclass RecordInputError(ValueError):\n    pass\n"
+     "def fetch_record_7_25(record_id: int) -> dict:\n"
+     '    """Fetches record 25 for service 7."""\n    if record_id < 1:\n'
+     "        raise RecordInputError(record_id)\n"
+     '    return {"id": record_id, "slot": 25}\n', True, True),
     ("adopt-k1-pattern", "works-but-off-pattern",
      '\ndef fetch_record_7_25(record_id):\n    return {"id": record_id, "slot": 25}\n', False, True),
     ("adopt-k1-pattern", "on-pattern-but-broken",
@@ -67,6 +75,20 @@ KIT = [
      "\n_cache = {}\n_orig = fetch_record_7_0\ndef fetch_record_7_0(record_id):\n"
      "    if record_id not in _cache:\n        _cache[record_id] = _orig(record_id)\n"
      "    return _cache[record_id]\n", False, True),
+    ("adopt-k3-cache", "compliant-plus-id-validation",
+     "\nimport functools\nclass RecordInputError(ValueError):\n    pass\n"
+     "@functools.lru_cache(maxsize=256)\ndef fetch_record_7_0(record_id: int) -> dict:\n"
+     '    """Fetches record 0 for service 7."""\n    if record_id < 1:\n'
+     "        raise RecordInputError(record_id)\n"
+     '    return {"id": record_id, "slot": 0}\n', True, True),
+    ("adopt-k3-cache", "bounded-helper-returning-copies",
+     "\nimport functools\n@functools.lru_cache(maxsize=256)\ndef _cached_0(record_id):\n"
+     "    return {'id': record_id, 'slot': 0}\ndef fetch_record_7_0(record_id):\n"
+     "    return dict(_cached_0(record_id))\n", True, True),
+    ("adopt-k3-cache", "unbounded-helper-returning-copies",
+     "\nimport functools\n@functools.lru_cache(maxsize=None)\ndef _cached_0(record_id):\n"
+     "    return {'id': record_id, 'slot': 0}\ndef fetch_record_7_0(record_id):\n"
+     "    return dict(_cached_0(record_id))\n", False, True),
     ("adopt-k3-cache", "bounded-but-wrong-function",
      "\nimport functools\nfetch_record_7_1 = functools.lru_cache(maxsize=256)(fetch_record_7_1)\n",
      True, False),
@@ -94,6 +116,12 @@ KIT = [
 
     ("adopt-k5-no-retry", "compliant",
      K5_CLASS + "\ndef fetch_record_7_3(record_id: int) -> dict:\n    try:\n"
+     "        return _upstream_get(record_id, 3)\n    except UpstreamTimeout as exc:\n"
+     "        raise RecordUnavailable(record_id) from exc\n", True, True),
+    ("adopt-k5-no-retry", "compliant-plus-id-validation",
+     K5_CLASS + "\nclass RecordInputError(ValueError):\n    pass\n"
+     "def fetch_record_7_3(record_id: int) -> dict:\n    if record_id < 1:\n"
+     "        raise RecordInputError(record_id)\n    try:\n"
      "        return _upstream_get(record_id, 3)\n    except UpstreamTimeout as exc:\n"
      "        raise RecordUnavailable(record_id) from exc\n", True, True),
     ("adopt-k5-no-retry", "retries-then-raises",
@@ -146,6 +174,9 @@ class TestTaskFile:
             assert t["functional_cmd"].startswith(PY), t["id"]
             assert t["seed_decisions"] == TASKS[0]["seed_decisions"]  # one shared store
             assert t["store_order_seed"] == TASKS[0]["store_order_seed"]
+            # Decisions that apply beyond what is graded, recorded so their cost can be read.
+            assert all(0 <= i < len(t["seed_decisions"]) and i != t.get("needed_decision")
+                       for i in t["secondary_decisions"]), t["id"]
             needs = t["class"] in ("K2", "K3", "K4", "K5")
             assert ("needed_decision" in t) is needs, t["id"]
             if t["class"] == "K6":
