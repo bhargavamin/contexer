@@ -58,15 +58,18 @@ def _load_tasks(task_ids, tasks_file: Path = None):
     return sorted(picked, key=lambda t: (t["chain"], t["step"]))
 
 
+_SEEDED_MARK = "BENCH_SEEDED_IDS="
+
+
 def _condition_b_setup(repo: str, home: Path, seed_decision: str, source: Path = None,
-                       seed_decisions: list = None) -> None:
+                       seed_decisions: list = None) -> list:
     """contexer install + bootstrap + optional decision seed, in a child process
     whose HOME is the isolated one (store paths must resolve inside it). `source`
     is the contexer checkout `uv run` installs from (its cwd resolves the pyproject
     / venv that provides the `contexer` console script and the `contexer` package
     imported below) — this is what lets an A/B campaign compare two contexer
     versions; it defaults to this harness's own repo root, so callers that don't
-    pass it see no behavior change."""
+    pass it see no behavior change. Returns the stored ids of `seed_decisions`, in order."""
     env = _session_env(home, otel_port=0)
     src = source or Path(__file__).resolve().parent.parent
     subprocess.run(["uv", "run", "contexer", "install"], env=env, check=True,
@@ -78,26 +81,23 @@ def _condition_b_setup(repo: str, home: Path, seed_decision: str, source: Path =
         code += (f"store.update_decision({repo!r}, {seed_decision!r}, 'bench-seed', "
                  "'constraint', created_by='human')\n")
     if seed_decisions:
-        # Seeded in list order (`seeding.seed_items`), so the task file controls store order.
-        # A seed the store refuses (novelty, quality gate, an older version's rules) fails
-        # setup loudly: the static-file arm always gets every seed, so a silent drop here
-        # would break arm parity without leaving a trace.
-        # This script runs inside the SOURCE checkout (an older one for `with_prev`), so it
-        # must not import anything from this harness: the stored check is inlined.
-        for item in seed_decisions:
-            code += (f"_r = store.update_decision({repo!r}, {item['content']!r}, "
-                     f"'bench-seed', {item['subtype']!r}, created_by='human', "
-                     f"source_files={item['source_files'] or None!r})\n"
-                     f"assert (_r[0] if isinstance(_r, tuple) else _r), "
-                     f"{('seed not stored: ' + item['content'][:60])!r}\n")
+        # Seeded in list order through the agent capture path plus approval; the generated
+        # script runs inside the SOURCE checkout (an older one for `with_prev`), so it imports
+        # only `contexer`. See `seeding.seed_script` for why a refused seed fails setup.
+        code += seeding.seed_script(repo, seed_decisions)
+        code += f"print({_SEEDED_MARK!r} + __import__('json').dumps(seeded_ids))\n"
     try:
-        subprocess.run(["uv", "run", "python", "-c", code], env=env, check=True,
-                       capture_output=True, cwd=src)
+        proc = subprocess.run(["uv", "run", "python", "-c", code], env=env, check=True,
+                              capture_output=True, cwd=src)
     except subprocess.CalledProcessError as exc:
         # The row records this message: name the refused seed (or the real exception), not
         # the CalledProcessError repr, which only repeats the whole generated script.
         tail = (exc.stderr or b"").decode(errors="replace").strip().splitlines()[-3:]
         raise RuntimeError("contexer seed setup failed: " + " | ".join(tail)) from exc
+    for line in (getattr(proc, "stdout", None) or b"").decode(errors="replace").splitlines():
+        if line.startswith(_SEEDED_MARK):
+            return json.loads(line[len(_SEEDED_MARK):])
+    return []
 
 
 def _condition_c_setup(work: Path, seed_decision: str,
@@ -114,9 +114,11 @@ def _condition_c_setup(work: Path, seed_decision: str,
     capture mid-session decisions, and that asymmetry IS the thing measured."""
     from contexer import miner
     convs = [c["content"] for c in miner.mine_conventions(str(work))]
-    # Every seed the contexer arm stores, so both arms carry the same knowledge.
+    # Every seed the contexer arm stores, titled as Contexer shows it, so both arms carry the
+    # same knowledge.
     seeds = ([seed_decision] if seed_decision else []) + [
-        item["content"] for item in seed_decisions or []]
+        f"{item['title']}: {item['content']}" if item.get("title") else item["content"]
+        for item in seed_decisions or []]
 
     def _is_rule(text: str) -> bool:
         return text.lower().startswith(("never", "always", "don't", "do not"))
@@ -197,6 +199,59 @@ def _tool_calls(home: Path) -> int:
     return calls
 
 
+def _strings(value) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in _strings(v)]
+    if isinstance(value, list):
+        return [s for v in value for s in _strings(v)]
+    return []
+
+
+def _blocks(entry: dict) -> list[dict]:
+    content = (entry.get("message") or {}).get("content")
+    return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+
+
+def _needed_delivery(home: Path, content: str, entry_id: str) -> tuple[str, int]:
+    """(how the needed decision reached the agent, Contexer lookups the agent made), read
+    from the session transcript. Only what CONTEXER gave the agent counts: hook context
+    (`hook_additional_context` attachments) and results of the agent's own Contexer tool calls,
+    so neither an echo nor a file the agent read can: "full" when the decision's whole text
+    arrived, "named" when only its id did (a pointer), else "none". Lookups count the agent's
+    calls to Contexer's get_context tools, the way a pointer is followed up."""
+    entries = []
+    for transcript in (home / ".claude" / "projects").rglob("*.jsonl"):
+        for line in transcript.read_text(errors="ignore").splitlines():
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(entry, dict):
+                entries.append(entry)
+    contexer_calls = {block.get("id"): str(block.get("name", ""))
+                      for entry in entries if entry.get("type") == "assistant"
+                      for block in _blocks(entry)
+                      if block.get("type") == "tool_use" and "contexer" in str(block.get("name"))}
+    lookups = sum("get_context" in name for name in contexer_calls.values())
+    received = []
+    for entry in entries:
+        attachment = entry.get("attachment")
+        if isinstance(attachment, dict) and attachment.get("type") == "hook_additional_context":
+            received.extend(_strings(attachment))
+        received.extend(s for block in _blocks(entry)
+                        if block.get("type") == "tool_result"
+                        and block.get("tool_use_id") in contexer_calls
+                        for s in _strings(block.get("content")))
+    text = " ".join(" ".join(received).split())
+    if " ".join(content.split()) in text:
+        return "full", lookups
+    if entry_id and entry_id[:8] in text:
+        return "named", lookups
+    return "none", lookups
+
+
 def _telemetry_check(row: dict, snap: dict):
     otel_total = sum(snap["tokens"].values())
     row["otel_tokens_total"] = otel_total
@@ -265,6 +320,7 @@ def run_campaign(out_dir: Path, reps: int = 3, task_ids=None, claude_cmd: str = 
                         row = _one_run(task, condition, rep, work, home, baseline,
                                        claude_cmd, seed, model, rx, contexer_sources, wait_for_otel)
                         _append(out, row)
+                        _discard(work, home)
                 for chain_tasks in chains.values():
                     # A chain's steps must stay sequential within one condition
                     # (shared repo + HOME: accumulation), so the full chain runs
@@ -275,6 +331,7 @@ def run_campaign(out_dir: Path, reps: int = 3, task_ids=None, claude_cmd: str = 
                             row = _one_run(task, condition, rep, work, home, baseline,
                                            claude_cmd, seed, model, rx, contexer_sources, wait_for_otel)
                             _append(out, row)
+                        _discard(work, home)
     finally:
         rx.stop()
     return out
@@ -291,6 +348,14 @@ def _fresh(td: Path, golden: Path, tag: str):
     # --show-toplevel`, which returns the CANONICAL path — seeding the store under
     # the symlinked path would target a different slug and inject nothing.
     return work.resolve(), home.resolve()
+
+
+def _discard(*dirs: Path) -> None:
+    """Drop a finished session's repo copy and HOME once its row is written: each holds its
+    own venv and transcripts, and keeping every session's until the campaign ends filled the
+    disk mid-run."""
+    for d in dirs:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def _append(out: Path, row: dict):
@@ -315,19 +380,26 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
            "tokens_total": 0, "cost_usd": 0.0, "turns": 0, "duration_ms": 0, "tool_calls": 0,
            "violations": 0, "rationale": 0.0, "success": False, "result_snippet": "",
            "otel_tokens_total": 0, "otel_cost_usd": 0.0, "telemetry_ok": None, "error": ""}
+    needed = None  # (content, stored id) of the needed decision, on Contexer arms
     try:
         # Chains set up their condition once (before step 1); singles on every run.
         # "claudemd_with" (condition D) layers contexer on top of a pre-existing
         # CLAUDE.md — the adoption question for repos that already maintain one.
         if not task["chain"] or task["step"] <= 1:
-            seeds = seeding.seed_items(task, seed)
+            seeds = seeding.seed_items(task, seed, rep)
+            index = task.get("needed_decision")
+            if index is not None:
+                # Which author's style the needed decision was written in this rep.
+                row["needed_style"] = seeds[index]["style"]
             files = _FILE_CONDITIONS.get(condition)
             if files:
                 _condition_c_setup(work, task["seed_decision"], files, seed_decisions=seeds)
             src = (contexer_sources or {}).get(condition)
             if condition in _CONTEXER_CONDITIONS or src:
-                _condition_b_setup(str(work), home, task["seed_decision"],
-                                   Path(src) if src else None, seed_decisions=seeds)
+                ids = _condition_b_setup(str(work), home, task["seed_decision"],
+                                         Path(src) if src else None, seed_decisions=seeds)
+                if index is not None:
+                    needed = (seeds[index]["content"], ids[index] if ids else "")
         rx.reset()
         row["ts"] = time.time()  # stamped when the session starts (post-setup)
         # Pre-session HEAD: sessions may commit their edits, which would vanish
@@ -360,12 +432,20 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
             score.changed_files(str(work), base_sha), baseline)
         row["rationale"] = score.rationale_score(res.get("result", ""), task["gold"])
         row["result_snippet"] = str(res.get("result", ""))[:300]
+        if needed:
+            # Contexer arms only: a static rules file is loaded into the system prompt, which
+            # the transcript doesn't record, so "none" there would be a false reading.
+            row["needed_delivery"], row["contexer_lookups"] = _needed_delivery(home, *needed)
         if check_cmd:
             # Same isolated env as the session: success must never come from
             # developer-local HOME/uv/python configuration the session couldn't see.
             chk = subprocess.run(check_cmd, shell=True, cwd=work, capture_output=True,
                                  timeout=600, env=_session_env(home, 0))
             row["success"] = chk.returncode == 0
+            if not row["success"]:
+                # The session's folders are discarded after scoring: keep why the check failed.
+                row["check_output"] = ((chk.stdout or b"") + (chk.stderr or b"")).decode(
+                    errors="replace")[-1500:]
         else:
             row["success"] = True
         if task["chain"]:

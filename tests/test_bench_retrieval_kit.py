@@ -26,6 +26,15 @@ VARIANTS = [
      "\ndef fetch_records_batch(record_ids):\n    out = {'items': [], 'failed': []}\n"
      "    for r in record_ids:\n        if r < 1:\n            out['failed'].append(r)\n"
      "        else:\n            out['items'].append({'id': r})\n    return out\n", True),
+    ("retr-batch", "compliant-keyed-by-id",
+     "\ndef fetch_records_batch(record_ids):\n"
+     "    return {'items': {r: {'id': r} for r in record_ids if r >= 1},\n"
+     "            'failed': [r for r in record_ids if r < 1]}\n", True),
+    ("retr-batch", "dict-keyed-by-position",
+     "\ndef fetch_records_batch(record_ids):\n"
+     "    good = [{'id': r} for r in record_ids if r >= 1]\n"
+     "    return {'items': dict(enumerate(good)),\n"
+     "            'failed': [r for r in record_ids if r < 1]}\n", False),
     ("retr-batch", "list-skipping-bad-ids",
      "\ndef fetch_records_batch(record_ids):\n"
      "    return [{'id': r} for r in record_ids if r >= 1]\n", False),
@@ -84,11 +93,23 @@ class TestTaskFile:
 
     def test_tasks_share_one_store(self):
         # One realistic store, many tasks: the decision a task needs competes with the
-        # others anchored to the same file.
-        assert all(t["seed_decisions"] == TASKS[0]["seed_decisions"] for t in TASKS)
-        anchors = {f for s in TASKS[0]["seed_decisions"] for f in s["source_files"]}
-        assert anchors == {"app/svc_{seed}_core.py"}
-        assert len(TASKS[0]["seed_decisions"]) > 3  # more anchors than full-content slots
+        # others anchored to the same file, plus unanchored ones found only by wording.
+        seeds = TASKS[0]["seed_decisions"]
+        assert all(t["seed_decisions"] == seeds for t in TASKS)
+        core = [s for s in seeds if s["source_files"] == ["app/svc_{seed}_core.py"]]
+        assert len(core) > 3  # more anchors than full-content slots
+        assert any(not s["source_files"] for s in seeds)
+        assert all(seeds[t["needed_decision"]] in core for t in TASKS)
+
+    def test_needed_decisions_come_in_every_author_style(self):
+        # Every agent writes decisions differently: each needed decision has a terse, a
+        # narrative and a plan-style version, and across three reps each is shown once.
+        for t in TASKS:
+            variants = t["seed_decisions"][t["needed_decision"]]["variants"]
+            assert [v["style"] for v in variants] == ["terse", "narrative", "plan"]
+            shown = {seeding.seed_items(t, SEED, rep)[t["needed_decision"]]["style"]
+                     for rep in range(3)}
+            assert shown == {"terse", "narrative", "plan"}, t["id"]
 
     def test_needed_decisions_must_be_retrieved_not_preloaded(self):
         seeds = TASKS[0]["seed_decisions"]
@@ -102,11 +123,11 @@ class TestTaskFile:
 
     def test_prompts_name_the_file_but_not_the_decision(self):
         for t in TASKS:
-            needed = t["seed_decisions"][t["needed_decision"]]["content"]
             assert "app/svc_{seed}_core.py" in t["prompt"]
-            for token in ("'items'", "maxsize=256", "at_ms", "RecordInputError"):
-                if token in needed:
-                    assert token not in t["prompt"], (t["id"], token)
+            for variant in t["seed_decisions"][t["needed_decision"]]["variants"]:
+                for token in ("'items'", "maxsize=256", "at_ms", "RecordInputError"):
+                    if token in variant["content"]:
+                        assert token not in t["prompt"], (t["id"], token)
 
     def test_every_task_has_a_compliant_and_a_rejected_variant(self):
         for task_id in BY_ID:
@@ -144,10 +165,16 @@ def test_check_judges_each_variant(task_id, label, extra, passes, golden, tmp_pa
 
 class TestSeeding:
     def test_seed_items_fill_seed_and_keep_order(self):
-        items = seeding.seed_items(TASKS[0], 5)
-        assert [i["content"] for i in items] == [
-            s["content"].replace("{seed}", "5") for s in TASKS[0]["seed_decisions"]]
-        assert all(i["source_files"] == ["app/svc_5_core.py"] for i in items)
+        seeds = TASKS[0]["seed_decisions"]
+        for rep in range(3):
+            items = seeding.seed_items(TASKS[0], 5, rep)
+            expected = [(s["variants"][(rep + i) % 3] if "variants" in s else s)
+                        for i, s in enumerate(seeds)]
+            assert [i["content"] for i in items] == [
+                e["content"].replace("{seed}", "5") for e in expected]
+            assert [i["title"] for i in items] == [e.get("title", "") for e in expected]
+            assert [i["source_files"] for i in items] == [
+                [f.replace("{seed}", "5") for f in s["source_files"]] for s in seeds]
         assert seeding.seed_items({"seed_decision": "x"}, 5) == []
 
     def _seed_script(self, tmp_path, monkeypatch):
@@ -157,30 +184,62 @@ class TestSeeding:
         run._condition_b_setup(str(tmp_path), tmp_path / "home", "", seed_decisions=items)
         return items, commands[-1][-1]
 
-    def test_contexer_arm_seeds_every_decision_as_human_with_anchor(self, tmp_path,
-                                                                    monkeypatch):
+    def _fake_store(self, monkeypatch, status="pending_approval", stored=True,
+                    approve=(True, "ok")):
+        """Stub the capture path: each update_context call gets a fresh id with `status`."""
         from contexer import server, store
+        captures, approvals, entries = [], [], []
+
+        def update_context(content, **kw):
+            captures.append((content, kw))
+            if not stored:
+                return "Filtered - did not meet storage criteria."
+            entry_id = f"{len(captures):08x}-0000"
+            entries.append({"id": entry_id, "status": status})
+            return f"Engineering decision recorded - pending review (id={entry_id})"
+
+        monkeypatch.setattr(server, "bootstrap_context", lambda **kw: None)
+        monkeypatch.setattr(server, "update_context", update_context)
+        monkeypatch.setattr(store, "load", lambda repo: {"entries": entries})
+        monkeypatch.setattr(store, "approve_decision",
+                            lambda repo, entry_id, action: approvals.append(entry_id) or approve)
+        return captures, approvals
+
+    def test_contexer_arm_seeds_through_agent_capture_then_approval(self, tmp_path,
+                                                                    monkeypatch):
         items, code = self._seed_script(tmp_path, monkeypatch)
         # The script runs inside the source checkout, which may be an older one without
         # this harness's modules: it must not import from `benchmarks`.
         assert "benchmarks" not in code
-        captures = []
-        monkeypatch.setattr(server, "bootstrap_context", lambda **kw: None)
-        monkeypatch.setattr(store, "update_decision",
-                            lambda *a, **kw: captures.append((a, kw)) or (True, "id"))
-        exec(compile(code, "<seed>", "exec"), {})
-        assert [a[1] for a, _ in captures] == [i["content"] for i in items]
-        assert [a[3] for a, _ in captures] == [i["subtype"] for i in items]
-        assert all(kw == {"created_by": "human", "source_files": [f"app/svc_{SEED}_core.py"]}
-                   for _, kw in captures)
+        captures, approvals = self._fake_store(monkeypatch)
+        scope = {}
+        exec(compile(code, "<seed>", "exec"), scope)
+        assert [c for c, _ in captures] == [i["content"] for i in items]
+        assert [kw["subtype"] for _, kw in captures] == [i["subtype"] for i in items]
+        assert [kw["title"] for _, kw in captures] == [i["title"] for i in items]
+        assert all(kw["created_by"] == "ai" for _, kw in captures)
+        assert [kw["source_files"] for _, kw in captures] == [
+            i["source_files"] or None for i in items]
+        assert approvals == scope["seeded_ids"] and len(approvals) == len(items)
 
+    def test_a_seed_made_active_on_capture_is_left_as_stored(self, tmp_path, monkeypatch):
+        items, code = self._seed_script(tmp_path, monkeypatch)
+        _, approvals = self._fake_store(monkeypatch, status="suggested")
+        scope = {}
+        exec(compile(code, "<seed>", "exec"), scope)
+        assert approvals == [] and len(scope["seeded_ids"]) == len(items)
+
+    @pytest.mark.parametrize(("kwargs", "message"), [
+        ({"stored": False}, "seed not stored"),
+        ({"approve": (False, "no")}, "seed not approved"),
+        ({"status": "ignored"}, "seed inactive"),
+    ])
     def test_a_refused_seed_fails_setup_instead_of_dropping_silently(self, tmp_path,
-                                                                     monkeypatch):
-        from contexer import server, store
+                                                                     monkeypatch, kwargs,
+                                                                     message):
         _, code = self._seed_script(tmp_path, monkeypatch)
-        monkeypatch.setattr(server, "bootstrap_context", lambda **kw: None)
-        monkeypatch.setattr(store, "update_decision", lambda *a, **kw: (False, None))
-        with pytest.raises(AssertionError, match="seed not stored"):
+        self._fake_store(monkeypatch, **kwargs)
+        with pytest.raises(AssertionError, match=message):
             exec(compile(code, "<seed>", "exec"), {})
 
     def test_static_file_arm_carries_the_same_decisions(self, golden, tmp_path):
@@ -189,7 +248,9 @@ class TestSeeding:
         shutil.copytree(golden, work)
         run._condition_c_setup(work, "", seed_decisions=items)
         text = (work / "CLAUDE.md").read_text()
-        assert all(f"- {i['content']}" in text for i in items)
+        # Titled as Contexer shows them, so the static arm isn't missing what titles say.
+        assert all(f"- {i['title']}: {i['content']}" in text if i["title"]
+                   else f"- {i['content']}" in text for i in items)
 
         split = tmp_path / "two"
         shutil.copytree(golden, split)
@@ -303,7 +364,8 @@ class TestDeliveryPreview:
         return replay_delivery.replay_tasks(TASKS_FILE, SEED)
 
     def test_preview_reports_every_task_against_this_checkout(self, preview):
-        assert preview["summary"]["tasks"] == len(TASKS)
+        assert preview["summary"]["tasks"] == len(TASKS) * 3  # one pass per style
+        assert set(preview["summary"]["by_style"]) == {"terse", "narrative", "plan"}
         assert preview["summary"]["seeds_not_stored"] == 0
         assert Path(preview["contexer"]["path"]) == Path(run.__file__).resolve().parents[1]
 
@@ -320,6 +382,52 @@ class TestDeliveryPreview:
             assert row["seeded_ids"][constraint] in row["startup_full_ids"]
             assert row["seeded_ids"][constraint] not in row["repeated_from_startup"]
 
+    def test_transcript_reading_agrees_with_the_preview(self, preview, tmp_path):
+        # The live rows' `needed_delivery` reads what Contexer injected from the session
+        # transcript; fed the exact text this checkout renders, it must reach the preview's
+        # own verdict for every task in every style.
+        tasks = {t["id"]: t for t in TASKS}
+        for row in preview["tasks"]:
+            task = tasks[row["task_id"]]
+            content = seeding.seed_items(task, SEED, row["rep"])[task["needed_decision"]][
+                "content"]
+            home = tmp_path / f"{row['task_id']}-{row['rep']}"
+            transcript = home / ".claude" / "projects" / "p" / "s.jsonl"
+            transcript.parent.mkdir(parents=True)
+            transcript.write_text(json.dumps({"type": "attachment", "attachment": {
+                "type": "hook_additional_context",
+                "content": [row["startup_text"], row["prompt_text"]]}}) + "\n")
+            assert run._needed_delivery(home, content, row["needed_id"]) == (
+                row["needed"], 0), (row["task_id"], row["rep"])
+
+    def test_only_what_contexer_gave_counts_as_delivery(self, tmp_path):
+        content = "Bound every cache at 256 entries, because memory is fixed."
+        transcript = tmp_path / ".claude" / "projects" / "p" / "s.jsonl"
+        transcript.parent.mkdir(parents=True)
+
+        def write(*entries):
+            transcript.write_text("".join(json.dumps(e) + "\n" for e in entries))
+
+        def call(tool_id, name):
+            return {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": tool_id, "name": name, "input": {}}]}}
+
+        def result(tool_id, text):
+            return {"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": tool_id, "content": text}]}}
+
+        # A file the agent read, or its own message, is not delivery.
+        write(call("t1", "Read"), result("t1", content),
+              {"type": "assistant", "message": {"content": [{"type": "text", "text": content}]}})
+        assert run._needed_delivery(tmp_path, content, "abcd1234ef") == ("none", 0)
+        # A Contexer lookup's result is, and counts as a lookup.
+        write(call("t2", "mcp__contexer__get_context"), result("t2", content))
+        assert run._needed_delivery(tmp_path, content, "abcd1234ef") == ("full", 1)
+        # A pointer in hook context names it.
+        write({"type": "attachment", "attachment": {
+            "type": "hook_additional_context", "content": ["more: Caches (id=abcd1234)"]}})
+        assert run._needed_delivery(tmp_path, content, "abcd1234ef") == ("named", 0)
+
     def test_no_startup_rule_is_delivered_twice(self, preview):
         # #350: a short convention shown whole at startup is credited too.
         assert preview["summary"]["repeated_from_startup"] == 0
@@ -330,9 +438,9 @@ class TestDeliveryPreview:
         shutil.copytree(golden, repo)
         repo = repo.resolve()
         monkeypatch.setattr(store, "store_dir", lambda: tmp_path / "seed-store")
+        needed = seeding.seed_items(TASKS[0], SEED)[TASKS[0]["needed_decision"]]
         stored, entry_id = store.update_decision(
-            str(repo), TASKS[0]["seed_decisions"][2]["content"].replace("{seed}", str(SEED)),
-            "s", "architecture", created_by="human",
+            str(repo), needed["content"], "s", "architecture", created_by="human",
             source_files=[f"app/svc_{SEED}_core.py"])
         assert stored
         snapshot = tmp_path / "snapshot.json"
@@ -366,6 +474,9 @@ def test_stub_campaign_runs_the_task_file(tmp_path):
     assert rows["claudemd"]["result_snippet"] == "claudemd-has-seeds:yes"
     assert rows["without"]["result_snippet"] == "claudemd-has-seeds:no"
     assert not any(r["success"] for r in rows.values())  # the stub writes no code
+    task = BY_ID["retr-errors"]
+    style = seeding.seed_items(task, SEED, 0)[task["needed_decision"]]["style"]
+    assert style and all(r["needed_style"] == style for r in rows.values())
     meta = json.loads((out.parent / "campaign.json").read_text())
     assert meta["tasks_file"] == str(TASKS_FILE)
     assert meta["tasks_sha256"] == hashlib.sha256(TASKS_FILE.read_bytes()).hexdigest()

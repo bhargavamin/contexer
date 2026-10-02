@@ -5,54 +5,207 @@
     "chain": "",
     "step": 0,
     "prompt": "Add a function fetch_records_batch(record_ids: list[int]) to app/svc_{seed}_core.py that looks up several records at once using the existing record shape. Add a test and run the tests.",
-    "check_cmd": "uv run python -c \"import app.svc_{seed}_core as m; r = m.fetch_records_batch([1, 0, -3, 2]); assert isinstance(r, dict), r; assert sorted(r['failed']) == [-3, 0], r; assert all(isinstance(i, dict) for i in r['items']), r; assert sorted(i['id'] for i in r['items']) == [1, 2], r\"",
+    "check_cmd": "uv run python -c \"import app.svc_{seed}_core as m; r = m.fetch_records_batch([1, 0, -3, 2]); assert isinstance(r, dict), r; assert sorted(r['failed']) == [-3, 0], r; assert not isinstance(r['items'], dict) or all(k == v.get('id') for k, v in r['items'].items()), r; its = list(r['items'].values()) if isinstance(r['items'], dict) else list(r['items']); assert all(isinstance(i, dict) for i in its), r; assert sorted(i['id'] for i in its) == [1, 2], r\"",
     "gold": [],
     "seed_decision": "",
     "seed_decisions": [
       {
-        "content": "Never log record ids or function arguments in app/svc_{seed}_core.py; compliance forbids request data in logs.",
+        "subtype": "convention",
+        "source_files": [
+          "pyproject.toml"
+        ],
+        "title": "Manage dependencies and commands with uv",
+        "content": "Use uv for every dependency and script command in this repo (uv sync, uv run pytest), never pip or a bare python, because uv.lock is the source of truth and pip installs drift from it. CI runs uv sync --frozen and fails if the lock is stale."
+      },
+      {
         "subtype": "constraint",
         "source_files": [
           "app/svc_{seed}_core.py"
+        ],
+        "title": "Never log record ids or function arguments",
+        "content": "Never log record ids or function arguments in app/svc_{seed}_core.py, because compliance classifies request data as customer data and the log pipeline isn't approved for it (audit finding, June 2026). That includes debug logs and messages passed to logger.exception; log counts and durations instead. If an error needs an id to be debuggable, put it in the exception for the caller to handle, not in a log line. The audit sampled two weeks of logs and found ids in debug output from three modules; this one was cleaned up first. Applies to print() as well, since stdout is shipped to the same pipeline."
+      },
+      {
+        "subtype": "architecture",
+        "source_files": [
+          "app/svc_{seed}_core.py"
+        ],
+        "title": "Keep the record dict shape stable for per-slot fetchers",
+        "content": "Keep the record dict shape {'id': ..., 'slot': ...} stable for every fetch_record_{seed}_N function, because the export job and two dashboards index into it by key and break on extra or renamed fields. In #49 someone added a 'source' field to three fetchers, and the export job's strict schema check rejected every row for a day before anyone noticed. If a caller needs more data, add a separate function that returns a new shape rather than widening the record. Slot numbers are positional and stable: fetch_record_{seed}_7 always returns slot 7, so never renumber functions when one is removed; leave a gap instead. The export job's schema lives in another repository and is versioned separately, so even an additive field needs a coordinated release there first; that coordination cost is why new data goes into new functions. The incident write-up is linked from #49; the follow-up added a schema-contract test on the export side, not here."
+      },
+      {
+        "subtype": "architecture",
+        "source_files": [
+          "app/svc_{seed}_core.py"
+        ],
+        "variants": [
+          {
+            "style": "terse",
+            "title": "Return partial results from batch record lookups",
+            "content": "Batch record lookups return partial results: the good records under 'items' and the rejected ids (anything below 1) under 'failed'. Don't raise on a bad id mid-batch, because the caller retries only the failures."
+          },
+          {
+            "style": "narrative",
+            "title": "Return partial results from batch lookups instead of failing the whole call",
+            "content": "Return partial results from batch lookups in app/svc_{seed}_core.py instead of failing the whole call, because the reporting client retries only the ids that failed. This came out of #58: the first batch helper looped over fetch_record_{seed}_0 and raised on the first id below 1, so a nightly export of 4,000 ids died on one bad row and the client re-sent all 4,000. We considered returning None per slot but rejected it, since None was ambiguous between 'not found' and 'invalid'. The shape agreed with the client team was a dict with two keys: 'items', holding the record dicts in the usual {'id', 'slot'} shape, and 'failed', holding the ids that were rejected. Invalid means an id below 1; those are reported, not raised, and the loop carries on. Anything that wraps several record fetches should follow the same shape so the client only needs one parser. The client's retry job reads 'failed' verbatim and re-queues those ids after the upstream fix, so the ids must come back exactly as passed in, not normalised or stringified. Raised in standup on 2026-08-04, agreed with the client team the same week."
+          },
+          {
+            "style": "plan",
+            "title": "Adopt a partial-result contract for multi-record reads",
+            "content": "Adopt a partial-result contract for multi-record reads in the record service, because callers need to retry failures without redoing successful reads. Plan approved 2026-08-12 for the batch work: (1) Scope - any function in app/svc_{seed}_core.py that reads more than one record per call; the single-record fetch_record_{seed}_N functions are unchanged. (2) Return type - a dict, never a bare list or generator, so the contract can grow later without breaking callers. It carries 'items' (the records that were read, each in the existing record shape) and 'failed' (the ids that could not be read). (3) Validation - an id below 1 is rejected up front and appended to 'failed'; it must not raise and must not stop the remaining ids from being read. (4) Ordering - 'items' follows the order of the input ids. (5) Out of scope - pagination, async fan-out and per-id error messages were discussed and deferred to a follow-up issue. (6) Tests - each batch function gets a test that mixes valid and invalid ids, and one where every id is invalid, which must return an empty 'items' rather than raising. (7) Logging - the existing rule applies: report how many ids failed, never which ones. (8) Documentation - the docstring states the partial-result behaviour in one line so callers don't have to read the body. Owner: the record-service maintainers; the client team signs off on any change to the two key names, since they are part of the wire contract."
+          }
         ]
       },
       {
-        "content": "Public functions in app/svc_{seed}_core.py keep a one-line docstring that names the service number.",
+        "subtype": "architecture",
+        "source_files": [],
+        "title": "Keep the record service synchronous and single-process",
+        "content": "Keep the record service synchronous and single-process, because the async rewrite attempted in #41 doubled latency variance without improving throughput. The rewrite moved the fetchers to asyncio with an aiohttp client and an async test runner. What we found: (1) the fetchers do no network I/O of their own, so the event loop only added scheduling overhead; (2) the test suite needed pytest-asyncio and every helper grew an async twin, roughly doubling the code to review; (3) tracing got harder because stack traces lost the caller. It was reverted after two weeks. If more concurrency is needed later, run more worker processes behind the queue instead of adding threads or async inside the module. Revisit only if a fetcher starts doing real network I/O. Numbers from the trial, for the record: p50 latency was unchanged, p99 roughly doubled under the soak test because of event-loop starvation when one handler did CPU work, and throughput was flat because the bottleneck was the queue consumer, not the fetchers. (4) Two contributors spent most of the trial chasing a deadlock that came from mixing sync and async calls in one request path. The rewrite branch is kept for reference but should not be revived without a new benchmark showing I/O-bound fetchers. Agreed by the service owners on 2026-05-28."
+      },
+      {
         "subtype": "convention",
         "source_files": [
           "app/svc_{seed}_core.py"
-        ]
+        ],
+        "content": "Public functions in app/svc_{seed}_core.py keep a one-line docstring that names the service number."
       },
       {
-        "content": "Batch lookups in app/svc_{seed}_core.py return a dict with 'items' and 'failed' keys; an id below 1 goes into 'failed' and never aborts the batch.",
         "subtype": "architecture",
         "source_files": [
           "app/svc_{seed}_core.py"
+        ],
+        "variants": [
+          {
+            "style": "terse",
+            "title": "Bound every cache at 256 entries",
+            "content": "Use functools.lru_cache(maxsize=256) for any memoisation in the record service, never an unbounded cache, because the worker runs on a fixed memory budget."
+          },
+          {
+            "style": "narrative",
+            "title": "Cap caches with lru_cache(maxsize=256) after the OOM incident",
+            "content": "Cap caches in app/svc_{seed}_core.py with functools.lru_cache(maxsize=256), because an unbounded cache took the worker down. In August a dict-based cache was added around the record fetchers to speed up the dashboard; it never evicted, grew to several hundred MB over a week, and the container was OOM-killed (#63). functools.cache and lru_cache(maxsize=None) have the same problem, so both were ruled out in review. 256 entries covered the dashboard's hot set, judging by the access logs at the time. If a function needs caching, wrap it with lru_cache(maxsize=256) directly so cache_info() stays available to the metrics endpoint. A per-call dict passed in by the caller is fine for request-scoped reuse; the rule is about anything that outlives a call. Raised again in review of #67, where a contributor reached for functools.cache because it is shorter; the reviewer pointed back here."
+          },
+          {
+            "style": "plan",
+            "title": "Introduce bounded memoisation for record reads",
+            "content": "Introduce bounded memoisation for record reads, because repeated reads of the same ids dominate dashboard latency. Plan: (1) Mechanism - functools.lru_cache from the standard library; no third-party cache and no hand-rolled dict, since eviction is the part that is easy to get wrong. (2) Size - maxsize=256 for every cache in app/svc_{seed}_core.py; an unbounded size (maxsize=None, functools.cache) is not allowed. (3) Observability - keep the cache object reachable at module level so cache_info() can be scraped; don't hide it inside a closure. (4) Invalidation - records are immutable for a given id, so no TTL is needed now; revisit if records become writable. (5) Rollout - start with the hottest fetchers, measure, then extend. Alternatives considered: a Redis cache (rejected: new infrastructure for a single process) and cachetools.TTLCache (rejected: a new dependency for no current need). Risks noted at sign-off: memoising a function that returns a mutable dict lets one caller's mutation leak to the next, so callers must treat cached records as read-only; and a cache on a function that raises caches nothing, which is the behaviour we want for invalid ids. The 256 figure is per cache, not shared across the module."
+          }
         ]
       },
       {
-        "content": "Caches in app/svc_{seed}_core.py use functools.lru_cache(maxsize=256); never an unbounded dict, functools.cache or maxsize=None.",
-        "subtype": "architecture",
-        "source_files": [
-          "app/svc_{seed}_core.py"
-        ]
+        "subtype": "convention",
+        "source_files": [],
+        "title": "Write tests as plain functions with bare asserts",
+        "content": "Write tests as plain functions with bare asserts in tests/test_svc_{seed}.py, because the suite should be readable without pytest knowledge; no classes, fixtures or parametrize unless a test genuinely needs them. Name each test test_<function>_<case>."
       },
       {
-        "content": "Timestamps in app/svc_{seed}_core.py are integer Unix epoch milliseconds under the key 'at_ms', never datetime objects or ISO strings.",
+        "subtype": "constraint",
+        "source_files": [],
+        "content": "Never read configuration at import time in the service modules; read os.environ inside the function that needs it, because the test runner and the worker set environment variables after import and import-time reads froze stale values (this bit us twice with the region setting). Secrets never go in code or in default values. Tests that need a setting use monkeypatch.setenv inside the test, which only works because nothing reads the variable at import. Defaults for non-secret settings live next to the read, as the second argument to os.environ.get."
+      },
+      {
         "subtype": "pattern",
         "source_files": [
           "app/svc_{seed}_core.py"
+        ],
+        "title": "Serialise compared or hashed payloads with sorted-key json.dumps",
+        "content": "Serialise payloads with json.dumps(obj, sort_keys=True, separators=(',', ':')) whenever the record service writes something that is compared or hashed later, because key order changed between runs and broke the dedup hash in the export job. Plain json.dumps is fine for debug output. Don't hand-build JSON strings with f-strings; escaping bugs with ids containing quotes were the reason this came up. The export job hashes the serialised payload to skip unchanged rows; when two workers produced different key orders for the same record, every row looked changed and the nightly export re-sent the whole table (#52)."
+      },
+      {
+        "subtype": "pattern",
+        "source_files": [
+          "app/svc_{seed}_core.py"
+        ],
+        "variants": [
+          {
+            "style": "terse",
+            "title": "Use epoch-millisecond 'at_ms' timestamps",
+            "content": "Store timestamps as integer epoch milliseconds under 'at_ms', never datetime objects or ISO strings, because the dashboard client is JavaScript."
+          },
+          {
+            "style": "narrative",
+            "title": "Represent times as integer epoch milliseconds under 'at_ms'",
+            "content": "Represent times in app/svc_{seed}_core.py payloads as integer Unix epoch milliseconds under the key 'at_ms', because the dashboard and the export job disagreed about time zones. Until #71 the module mixed datetime objects (which json.dumps can't serialise, so callers stringified them inconsistently) and ISO-8601 strings, some with offsets and some naive. A daylight-saving change shifted a day of audit data by an hour and nobody could tell which rows were affected. We chose milliseconds over seconds because the JS client uses Date.now() natively, and an int over a float so equality checks in tests are exact. The field is always 'at_ms', not 'timestamp', 'ts' or 'created_at', so the client finds it without per-endpoint mapping. Existing ISO-string endpoints were left alone for now because two external consumers parse them; anything new uses 'at_ms'. Follow-up to migrate the old endpoints is tracked in #74."
+          },
+          {
+            "style": "plan",
+            "title": "Standardise time representation across the record service",
+            "content": "Standardise time representation across the record service, because mixed formats corrupted an audit export. Plan: (1) Wire format - every timestamp the module returns is an int of Unix epoch milliseconds. (2) Key - the field is named 'at_ms' wherever a single event time is recorded, such as audit entries and change events. (3) Not allowed - datetime objects, ISO-8601 strings and float seconds. (4) Source - read the clock with time.time() or time.time_ns() at the moment the entry is built; never capture it at import. (5) Display formatting is the client's job. (6) Migration - existing endpoints that return ISO strings stay until their consumers move; new functions use 'at_ms' from day one. Discussed: RFC 3339 strings for readability (rejected: parsing cost and zone ambiguity in the JS client) and seconds (rejected: the client wants milliseconds). Testing note: compare 'at_ms' against time.time() * 1000 with a tolerance rather than freezing the clock, since the module has no clock injection and adding one was judged not worth it. Sign-off from the dashboard owner and the export-job owner on 2026-08-19."
+          }
         ]
       },
       {
-        "content": "Invalid input in app/svc_{seed}_core.py raises RecordInputError, a ValueError subclass defined in that module; never return None or an error dict.",
+        "subtype": "constraint",
+        "source_files": [],
+        "title": "Ask before adding third-party dependencies",
+        "content": "Do not add third-party dependencies to the record service without asking first; prefer the standard library (functools, json, time, datetime), because every new package needs a licence and security review that takes weeks."
+      },
+      {
+        "subtype": "pattern",
+        "source_files": [],
+        "title": "Annotate public signatures with built-in generics and return plain dicts",
+        "content": "Type-annotate every public function signature in app/svc_{seed}_core.py with built-in generics (list[int], dict) rather than typing.List or typing.Dict, because the codebase targets Python 3.12 and mypy runs in strict mode on app/. Return plain dicts, not TypedDict or dataclasses, so the JSON layer can serialise results without adapters."
+      },
+      {
         "subtype": "architecture",
         "source_files": [
           "app/svc_{seed}_core.py"
+        ],
+        "variants": [
+          {
+            "style": "terse",
+            "title": "Raise RecordInputError for ids below 1",
+            "content": "Single-record fetches raise RecordInputError, a ValueError subclass that lives in the service module (add it if it isn't there yet), for an id below 1. Don't return None or an error dict, because callers catch the exception type."
+          },
+          {
+            "style": "narrative",
+            "title": "Signal bad input from single-record fetchers with RecordInputError",
+            "content": "Signal bad input from single-record fetchers with a dedicated RecordInputError, a ValueError subclass that belongs in app/svc_{seed}_core.py, because callers need to tell invalid ids apart from other failures. Review of #66 found three conventions in use: some fetchers returned None for id 0, one returned {'error': 'bad id'}, and one raised a bare ValueError. The None case was silently cached downstream as 'record not found'. Agreed outcome: ids below 1 raise RecordInputError, and subclassing ValueError keeps existing except ValueError handlers working. Batch helpers are the exception and report bad ids in their 'failed' list instead. The class hadn't been added when the review closed; the first change that needs it should define it at module level. Message text: include the id in the exception so the caller can report it, but keep it out of logs per the logging rule. Tests should assert the exception type, not the message, so wording can change freely."
+          },
+          {
+            "style": "plan",
+            "title": "Define one exception type for invalid input to record fetchers",
+            "content": "Define one exception type for invalid input to the record fetchers, because mixed None, error-dict and ValueError returns were leaking into caches. Plan: (1) Add class RecordInputError(ValueError) at module level in app/svc_{seed}_core.py. (2) Single-record functions (fetch_record_{seed}_N and similar) raise it for any id below 1, before doing any work. (3) Never return None or an error dict to signal bad input. (4) Batch functions don't raise; they follow the partial-result contract. (5) The offending id may appear in the exception message but never in logs; the logging rule still applies. (6) Tests cover id 0 and a negative id. Alternatives: returning Optional (rejected: ambiguous with not-found) and a Result type (rejected: unidiomatic in this codebase). (7) Rollout - the first fetcher to validate its input introduces the class; the rest adopt it as they are touched, rather than in one sweeping change, to keep diffs reviewable. (8) Callers that currently check for None after a fetch keep working until their fetcher is migrated, then switch to catching RecordInputError."
+          }
         ]
+      },
+      {
+        "subtype": "architecture",
+        "source_files": [
+          "app/svc_{seed}_core.py"
+        ],
+        "content": "Don't put retry loops inside the fetch functions in app/svc_{seed}_core.py; retries belong to the client layer, because nested retries in #55 turned one slow dependency into a nine-fold request storm. A fetch either returns or raises on its first attempt. During that incident the client retried three times, the gateway retried three times, and a fetcher wrapped its own call in a three-attempt loop, so one slow upstream received nine requests per user action and fell over completely. The post-incident review assigned retry ownership to the client, which also owns the backoff policy."
+      },
+      {
+        "subtype": "constraint",
+        "source_files": [
+          "tests/"
+        ],
+        "title": "Test every new public function before finishing",
+        "content": "Every new public function in app/ needs at least one test before the change is finished, and run uv run pytest tests/ -q before reporting done, because CI blocks merges on missing tests for new symbols."
+      },
+      {
+        "subtype": "convention",
+        "source_files": [],
+        "title": "Name hand-written functions verb_noun without the slot suffix",
+        "content": "Name new hand-written public functions verb_noun (for example build_report or list_slots) and keep the service-number suffix only on the generated per-slot fetchers, because the slot registry parses the generated names and hand-written names must not collide with that pattern."
+      },
+      {
+        "subtype": "architecture",
+        "source_files": [
+          "app/"
+        ],
+        "title": "Treat app/ as one synchronous record service with generated per-slot fetchers",
+        "content": "Treat app/ as one small synchronous record service with generated per-slot fetchers, because every convention in this repo assumes that structure. How it fits together, as worked out while answering a question about where new code should go: each app/svc_<n>_core.py module belongs to one numbered service and is generated from a template, which is why it holds a run of near-identical fetch_record_<n>_<slot> functions that each return a small record dict with an id and a slot. The slot number is positional and other systems depend on it, so generated functions are never renamed or renumbered. Hand-written code is added to the same module below the generated block; there is no separate package for helpers, and adding one was rejected as a layer with a single user. The module imports json and os but uses neither in the generated block; they are there for hand-written additions (serialisation for the export job, environment lookups). There is no web framework in this repository: the HTTP layer lives in the gateway, which calls these functions in-process, and the tests call them directly. Tests live in tests/test_svc_<n>.py, one file per service, as plain functions; the generated tests are placeholders that only prove the test runner works, so any real behaviour needs its own test. The service is deliberately synchronous (see the async decision) and keeps no state beyond bounded caches and the module-level metrics counters. Data flows one way: gateway calls a fetcher, the fetcher builds a dict, the gateway serialises it. Nothing in app/ talks to a database directly yet; the record dicts are synthetic until the storage migration (#80) lands, which is why fetchers are trivial today. When adding a feature, the questions to ask are which service module owns it, whether it changes the record shape (it should not), and whether it needs a test in that service's test file (it does). Anything cross-service belongs in the gateway, not here. This summary was written on 2026-09-02 and anchored to app/ so it is flagged as stale if the layout changes."
+      },
+      {
+        "subtype": "architecture",
+        "source_files": [],
+        "title": "Expose counters through the existing /metrics endpoint",
+        "content": "Expose counters through the existing /metrics endpoint rather than adding a metrics library, because the platform team scrapes only that endpoint. Counters live in a module-level dict keyed by metric name and reset only on process start. This was chosen over prometheus_client in #60, since that would have been a new dependency and a second exposition format to maintain. Cache hit ratios are read from cache_info() on the cached functions, so keep those functions at module level where the endpoint can find them. Naming: snake_case counter names prefixed with the service, for example svc_records_fetched_total; the endpoint renders them in the Prometheus text format by hand, which has been enough so far. Don't add gauges for things the platform already measures (CPU, memory)."
       }
     ],
-    "needed_decision": 2
+    "needed_decision": 3
   },
   {
     "id": "retr-cache",
@@ -65,49 +218,202 @@
     "seed_decision": "",
     "seed_decisions": [
       {
-        "content": "Never log record ids or function arguments in app/svc_{seed}_core.py; compliance forbids request data in logs.",
+        "subtype": "convention",
+        "source_files": [
+          "pyproject.toml"
+        ],
+        "title": "Manage dependencies and commands with uv",
+        "content": "Use uv for every dependency and script command in this repo (uv sync, uv run pytest), never pip or a bare python, because uv.lock is the source of truth and pip installs drift from it. CI runs uv sync --frozen and fails if the lock is stale."
+      },
+      {
         "subtype": "constraint",
         "source_files": [
           "app/svc_{seed}_core.py"
+        ],
+        "title": "Never log record ids or function arguments",
+        "content": "Never log record ids or function arguments in app/svc_{seed}_core.py, because compliance classifies request data as customer data and the log pipeline isn't approved for it (audit finding, June 2026). That includes debug logs and messages passed to logger.exception; log counts and durations instead. If an error needs an id to be debuggable, put it in the exception for the caller to handle, not in a log line. The audit sampled two weeks of logs and found ids in debug output from three modules; this one was cleaned up first. Applies to print() as well, since stdout is shipped to the same pipeline."
+      },
+      {
+        "subtype": "architecture",
+        "source_files": [
+          "app/svc_{seed}_core.py"
+        ],
+        "title": "Keep the record dict shape stable for per-slot fetchers",
+        "content": "Keep the record dict shape {'id': ..., 'slot': ...} stable for every fetch_record_{seed}_N function, because the export job and two dashboards index into it by key and break on extra or renamed fields. In #49 someone added a 'source' field to three fetchers, and the export job's strict schema check rejected every row for a day before anyone noticed. If a caller needs more data, add a separate function that returns a new shape rather than widening the record. Slot numbers are positional and stable: fetch_record_{seed}_7 always returns slot 7, so never renumber functions when one is removed; leave a gap instead. The export job's schema lives in another repository and is versioned separately, so even an additive field needs a coordinated release there first; that coordination cost is why new data goes into new functions. The incident write-up is linked from #49; the follow-up added a schema-contract test on the export side, not here."
+      },
+      {
+        "subtype": "architecture",
+        "source_files": [
+          "app/svc_{seed}_core.py"
+        ],
+        "variants": [
+          {
+            "style": "terse",
+            "title": "Return partial results from batch record lookups",
+            "content": "Batch record lookups return partial results: the good records under 'items' and the rejected ids (anything below 1) under 'failed'. Don't raise on a bad id mid-batch, because the caller retries only the failures."
+          },
+          {
+            "style": "narrative",
+            "title": "Return partial results from batch lookups instead of failing the whole call",
+            "content": "Return partial results from batch lookups in app/svc_{seed}_core.py instead of failing the whole call, because the reporting client retries only the ids that failed. This came out of #58: the first batch helper looped over fetch_record_{seed}_0 and raised on the first id below 1, so a nightly export of 4,000 ids died on one bad row and the client re-sent all 4,000. We considered returning None per slot but rejected it, since None was ambiguous between 'not found' and 'invalid'. The shape agreed with the client team was a dict with two keys: 'items', holding the record dicts in the usual {'id', 'slot'} shape, and 'failed', holding the ids that were rejected. Invalid means an id below 1; those are reported, not raised, and the loop carries on. Anything that wraps several record fetches should follow the same shape so the client only needs one parser. The client's retry job reads 'failed' verbatim and re-queues those ids after the upstream fix, so the ids must come back exactly as passed in, not normalised or stringified. Raised in standup on 2026-08-04, agreed with the client team the same week."
+          },
+          {
+            "style": "plan",
+            "title": "Adopt a partial-result contract for multi-record reads",
+            "content": "Adopt a partial-result contract for multi-record reads in the record service, because callers need to retry failures without redoing successful reads. Plan approved 2026-08-12 for the batch work: (1) Scope - any function in app/svc_{seed}_core.py that reads more than one record per call; the single-record fetch_record_{seed}_N functions are unchanged. (2) Return type - a dict, never a bare list or generator, so the contract can grow later without breaking callers. It carries 'items' (the records that were read, each in the existing record shape) and 'failed' (the ids that could not be read). (3) Validation - an id below 1 is rejected up front and appended to 'failed'; it must not raise and must not stop the remaining ids from being read. (4) Ordering - 'items' follows the order of the input ids. (5) Out of scope - pagination, async fan-out and per-id error messages were discussed and deferred to a follow-up issue. (6) Tests - each batch function gets a test that mixes valid and invalid ids, and one where every id is invalid, which must return an empty 'items' rather than raising. (7) Logging - the existing rule applies: report how many ids failed, never which ones. (8) Documentation - the docstring states the partial-result behaviour in one line so callers don't have to read the body. Owner: the record-service maintainers; the client team signs off on any change to the two key names, since they are part of the wire contract."
+          }
         ]
       },
       {
-        "content": "Public functions in app/svc_{seed}_core.py keep a one-line docstring that names the service number.",
+        "subtype": "architecture",
+        "source_files": [],
+        "title": "Keep the record service synchronous and single-process",
+        "content": "Keep the record service synchronous and single-process, because the async rewrite attempted in #41 doubled latency variance without improving throughput. The rewrite moved the fetchers to asyncio with an aiohttp client and an async test runner. What we found: (1) the fetchers do no network I/O of their own, so the event loop only added scheduling overhead; (2) the test suite needed pytest-asyncio and every helper grew an async twin, roughly doubling the code to review; (3) tracing got harder because stack traces lost the caller. It was reverted after two weeks. If more concurrency is needed later, run more worker processes behind the queue instead of adding threads or async inside the module. Revisit only if a fetcher starts doing real network I/O. Numbers from the trial, for the record: p50 latency was unchanged, p99 roughly doubled under the soak test because of event-loop starvation when one handler did CPU work, and throughput was flat because the bottleneck was the queue consumer, not the fetchers. (4) Two contributors spent most of the trial chasing a deadlock that came from mixing sync and async calls in one request path. The rewrite branch is kept for reference but should not be revived without a new benchmark showing I/O-bound fetchers. Agreed by the service owners on 2026-05-28."
+      },
+      {
         "subtype": "convention",
         "source_files": [
           "app/svc_{seed}_core.py"
-        ]
+        ],
+        "content": "Public functions in app/svc_{seed}_core.py keep a one-line docstring that names the service number."
       },
       {
-        "content": "Batch lookups in app/svc_{seed}_core.py return a dict with 'items' and 'failed' keys; an id below 1 goes into 'failed' and never aborts the batch.",
         "subtype": "architecture",
         "source_files": [
           "app/svc_{seed}_core.py"
+        ],
+        "variants": [
+          {
+            "style": "terse",
+            "title": "Bound every cache at 256 entries",
+            "content": "Use functools.lru_cache(maxsize=256) for any memoisation in the record service, never an unbounded cache, because the worker runs on a fixed memory budget."
+          },
+          {
+            "style": "narrative",
+            "title": "Cap caches with lru_cache(maxsize=256) after the OOM incident",
+            "content": "Cap caches in app/svc_{seed}_core.py with functools.lru_cache(maxsize=256), because an unbounded cache took the worker down. In August a dict-based cache was added around the record fetchers to speed up the dashboard; it never evicted, grew to several hundred MB over a week, and the container was OOM-killed (#63). functools.cache and lru_cache(maxsize=None) have the same problem, so both were ruled out in review. 256 entries covered the dashboard's hot set, judging by the access logs at the time. If a function needs caching, wrap it with lru_cache(maxsize=256) directly so cache_info() stays available to the metrics endpoint. A per-call dict passed in by the caller is fine for request-scoped reuse; the rule is about anything that outlives a call. Raised again in review of #67, where a contributor reached for functools.cache because it is shorter; the reviewer pointed back here."
+          },
+          {
+            "style": "plan",
+            "title": "Introduce bounded memoisation for record reads",
+            "content": "Introduce bounded memoisation for record reads, because repeated reads of the same ids dominate dashboard latency. Plan: (1) Mechanism - functools.lru_cache from the standard library; no third-party cache and no hand-rolled dict, since eviction is the part that is easy to get wrong. (2) Size - maxsize=256 for every cache in app/svc_{seed}_core.py; an unbounded size (maxsize=None, functools.cache) is not allowed. (3) Observability - keep the cache object reachable at module level so cache_info() can be scraped; don't hide it inside a closure. (4) Invalidation - records are immutable for a given id, so no TTL is needed now; revisit if records become writable. (5) Rollout - start with the hottest fetchers, measure, then extend. Alternatives considered: a Redis cache (rejected: new infrastructure for a single process) and cachetools.TTLCache (rejected: a new dependency for no current need). Risks noted at sign-off: memoising a function that returns a mutable dict lets one caller's mutation leak to the next, so callers must treat cached records as read-only; and a cache on a function that raises caches nothing, which is the behaviour we want for invalid ids. The 256 figure is per cache, not shared across the module."
+          }
         ]
       },
       {
-        "content": "Caches in app/svc_{seed}_core.py use functools.lru_cache(maxsize=256); never an unbounded dict, functools.cache or maxsize=None.",
-        "subtype": "architecture",
-        "source_files": [
-          "app/svc_{seed}_core.py"
-        ]
+        "subtype": "convention",
+        "source_files": [],
+        "title": "Write tests as plain functions with bare asserts",
+        "content": "Write tests as plain functions with bare asserts in tests/test_svc_{seed}.py, because the suite should be readable without pytest knowledge; no classes, fixtures or parametrize unless a test genuinely needs them. Name each test test_<function>_<case>."
       },
       {
-        "content": "Timestamps in app/svc_{seed}_core.py are integer Unix epoch milliseconds under the key 'at_ms', never datetime objects or ISO strings.",
+        "subtype": "constraint",
+        "source_files": [],
+        "content": "Never read configuration at import time in the service modules; read os.environ inside the function that needs it, because the test runner and the worker set environment variables after import and import-time reads froze stale values (this bit us twice with the region setting). Secrets never go in code or in default values. Tests that need a setting use monkeypatch.setenv inside the test, which only works because nothing reads the variable at import. Defaults for non-secret settings live next to the read, as the second argument to os.environ.get."
+      },
+      {
         "subtype": "pattern",
         "source_files": [
           "app/svc_{seed}_core.py"
+        ],
+        "title": "Serialise compared or hashed payloads with sorted-key json.dumps",
+        "content": "Serialise payloads with json.dumps(obj, sort_keys=True, separators=(',', ':')) whenever the record service writes something that is compared or hashed later, because key order changed between runs and broke the dedup hash in the export job. Plain json.dumps is fine for debug output. Don't hand-build JSON strings with f-strings; escaping bugs with ids containing quotes were the reason this came up. The export job hashes the serialised payload to skip unchanged rows; when two workers produced different key orders for the same record, every row looked changed and the nightly export re-sent the whole table (#52)."
+      },
+      {
+        "subtype": "pattern",
+        "source_files": [
+          "app/svc_{seed}_core.py"
+        ],
+        "variants": [
+          {
+            "style": "terse",
+            "title": "Use epoch-millisecond 'at_ms' timestamps",
+            "content": "Store timestamps as integer epoch milliseconds under 'at_ms', never datetime objects or ISO strings, because the dashboard client is JavaScript."
+          },
+          {
+            "style": "narrative",
+            "title": "Represent times as integer epoch milliseconds under 'at_ms'",
+            "content": "Represent times in app/svc_{seed}_core.py payloads as integer Unix epoch milliseconds under the key 'at_ms', because the dashboard and the export job disagreed about time zones. Until #71 the module mixed datetime objects (which json.dumps can't serialise, so callers stringified them inconsistently) and ISO-8601 strings, some with offsets and some naive. A daylight-saving change shifted a day of audit data by an hour and nobody could tell which rows were affected. We chose milliseconds over seconds because the JS client uses Date.now() natively, and an int over a float so equality checks in tests are exact. The field is always 'at_ms', not 'timestamp', 'ts' or 'created_at', so the client finds it without per-endpoint mapping. Existing ISO-string endpoints were left alone for now because two external consumers parse them; anything new uses 'at_ms'. Follow-up to migrate the old endpoints is tracked in #74."
+          },
+          {
+            "style": "plan",
+            "title": "Standardise time representation across the record service",
+            "content": "Standardise time representation across the record service, because mixed formats corrupted an audit export. Plan: (1) Wire format - every timestamp the module returns is an int of Unix epoch milliseconds. (2) Key - the field is named 'at_ms' wherever a single event time is recorded, such as audit entries and change events. (3) Not allowed - datetime objects, ISO-8601 strings and float seconds. (4) Source - read the clock with time.time() or time.time_ns() at the moment the entry is built; never capture it at import. (5) Display formatting is the client's job. (6) Migration - existing endpoints that return ISO strings stay until their consumers move; new functions use 'at_ms' from day one. Discussed: RFC 3339 strings for readability (rejected: parsing cost and zone ambiguity in the JS client) and seconds (rejected: the client wants milliseconds). Testing note: compare 'at_ms' against time.time() * 1000 with a tolerance rather than freezing the clock, since the module has no clock injection and adding one was judged not worth it. Sign-off from the dashboard owner and the export-job owner on 2026-08-19."
+          }
         ]
       },
       {
-        "content": "Invalid input in app/svc_{seed}_core.py raises RecordInputError, a ValueError subclass defined in that module; never return None or an error dict.",
+        "subtype": "constraint",
+        "source_files": [],
+        "title": "Ask before adding third-party dependencies",
+        "content": "Do not add third-party dependencies to the record service without asking first; prefer the standard library (functools, json, time, datetime), because every new package needs a licence and security review that takes weeks."
+      },
+      {
+        "subtype": "pattern",
+        "source_files": [],
+        "title": "Annotate public signatures with built-in generics and return plain dicts",
+        "content": "Type-annotate every public function signature in app/svc_{seed}_core.py with built-in generics (list[int], dict) rather than typing.List or typing.Dict, because the codebase targets Python 3.12 and mypy runs in strict mode on app/. Return plain dicts, not TypedDict or dataclasses, so the JSON layer can serialise results without adapters."
+      },
+      {
         "subtype": "architecture",
         "source_files": [
           "app/svc_{seed}_core.py"
+        ],
+        "variants": [
+          {
+            "style": "terse",
+            "title": "Raise RecordInputError for ids below 1",
+            "content": "Single-record fetches raise RecordInputError, a ValueError subclass that lives in the service module (add it if it isn't there yet), for an id below 1. Don't return None or an error dict, because callers catch the exception type."
+          },
+          {
+            "style": "narrative",
+            "title": "Signal bad input from single-record fetchers with RecordInputError",
+            "content": "Signal bad input from single-record fetchers with a dedicated RecordInputError, a ValueError subclass that belongs in app/svc_{seed}_core.py, because callers need to tell invalid ids apart from other failures. Review of #66 found three conventions in use: some fetchers returned None for id 0, one returned {'error': 'bad id'}, and one raised a bare ValueError. The None case was silently cached downstream as 'record not found'. Agreed outcome: ids below 1 raise RecordInputError, and subclassing ValueError keeps existing except ValueError handlers working. Batch helpers are the exception and report bad ids in their 'failed' list instead. The class hadn't been added when the review closed; the first change that needs it should define it at module level. Message text: include the id in the exception so the caller can report it, but keep it out of logs per the logging rule. Tests should assert the exception type, not the message, so wording can change freely."
+          },
+          {
+            "style": "plan",
+            "title": "Define one exception type for invalid input to record fetchers",
+            "content": "Define one exception type for invalid input to the record fetchers, because mixed None, error-dict and ValueError returns were leaking into caches. Plan: (1) Add class RecordInputError(ValueError) at module level in app/svc_{seed}_core.py. (2) Single-record functions (fetch_record_{seed}_N and similar) raise it for any id below 1, before doing any work. (3) Never return None or an error dict to signal bad input. (4) Batch functions don't raise; they follow the partial-result contract. (5) The offending id may appear in the exception message but never in logs; the logging rule still applies. (6) Tests cover id 0 and a negative id. Alternatives: returning Optional (rejected: ambiguous with not-found) and a Result type (rejected: unidiomatic in this codebase). (7) Rollout - the first fetcher to validate its input introduces the class; the rest adopt it as they are touched, rather than in one sweeping change, to keep diffs reviewable. (8) Callers that currently check for None after a fetch keep working until their fetcher is migrated, then switch to catching RecordInputError."
+          }
         ]
+      },
+      {
+        "subtype": "architecture",
+        "source_files": [
+          "app/svc_{seed}_core.py"
+        ],
+        "content": "Don't put retry loops inside the fetch functions in app/svc_{seed}_core.py; retries belong to the client layer, because nested retries in #55 turned one slow dependency into a nine-fold request storm. A fetch either returns or raises on its first attempt. During that incident the client retried three times, the gateway retried three times, and a fetcher wrapped its own call in a three-attempt loop, so one slow upstream received nine requests per user action and fell over completely. The post-incident review assigned retry ownership to the client, which also owns the backoff policy."
+      },
+      {
+        "subtype": "constraint",
+        "source_files": [
+          "tests/"
+        ],
+        "title": "Test every new public function before finishing",
+        "content": "Every new public function in app/ needs at least one test before the change is finished, and run uv run pytest tests/ -q before reporting done, because CI blocks merges on missing tests for new symbols."
+      },
+      {
+        "subtype": "convention",
+        "source_files": [],
+        "title": "Name hand-written functions verb_noun without the slot suffix",
+        "content": "Name new hand-written public functions verb_noun (for example build_report or list_slots) and keep the service-number suffix only on the generated per-slot fetchers, because the slot registry parses the generated names and hand-written names must not collide with that pattern."
+      },
+      {
+        "subtype": "architecture",
+        "source_files": [
+          "app/"
+        ],
+        "title": "Treat app/ as one synchronous record service with generated per-slot fetchers",
+        "content": "Treat app/ as one small synchronous record service with generated per-slot fetchers, because every convention in this repo assumes that structure. How it fits together, as worked out while answering a question about where new code should go: each app/svc_<n>_core.py module belongs to one numbered service and is generated from a template, which is why it holds a run of near-identical fetch_record_<n>_<slot> functions that each return a small record dict with an id and a slot. The slot number is positional and other systems depend on it, so generated functions are never renamed or renumbered. Hand-written code is added to the same module below the generated block; there is no separate package for helpers, and adding one was rejected as a layer with a single user. The module imports json and os but uses neither in the generated block; they are there for hand-written additions (serialisation for the export job, environment lookups). There is no web framework in this repository: the HTTP layer lives in the gateway, which calls these functions in-process, and the tests call them directly. Tests live in tests/test_svc_<n>.py, one file per service, as plain functions; the generated tests are placeholders that only prove the test runner works, so any real behaviour needs its own test. The service is deliberately synchronous (see the async decision) and keeps no state beyond bounded caches and the module-level metrics counters. Data flows one way: gateway calls a fetcher, the fetcher builds a dict, the gateway serialises it. Nothing in app/ talks to a database directly yet; the record dicts are synthetic until the storage migration (#80) lands, which is why fetchers are trivial today. When adding a feature, the questions to ask are which service module owns it, whether it changes the record shape (it should not), and whether it needs a test in that service's test file (it does). Anything cross-service belongs in the gateway, not here. This summary was written on 2026-09-02 and anchored to app/ so it is flagged as stale if the layout changes."
+      },
+      {
+        "subtype": "architecture",
+        "source_files": [],
+        "title": "Expose counters through the existing /metrics endpoint",
+        "content": "Expose counters through the existing /metrics endpoint rather than adding a metrics library, because the platform team scrapes only that endpoint. Counters live in a module-level dict keyed by metric name and reset only on process start. This was chosen over prometheus_client in #60, since that would have been a new dependency and a second exposition format to maintain. Cache hit ratios are read from cache_info() on the cached functions, so keep those functions at module level where the endpoint can find them. Naming: snake_case counter names prefixed with the service, for example svc_records_fetched_total; the endpoint renders them in the Prometheus text format by hand, which has been enough so far. Don't add gauges for things the platform already measures (CPU, memory)."
       }
     ],
-    "needed_decision": 3
+    "needed_decision": 6
   },
   {
     "id": "retr-audit",
@@ -120,49 +426,202 @@
     "seed_decision": "",
     "seed_decisions": [
       {
-        "content": "Never log record ids or function arguments in app/svc_{seed}_core.py; compliance forbids request data in logs.",
+        "subtype": "convention",
+        "source_files": [
+          "pyproject.toml"
+        ],
+        "title": "Manage dependencies and commands with uv",
+        "content": "Use uv for every dependency and script command in this repo (uv sync, uv run pytest), never pip or a bare python, because uv.lock is the source of truth and pip installs drift from it. CI runs uv sync --frozen and fails if the lock is stale."
+      },
+      {
         "subtype": "constraint",
         "source_files": [
           "app/svc_{seed}_core.py"
+        ],
+        "title": "Never log record ids or function arguments",
+        "content": "Never log record ids or function arguments in app/svc_{seed}_core.py, because compliance classifies request data as customer data and the log pipeline isn't approved for it (audit finding, June 2026). That includes debug logs and messages passed to logger.exception; log counts and durations instead. If an error needs an id to be debuggable, put it in the exception for the caller to handle, not in a log line. The audit sampled two weeks of logs and found ids in debug output from three modules; this one was cleaned up first. Applies to print() as well, since stdout is shipped to the same pipeline."
+      },
+      {
+        "subtype": "architecture",
+        "source_files": [
+          "app/svc_{seed}_core.py"
+        ],
+        "title": "Keep the record dict shape stable for per-slot fetchers",
+        "content": "Keep the record dict shape {'id': ..., 'slot': ...} stable for every fetch_record_{seed}_N function, because the export job and two dashboards index into it by key and break on extra or renamed fields. In #49 someone added a 'source' field to three fetchers, and the export job's strict schema check rejected every row for a day before anyone noticed. If a caller needs more data, add a separate function that returns a new shape rather than widening the record. Slot numbers are positional and stable: fetch_record_{seed}_7 always returns slot 7, so never renumber functions when one is removed; leave a gap instead. The export job's schema lives in another repository and is versioned separately, so even an additive field needs a coordinated release there first; that coordination cost is why new data goes into new functions. The incident write-up is linked from #49; the follow-up added a schema-contract test on the export side, not here."
+      },
+      {
+        "subtype": "architecture",
+        "source_files": [
+          "app/svc_{seed}_core.py"
+        ],
+        "variants": [
+          {
+            "style": "terse",
+            "title": "Return partial results from batch record lookups",
+            "content": "Batch record lookups return partial results: the good records under 'items' and the rejected ids (anything below 1) under 'failed'. Don't raise on a bad id mid-batch, because the caller retries only the failures."
+          },
+          {
+            "style": "narrative",
+            "title": "Return partial results from batch lookups instead of failing the whole call",
+            "content": "Return partial results from batch lookups in app/svc_{seed}_core.py instead of failing the whole call, because the reporting client retries only the ids that failed. This came out of #58: the first batch helper looped over fetch_record_{seed}_0 and raised on the first id below 1, so a nightly export of 4,000 ids died on one bad row and the client re-sent all 4,000. We considered returning None per slot but rejected it, since None was ambiguous between 'not found' and 'invalid'. The shape agreed with the client team was a dict with two keys: 'items', holding the record dicts in the usual {'id', 'slot'} shape, and 'failed', holding the ids that were rejected. Invalid means an id below 1; those are reported, not raised, and the loop carries on. Anything that wraps several record fetches should follow the same shape so the client only needs one parser. The client's retry job reads 'failed' verbatim and re-queues those ids after the upstream fix, so the ids must come back exactly as passed in, not normalised or stringified. Raised in standup on 2026-08-04, agreed with the client team the same week."
+          },
+          {
+            "style": "plan",
+            "title": "Adopt a partial-result contract for multi-record reads",
+            "content": "Adopt a partial-result contract for multi-record reads in the record service, because callers need to retry failures without redoing successful reads. Plan approved 2026-08-12 for the batch work: (1) Scope - any function in app/svc_{seed}_core.py that reads more than one record per call; the single-record fetch_record_{seed}_N functions are unchanged. (2) Return type - a dict, never a bare list or generator, so the contract can grow later without breaking callers. It carries 'items' (the records that were read, each in the existing record shape) and 'failed' (the ids that could not be read). (3) Validation - an id below 1 is rejected up front and appended to 'failed'; it must not raise and must not stop the remaining ids from being read. (4) Ordering - 'items' follows the order of the input ids. (5) Out of scope - pagination, async fan-out and per-id error messages were discussed and deferred to a follow-up issue. (6) Tests - each batch function gets a test that mixes valid and invalid ids, and one where every id is invalid, which must return an empty 'items' rather than raising. (7) Logging - the existing rule applies: report how many ids failed, never which ones. (8) Documentation - the docstring states the partial-result behaviour in one line so callers don't have to read the body. Owner: the record-service maintainers; the client team signs off on any change to the two key names, since they are part of the wire contract."
+          }
         ]
       },
       {
-        "content": "Public functions in app/svc_{seed}_core.py keep a one-line docstring that names the service number.",
+        "subtype": "architecture",
+        "source_files": [],
+        "title": "Keep the record service synchronous and single-process",
+        "content": "Keep the record service synchronous and single-process, because the async rewrite attempted in #41 doubled latency variance without improving throughput. The rewrite moved the fetchers to asyncio with an aiohttp client and an async test runner. What we found: (1) the fetchers do no network I/O of their own, so the event loop only added scheduling overhead; (2) the test suite needed pytest-asyncio and every helper grew an async twin, roughly doubling the code to review; (3) tracing got harder because stack traces lost the caller. It was reverted after two weeks. If more concurrency is needed later, run more worker processes behind the queue instead of adding threads or async inside the module. Revisit only if a fetcher starts doing real network I/O. Numbers from the trial, for the record: p50 latency was unchanged, p99 roughly doubled under the soak test because of event-loop starvation when one handler did CPU work, and throughput was flat because the bottleneck was the queue consumer, not the fetchers. (4) Two contributors spent most of the trial chasing a deadlock that came from mixing sync and async calls in one request path. The rewrite branch is kept for reference but should not be revived without a new benchmark showing I/O-bound fetchers. Agreed by the service owners on 2026-05-28."
+      },
+      {
         "subtype": "convention",
         "source_files": [
           "app/svc_{seed}_core.py"
-        ]
+        ],
+        "content": "Public functions in app/svc_{seed}_core.py keep a one-line docstring that names the service number."
       },
       {
-        "content": "Batch lookups in app/svc_{seed}_core.py return a dict with 'items' and 'failed' keys; an id below 1 goes into 'failed' and never aborts the batch.",
         "subtype": "architecture",
         "source_files": [
           "app/svc_{seed}_core.py"
+        ],
+        "variants": [
+          {
+            "style": "terse",
+            "title": "Bound every cache at 256 entries",
+            "content": "Use functools.lru_cache(maxsize=256) for any memoisation in the record service, never an unbounded cache, because the worker runs on a fixed memory budget."
+          },
+          {
+            "style": "narrative",
+            "title": "Cap caches with lru_cache(maxsize=256) after the OOM incident",
+            "content": "Cap caches in app/svc_{seed}_core.py with functools.lru_cache(maxsize=256), because an unbounded cache took the worker down. In August a dict-based cache was added around the record fetchers to speed up the dashboard; it never evicted, grew to several hundred MB over a week, and the container was OOM-killed (#63). functools.cache and lru_cache(maxsize=None) have the same problem, so both were ruled out in review. 256 entries covered the dashboard's hot set, judging by the access logs at the time. If a function needs caching, wrap it with lru_cache(maxsize=256) directly so cache_info() stays available to the metrics endpoint. A per-call dict passed in by the caller is fine for request-scoped reuse; the rule is about anything that outlives a call. Raised again in review of #67, where a contributor reached for functools.cache because it is shorter; the reviewer pointed back here."
+          },
+          {
+            "style": "plan",
+            "title": "Introduce bounded memoisation for record reads",
+            "content": "Introduce bounded memoisation for record reads, because repeated reads of the same ids dominate dashboard latency. Plan: (1) Mechanism - functools.lru_cache from the standard library; no third-party cache and no hand-rolled dict, since eviction is the part that is easy to get wrong. (2) Size - maxsize=256 for every cache in app/svc_{seed}_core.py; an unbounded size (maxsize=None, functools.cache) is not allowed. (3) Observability - keep the cache object reachable at module level so cache_info() can be scraped; don't hide it inside a closure. (4) Invalidation - records are immutable for a given id, so no TTL is needed now; revisit if records become writable. (5) Rollout - start with the hottest fetchers, measure, then extend. Alternatives considered: a Redis cache (rejected: new infrastructure for a single process) and cachetools.TTLCache (rejected: a new dependency for no current need). Risks noted at sign-off: memoising a function that returns a mutable dict lets one caller's mutation leak to the next, so callers must treat cached records as read-only; and a cache on a function that raises caches nothing, which is the behaviour we want for invalid ids. The 256 figure is per cache, not shared across the module."
+          }
         ]
       },
       {
-        "content": "Caches in app/svc_{seed}_core.py use functools.lru_cache(maxsize=256); never an unbounded dict, functools.cache or maxsize=None.",
-        "subtype": "architecture",
-        "source_files": [
-          "app/svc_{seed}_core.py"
-        ]
+        "subtype": "convention",
+        "source_files": [],
+        "title": "Write tests as plain functions with bare asserts",
+        "content": "Write tests as plain functions with bare asserts in tests/test_svc_{seed}.py, because the suite should be readable without pytest knowledge; no classes, fixtures or parametrize unless a test genuinely needs them. Name each test test_<function>_<case>."
       },
       {
-        "content": "Timestamps in app/svc_{seed}_core.py are integer Unix epoch milliseconds under the key 'at_ms', never datetime objects or ISO strings.",
+        "subtype": "constraint",
+        "source_files": [],
+        "content": "Never read configuration at import time in the service modules; read os.environ inside the function that needs it, because the test runner and the worker set environment variables after import and import-time reads froze stale values (this bit us twice with the region setting). Secrets never go in code or in default values. Tests that need a setting use monkeypatch.setenv inside the test, which only works because nothing reads the variable at import. Defaults for non-secret settings live next to the read, as the second argument to os.environ.get."
+      },
+      {
         "subtype": "pattern",
         "source_files": [
           "app/svc_{seed}_core.py"
+        ],
+        "title": "Serialise compared or hashed payloads with sorted-key json.dumps",
+        "content": "Serialise payloads with json.dumps(obj, sort_keys=True, separators=(',', ':')) whenever the record service writes something that is compared or hashed later, because key order changed between runs and broke the dedup hash in the export job. Plain json.dumps is fine for debug output. Don't hand-build JSON strings with f-strings; escaping bugs with ids containing quotes were the reason this came up. The export job hashes the serialised payload to skip unchanged rows; when two workers produced different key orders for the same record, every row looked changed and the nightly export re-sent the whole table (#52)."
+      },
+      {
+        "subtype": "pattern",
+        "source_files": [
+          "app/svc_{seed}_core.py"
+        ],
+        "variants": [
+          {
+            "style": "terse",
+            "title": "Use epoch-millisecond 'at_ms' timestamps",
+            "content": "Store timestamps as integer epoch milliseconds under 'at_ms', never datetime objects or ISO strings, because the dashboard client is JavaScript."
+          },
+          {
+            "style": "narrative",
+            "title": "Represent times as integer epoch milliseconds under 'at_ms'",
+            "content": "Represent times in app/svc_{seed}_core.py payloads as integer Unix epoch milliseconds under the key 'at_ms', because the dashboard and the export job disagreed about time zones. Until #71 the module mixed datetime objects (which json.dumps can't serialise, so callers stringified them inconsistently) and ISO-8601 strings, some with offsets and some naive. A daylight-saving change shifted a day of audit data by an hour and nobody could tell which rows were affected. We chose milliseconds over seconds because the JS client uses Date.now() natively, and an int over a float so equality checks in tests are exact. The field is always 'at_ms', not 'timestamp', 'ts' or 'created_at', so the client finds it without per-endpoint mapping. Existing ISO-string endpoints were left alone for now because two external consumers parse them; anything new uses 'at_ms'. Follow-up to migrate the old endpoints is tracked in #74."
+          },
+          {
+            "style": "plan",
+            "title": "Standardise time representation across the record service",
+            "content": "Standardise time representation across the record service, because mixed formats corrupted an audit export. Plan: (1) Wire format - every timestamp the module returns is an int of Unix epoch milliseconds. (2) Key - the field is named 'at_ms' wherever a single event time is recorded, such as audit entries and change events. (3) Not allowed - datetime objects, ISO-8601 strings and float seconds. (4) Source - read the clock with time.time() or time.time_ns() at the moment the entry is built; never capture it at import. (5) Display formatting is the client's job. (6) Migration - existing endpoints that return ISO strings stay until their consumers move; new functions use 'at_ms' from day one. Discussed: RFC 3339 strings for readability (rejected: parsing cost and zone ambiguity in the JS client) and seconds (rejected: the client wants milliseconds). Testing note: compare 'at_ms' against time.time() * 1000 with a tolerance rather than freezing the clock, since the module has no clock injection and adding one was judged not worth it. Sign-off from the dashboard owner and the export-job owner on 2026-08-19."
+          }
         ]
       },
       {
-        "content": "Invalid input in app/svc_{seed}_core.py raises RecordInputError, a ValueError subclass defined in that module; never return None or an error dict.",
+        "subtype": "constraint",
+        "source_files": [],
+        "title": "Ask before adding third-party dependencies",
+        "content": "Do not add third-party dependencies to the record service without asking first; prefer the standard library (functools, json, time, datetime), because every new package needs a licence and security review that takes weeks."
+      },
+      {
+        "subtype": "pattern",
+        "source_files": [],
+        "title": "Annotate public signatures with built-in generics and return plain dicts",
+        "content": "Type-annotate every public function signature in app/svc_{seed}_core.py with built-in generics (list[int], dict) rather than typing.List or typing.Dict, because the codebase targets Python 3.12 and mypy runs in strict mode on app/. Return plain dicts, not TypedDict or dataclasses, so the JSON layer can serialise results without adapters."
+      },
+      {
         "subtype": "architecture",
         "source_files": [
           "app/svc_{seed}_core.py"
+        ],
+        "variants": [
+          {
+            "style": "terse",
+            "title": "Raise RecordInputError for ids below 1",
+            "content": "Single-record fetches raise RecordInputError, a ValueError subclass that lives in the service module (add it if it isn't there yet), for an id below 1. Don't return None or an error dict, because callers catch the exception type."
+          },
+          {
+            "style": "narrative",
+            "title": "Signal bad input from single-record fetchers with RecordInputError",
+            "content": "Signal bad input from single-record fetchers with a dedicated RecordInputError, a ValueError subclass that belongs in app/svc_{seed}_core.py, because callers need to tell invalid ids apart from other failures. Review of #66 found three conventions in use: some fetchers returned None for id 0, one returned {'error': 'bad id'}, and one raised a bare ValueError. The None case was silently cached downstream as 'record not found'. Agreed outcome: ids below 1 raise RecordInputError, and subclassing ValueError keeps existing except ValueError handlers working. Batch helpers are the exception and report bad ids in their 'failed' list instead. The class hadn't been added when the review closed; the first change that needs it should define it at module level. Message text: include the id in the exception so the caller can report it, but keep it out of logs per the logging rule. Tests should assert the exception type, not the message, so wording can change freely."
+          },
+          {
+            "style": "plan",
+            "title": "Define one exception type for invalid input to record fetchers",
+            "content": "Define one exception type for invalid input to the record fetchers, because mixed None, error-dict and ValueError returns were leaking into caches. Plan: (1) Add class RecordInputError(ValueError) at module level in app/svc_{seed}_core.py. (2) Single-record functions (fetch_record_{seed}_N and similar) raise it for any id below 1, before doing any work. (3) Never return None or an error dict to signal bad input. (4) Batch functions don't raise; they follow the partial-result contract. (5) The offending id may appear in the exception message but never in logs; the logging rule still applies. (6) Tests cover id 0 and a negative id. Alternatives: returning Optional (rejected: ambiguous with not-found) and a Result type (rejected: unidiomatic in this codebase). (7) Rollout - the first fetcher to validate its input introduces the class; the rest adopt it as they are touched, rather than in one sweeping change, to keep diffs reviewable. (8) Callers that currently check for None after a fetch keep working until their fetcher is migrated, then switch to catching RecordInputError."
+          }
         ]
+      },
+      {
+        "subtype": "architecture",
+        "source_files": [
+          "app/svc_{seed}_core.py"
+        ],
+        "content": "Don't put retry loops inside the fetch functions in app/svc_{seed}_core.py; retries belong to the client layer, because nested retries in #55 turned one slow dependency into a nine-fold request storm. A fetch either returns or raises on its first attempt. During that incident the client retried three times, the gateway retried three times, and a fetcher wrapped its own call in a three-attempt loop, so one slow upstream received nine requests per user action and fell over completely. The post-incident review assigned retry ownership to the client, which also owns the backoff policy."
+      },
+      {
+        "subtype": "constraint",
+        "source_files": [
+          "tests/"
+        ],
+        "title": "Test every new public function before finishing",
+        "content": "Every new public function in app/ needs at least one test before the change is finished, and run uv run pytest tests/ -q before reporting done, because CI blocks merges on missing tests for new symbols."
+      },
+      {
+        "subtype": "convention",
+        "source_files": [],
+        "title": "Name hand-written functions verb_noun without the slot suffix",
+        "content": "Name new hand-written public functions verb_noun (for example build_report or list_slots) and keep the service-number suffix only on the generated per-slot fetchers, because the slot registry parses the generated names and hand-written names must not collide with that pattern."
+      },
+      {
+        "subtype": "architecture",
+        "source_files": [
+          "app/"
+        ],
+        "title": "Treat app/ as one synchronous record service with generated per-slot fetchers",
+        "content": "Treat app/ as one small synchronous record service with generated per-slot fetchers, because every convention in this repo assumes that structure. How it fits together, as worked out while answering a question about where new code should go: each app/svc_<n>_core.py module belongs to one numbered service and is generated from a template, which is why it holds a run of near-identical fetch_record_<n>_<slot> functions that each return a small record dict with an id and a slot. The slot number is positional and other systems depend on it, so generated functions are never renamed or renumbered. Hand-written code is added to the same module below the generated block; there is no separate package for helpers, and adding one was rejected as a layer with a single user. The module imports json and os but uses neither in the generated block; they are there for hand-written additions (serialisation for the export job, environment lookups). There is no web framework in this repository: the HTTP layer lives in the gateway, which calls these functions in-process, and the tests call them directly. Tests live in tests/test_svc_<n>.py, one file per service, as plain functions; the generated tests are placeholders that only prove the test runner works, so any real behaviour needs its own test. The service is deliberately synchronous (see the async decision) and keeps no state beyond bounded caches and the module-level metrics counters. Data flows one way: gateway calls a fetcher, the fetcher builds a dict, the gateway serialises it. Nothing in app/ talks to a database directly yet; the record dicts are synthetic until the storage migration (#80) lands, which is why fetchers are trivial today. When adding a feature, the questions to ask are which service module owns it, whether it changes the record shape (it should not), and whether it needs a test in that service's test file (it does). Anything cross-service belongs in the gateway, not here. This summary was written on 2026-09-02 and anchored to app/ so it is flagged as stale if the layout changes."
+      },
+      {
+        "subtype": "architecture",
+        "source_files": [],
+        "title": "Expose counters through the existing /metrics endpoint",
+        "content": "Expose counters through the existing /metrics endpoint rather than adding a metrics library, because the platform team scrapes only that endpoint. Counters live in a module-level dict keyed by metric name and reset only on process start. This was chosen over prometheus_client in #60, since that would have been a new dependency and a second exposition format to maintain. Cache hit ratios are read from cache_info() on the cached functions, so keep those functions at module level where the endpoint can find them. Naming: snake_case counter names prefixed with the service, for example svc_records_fetched_total; the endpoint renders them in the Prometheus text format by hand, which has been enough so far. Don't add gauges for things the platform already measures (CPU, memory)."
       }
     ],
-    "needed_decision": 4
+    "needed_decision": 10
   },
   {
     "id": "retr-errors",
@@ -175,48 +634,201 @@
     "seed_decision": "",
     "seed_decisions": [
       {
-        "content": "Never log record ids or function arguments in app/svc_{seed}_core.py; compliance forbids request data in logs.",
+        "subtype": "convention",
+        "source_files": [
+          "pyproject.toml"
+        ],
+        "title": "Manage dependencies and commands with uv",
+        "content": "Use uv for every dependency and script command in this repo (uv sync, uv run pytest), never pip or a bare python, because uv.lock is the source of truth and pip installs drift from it. CI runs uv sync --frozen and fails if the lock is stale."
+      },
+      {
         "subtype": "constraint",
         "source_files": [
           "app/svc_{seed}_core.py"
+        ],
+        "title": "Never log record ids or function arguments",
+        "content": "Never log record ids or function arguments in app/svc_{seed}_core.py, because compliance classifies request data as customer data and the log pipeline isn't approved for it (audit finding, June 2026). That includes debug logs and messages passed to logger.exception; log counts and durations instead. If an error needs an id to be debuggable, put it in the exception for the caller to handle, not in a log line. The audit sampled two weeks of logs and found ids in debug output from three modules; this one was cleaned up first. Applies to print() as well, since stdout is shipped to the same pipeline."
+      },
+      {
+        "subtype": "architecture",
+        "source_files": [
+          "app/svc_{seed}_core.py"
+        ],
+        "title": "Keep the record dict shape stable for per-slot fetchers",
+        "content": "Keep the record dict shape {'id': ..., 'slot': ...} stable for every fetch_record_{seed}_N function, because the export job and two dashboards index into it by key and break on extra or renamed fields. In #49 someone added a 'source' field to three fetchers, and the export job's strict schema check rejected every row for a day before anyone noticed. If a caller needs more data, add a separate function that returns a new shape rather than widening the record. Slot numbers are positional and stable: fetch_record_{seed}_7 always returns slot 7, so never renumber functions when one is removed; leave a gap instead. The export job's schema lives in another repository and is versioned separately, so even an additive field needs a coordinated release there first; that coordination cost is why new data goes into new functions. The incident write-up is linked from #49; the follow-up added a schema-contract test on the export side, not here."
+      },
+      {
+        "subtype": "architecture",
+        "source_files": [
+          "app/svc_{seed}_core.py"
+        ],
+        "variants": [
+          {
+            "style": "terse",
+            "title": "Return partial results from batch record lookups",
+            "content": "Batch record lookups return partial results: the good records under 'items' and the rejected ids (anything below 1) under 'failed'. Don't raise on a bad id mid-batch, because the caller retries only the failures."
+          },
+          {
+            "style": "narrative",
+            "title": "Return partial results from batch lookups instead of failing the whole call",
+            "content": "Return partial results from batch lookups in app/svc_{seed}_core.py instead of failing the whole call, because the reporting client retries only the ids that failed. This came out of #58: the first batch helper looped over fetch_record_{seed}_0 and raised on the first id below 1, so a nightly export of 4,000 ids died on one bad row and the client re-sent all 4,000. We considered returning None per slot but rejected it, since None was ambiguous between 'not found' and 'invalid'. The shape agreed with the client team was a dict with two keys: 'items', holding the record dicts in the usual {'id', 'slot'} shape, and 'failed', holding the ids that were rejected. Invalid means an id below 1; those are reported, not raised, and the loop carries on. Anything that wraps several record fetches should follow the same shape so the client only needs one parser. The client's retry job reads 'failed' verbatim and re-queues those ids after the upstream fix, so the ids must come back exactly as passed in, not normalised or stringified. Raised in standup on 2026-08-04, agreed with the client team the same week."
+          },
+          {
+            "style": "plan",
+            "title": "Adopt a partial-result contract for multi-record reads",
+            "content": "Adopt a partial-result contract for multi-record reads in the record service, because callers need to retry failures without redoing successful reads. Plan approved 2026-08-12 for the batch work: (1) Scope - any function in app/svc_{seed}_core.py that reads more than one record per call; the single-record fetch_record_{seed}_N functions are unchanged. (2) Return type - a dict, never a bare list or generator, so the contract can grow later without breaking callers. It carries 'items' (the records that were read, each in the existing record shape) and 'failed' (the ids that could not be read). (3) Validation - an id below 1 is rejected up front and appended to 'failed'; it must not raise and must not stop the remaining ids from being read. (4) Ordering - 'items' follows the order of the input ids. (5) Out of scope - pagination, async fan-out and per-id error messages were discussed and deferred to a follow-up issue. (6) Tests - each batch function gets a test that mixes valid and invalid ids, and one where every id is invalid, which must return an empty 'items' rather than raising. (7) Logging - the existing rule applies: report how many ids failed, never which ones. (8) Documentation - the docstring states the partial-result behaviour in one line so callers don't have to read the body. Owner: the record-service maintainers; the client team signs off on any change to the two key names, since they are part of the wire contract."
+          }
         ]
       },
       {
-        "content": "Public functions in app/svc_{seed}_core.py keep a one-line docstring that names the service number.",
+        "subtype": "architecture",
+        "source_files": [],
+        "title": "Keep the record service synchronous and single-process",
+        "content": "Keep the record service synchronous and single-process, because the async rewrite attempted in #41 doubled latency variance without improving throughput. The rewrite moved the fetchers to asyncio with an aiohttp client and an async test runner. What we found: (1) the fetchers do no network I/O of their own, so the event loop only added scheduling overhead; (2) the test suite needed pytest-asyncio and every helper grew an async twin, roughly doubling the code to review; (3) tracing got harder because stack traces lost the caller. It was reverted after two weeks. If more concurrency is needed later, run more worker processes behind the queue instead of adding threads or async inside the module. Revisit only if a fetcher starts doing real network I/O. Numbers from the trial, for the record: p50 latency was unchanged, p99 roughly doubled under the soak test because of event-loop starvation when one handler did CPU work, and throughput was flat because the bottleneck was the queue consumer, not the fetchers. (4) Two contributors spent most of the trial chasing a deadlock that came from mixing sync and async calls in one request path. The rewrite branch is kept for reference but should not be revived without a new benchmark showing I/O-bound fetchers. Agreed by the service owners on 2026-05-28."
+      },
+      {
         "subtype": "convention",
         "source_files": [
           "app/svc_{seed}_core.py"
-        ]
+        ],
+        "content": "Public functions in app/svc_{seed}_core.py keep a one-line docstring that names the service number."
       },
       {
-        "content": "Batch lookups in app/svc_{seed}_core.py return a dict with 'items' and 'failed' keys; an id below 1 goes into 'failed' and never aborts the batch.",
         "subtype": "architecture",
         "source_files": [
           "app/svc_{seed}_core.py"
+        ],
+        "variants": [
+          {
+            "style": "terse",
+            "title": "Bound every cache at 256 entries",
+            "content": "Use functools.lru_cache(maxsize=256) for any memoisation in the record service, never an unbounded cache, because the worker runs on a fixed memory budget."
+          },
+          {
+            "style": "narrative",
+            "title": "Cap caches with lru_cache(maxsize=256) after the OOM incident",
+            "content": "Cap caches in app/svc_{seed}_core.py with functools.lru_cache(maxsize=256), because an unbounded cache took the worker down. In August a dict-based cache was added around the record fetchers to speed up the dashboard; it never evicted, grew to several hundred MB over a week, and the container was OOM-killed (#63). functools.cache and lru_cache(maxsize=None) have the same problem, so both were ruled out in review. 256 entries covered the dashboard's hot set, judging by the access logs at the time. If a function needs caching, wrap it with lru_cache(maxsize=256) directly so cache_info() stays available to the metrics endpoint. A per-call dict passed in by the caller is fine for request-scoped reuse; the rule is about anything that outlives a call. Raised again in review of #67, where a contributor reached for functools.cache because it is shorter; the reviewer pointed back here."
+          },
+          {
+            "style": "plan",
+            "title": "Introduce bounded memoisation for record reads",
+            "content": "Introduce bounded memoisation for record reads, because repeated reads of the same ids dominate dashboard latency. Plan: (1) Mechanism - functools.lru_cache from the standard library; no third-party cache and no hand-rolled dict, since eviction is the part that is easy to get wrong. (2) Size - maxsize=256 for every cache in app/svc_{seed}_core.py; an unbounded size (maxsize=None, functools.cache) is not allowed. (3) Observability - keep the cache object reachable at module level so cache_info() can be scraped; don't hide it inside a closure. (4) Invalidation - records are immutable for a given id, so no TTL is needed now; revisit if records become writable. (5) Rollout - start with the hottest fetchers, measure, then extend. Alternatives considered: a Redis cache (rejected: new infrastructure for a single process) and cachetools.TTLCache (rejected: a new dependency for no current need). Risks noted at sign-off: memoising a function that returns a mutable dict lets one caller's mutation leak to the next, so callers must treat cached records as read-only; and a cache on a function that raises caches nothing, which is the behaviour we want for invalid ids. The 256 figure is per cache, not shared across the module."
+          }
         ]
       },
       {
-        "content": "Caches in app/svc_{seed}_core.py use functools.lru_cache(maxsize=256); never an unbounded dict, functools.cache or maxsize=None.",
-        "subtype": "architecture",
-        "source_files": [
-          "app/svc_{seed}_core.py"
-        ]
+        "subtype": "convention",
+        "source_files": [],
+        "title": "Write tests as plain functions with bare asserts",
+        "content": "Write tests as plain functions with bare asserts in tests/test_svc_{seed}.py, because the suite should be readable without pytest knowledge; no classes, fixtures or parametrize unless a test genuinely needs them. Name each test test_<function>_<case>."
       },
       {
-        "content": "Timestamps in app/svc_{seed}_core.py are integer Unix epoch milliseconds under the key 'at_ms', never datetime objects or ISO strings.",
+        "subtype": "constraint",
+        "source_files": [],
+        "content": "Never read configuration at import time in the service modules; read os.environ inside the function that needs it, because the test runner and the worker set environment variables after import and import-time reads froze stale values (this bit us twice with the region setting). Secrets never go in code or in default values. Tests that need a setting use monkeypatch.setenv inside the test, which only works because nothing reads the variable at import. Defaults for non-secret settings live next to the read, as the second argument to os.environ.get."
+      },
+      {
         "subtype": "pattern",
         "source_files": [
           "app/svc_{seed}_core.py"
+        ],
+        "title": "Serialise compared or hashed payloads with sorted-key json.dumps",
+        "content": "Serialise payloads with json.dumps(obj, sort_keys=True, separators=(',', ':')) whenever the record service writes something that is compared or hashed later, because key order changed between runs and broke the dedup hash in the export job. Plain json.dumps is fine for debug output. Don't hand-build JSON strings with f-strings; escaping bugs with ids containing quotes were the reason this came up. The export job hashes the serialised payload to skip unchanged rows; when two workers produced different key orders for the same record, every row looked changed and the nightly export re-sent the whole table (#52)."
+      },
+      {
+        "subtype": "pattern",
+        "source_files": [
+          "app/svc_{seed}_core.py"
+        ],
+        "variants": [
+          {
+            "style": "terse",
+            "title": "Use epoch-millisecond 'at_ms' timestamps",
+            "content": "Store timestamps as integer epoch milliseconds under 'at_ms', never datetime objects or ISO strings, because the dashboard client is JavaScript."
+          },
+          {
+            "style": "narrative",
+            "title": "Represent times as integer epoch milliseconds under 'at_ms'",
+            "content": "Represent times in app/svc_{seed}_core.py payloads as integer Unix epoch milliseconds under the key 'at_ms', because the dashboard and the export job disagreed about time zones. Until #71 the module mixed datetime objects (which json.dumps can't serialise, so callers stringified them inconsistently) and ISO-8601 strings, some with offsets and some naive. A daylight-saving change shifted a day of audit data by an hour and nobody could tell which rows were affected. We chose milliseconds over seconds because the JS client uses Date.now() natively, and an int over a float so equality checks in tests are exact. The field is always 'at_ms', not 'timestamp', 'ts' or 'created_at', so the client finds it without per-endpoint mapping. Existing ISO-string endpoints were left alone for now because two external consumers parse them; anything new uses 'at_ms'. Follow-up to migrate the old endpoints is tracked in #74."
+          },
+          {
+            "style": "plan",
+            "title": "Standardise time representation across the record service",
+            "content": "Standardise time representation across the record service, because mixed formats corrupted an audit export. Plan: (1) Wire format - every timestamp the module returns is an int of Unix epoch milliseconds. (2) Key - the field is named 'at_ms' wherever a single event time is recorded, such as audit entries and change events. (3) Not allowed - datetime objects, ISO-8601 strings and float seconds. (4) Source - read the clock with time.time() or time.time_ns() at the moment the entry is built; never capture it at import. (5) Display formatting is the client's job. (6) Migration - existing endpoints that return ISO strings stay until their consumers move; new functions use 'at_ms' from day one. Discussed: RFC 3339 strings for readability (rejected: parsing cost and zone ambiguity in the JS client) and seconds (rejected: the client wants milliseconds). Testing note: compare 'at_ms' against time.time() * 1000 with a tolerance rather than freezing the clock, since the module has no clock injection and adding one was judged not worth it. Sign-off from the dashboard owner and the export-job owner on 2026-08-19."
+          }
         ]
       },
       {
-        "content": "Invalid input in app/svc_{seed}_core.py raises RecordInputError, a ValueError subclass defined in that module; never return None or an error dict.",
+        "subtype": "constraint",
+        "source_files": [],
+        "title": "Ask before adding third-party dependencies",
+        "content": "Do not add third-party dependencies to the record service without asking first; prefer the standard library (functools, json, time, datetime), because every new package needs a licence and security review that takes weeks."
+      },
+      {
+        "subtype": "pattern",
+        "source_files": [],
+        "title": "Annotate public signatures with built-in generics and return plain dicts",
+        "content": "Type-annotate every public function signature in app/svc_{seed}_core.py with built-in generics (list[int], dict) rather than typing.List or typing.Dict, because the codebase targets Python 3.12 and mypy runs in strict mode on app/. Return plain dicts, not TypedDict or dataclasses, so the JSON layer can serialise results without adapters."
+      },
+      {
         "subtype": "architecture",
         "source_files": [
           "app/svc_{seed}_core.py"
+        ],
+        "variants": [
+          {
+            "style": "terse",
+            "title": "Raise RecordInputError for ids below 1",
+            "content": "Single-record fetches raise RecordInputError, a ValueError subclass that lives in the service module (add it if it isn't there yet), for an id below 1. Don't return None or an error dict, because callers catch the exception type."
+          },
+          {
+            "style": "narrative",
+            "title": "Signal bad input from single-record fetchers with RecordInputError",
+            "content": "Signal bad input from single-record fetchers with a dedicated RecordInputError, a ValueError subclass that belongs in app/svc_{seed}_core.py, because callers need to tell invalid ids apart from other failures. Review of #66 found three conventions in use: some fetchers returned None for id 0, one returned {'error': 'bad id'}, and one raised a bare ValueError. The None case was silently cached downstream as 'record not found'. Agreed outcome: ids below 1 raise RecordInputError, and subclassing ValueError keeps existing except ValueError handlers working. Batch helpers are the exception and report bad ids in their 'failed' list instead. The class hadn't been added when the review closed; the first change that needs it should define it at module level. Message text: include the id in the exception so the caller can report it, but keep it out of logs per the logging rule. Tests should assert the exception type, not the message, so wording can change freely."
+          },
+          {
+            "style": "plan",
+            "title": "Define one exception type for invalid input to record fetchers",
+            "content": "Define one exception type for invalid input to the record fetchers, because mixed None, error-dict and ValueError returns were leaking into caches. Plan: (1) Add class RecordInputError(ValueError) at module level in app/svc_{seed}_core.py. (2) Single-record functions (fetch_record_{seed}_N and similar) raise it for any id below 1, before doing any work. (3) Never return None or an error dict to signal bad input. (4) Batch functions don't raise; they follow the partial-result contract. (5) The offending id may appear in the exception message but never in logs; the logging rule still applies. (6) Tests cover id 0 and a negative id. Alternatives: returning Optional (rejected: ambiguous with not-found) and a Result type (rejected: unidiomatic in this codebase). (7) Rollout - the first fetcher to validate its input introduces the class; the rest adopt it as they are touched, rather than in one sweeping change, to keep diffs reviewable. (8) Callers that currently check for None after a fetch keep working until their fetcher is migrated, then switch to catching RecordInputError."
+          }
         ]
+      },
+      {
+        "subtype": "architecture",
+        "source_files": [
+          "app/svc_{seed}_core.py"
+        ],
+        "content": "Don't put retry loops inside the fetch functions in app/svc_{seed}_core.py; retries belong to the client layer, because nested retries in #55 turned one slow dependency into a nine-fold request storm. A fetch either returns or raises on its first attempt. During that incident the client retried three times, the gateway retried three times, and a fetcher wrapped its own call in a three-attempt loop, so one slow upstream received nine requests per user action and fell over completely. The post-incident review assigned retry ownership to the client, which also owns the backoff policy."
+      },
+      {
+        "subtype": "constraint",
+        "source_files": [
+          "tests/"
+        ],
+        "title": "Test every new public function before finishing",
+        "content": "Every new public function in app/ needs at least one test before the change is finished, and run uv run pytest tests/ -q before reporting done, because CI blocks merges on missing tests for new symbols."
+      },
+      {
+        "subtype": "convention",
+        "source_files": [],
+        "title": "Name hand-written functions verb_noun without the slot suffix",
+        "content": "Name new hand-written public functions verb_noun (for example build_report or list_slots) and keep the service-number suffix only on the generated per-slot fetchers, because the slot registry parses the generated names and hand-written names must not collide with that pattern."
+      },
+      {
+        "subtype": "architecture",
+        "source_files": [
+          "app/"
+        ],
+        "title": "Treat app/ as one synchronous record service with generated per-slot fetchers",
+        "content": "Treat app/ as one small synchronous record service with generated per-slot fetchers, because every convention in this repo assumes that structure. How it fits together, as worked out while answering a question about where new code should go: each app/svc_<n>_core.py module belongs to one numbered service and is generated from a template, which is why it holds a run of near-identical fetch_record_<n>_<slot> functions that each return a small record dict with an id and a slot. The slot number is positional and other systems depend on it, so generated functions are never renamed or renumbered. Hand-written code is added to the same module below the generated block; there is no separate package for helpers, and adding one was rejected as a layer with a single user. The module imports json and os but uses neither in the generated block; they are there for hand-written additions (serialisation for the export job, environment lookups). There is no web framework in this repository: the HTTP layer lives in the gateway, which calls these functions in-process, and the tests call them directly. Tests live in tests/test_svc_<n>.py, one file per service, as plain functions; the generated tests are placeholders that only prove the test runner works, so any real behaviour needs its own test. The service is deliberately synchronous (see the async decision) and keeps no state beyond bounded caches and the module-level metrics counters. Data flows one way: gateway calls a fetcher, the fetcher builds a dict, the gateway serialises it. Nothing in app/ talks to a database directly yet; the record dicts are synthetic until the storage migration (#80) lands, which is why fetchers are trivial today. When adding a feature, the questions to ask are which service module owns it, whether it changes the record shape (it should not), and whether it needs a test in that service's test file (it does). Anything cross-service belongs in the gateway, not here. This summary was written on 2026-09-02 and anchored to app/ so it is flagged as stale if the layout changes."
+      },
+      {
+        "subtype": "architecture",
+        "source_files": [],
+        "title": "Expose counters through the existing /metrics endpoint",
+        "content": "Expose counters through the existing /metrics endpoint rather than adding a metrics library, because the platform team scrapes only that endpoint. Counters live in a module-level dict keyed by metric name and reset only on process start. This was chosen over prometheus_client in #60, since that would have been a new dependency and a second exposition format to maintain. Cache hit ratios are read from cache_info() on the cached functions, so keep those functions at module level where the endpoint can find them. Naming: snake_case counter names prefixed with the service, for example svc_records_fetched_total; the endpoint renders them in the Prometheus text format by hand, which has been enough so far. Don't add gauges for things the platform already measures (CPU, memory)."
       }
     ],
-    "needed_decision": 5
+    "needed_decision": 13
   }
 ]

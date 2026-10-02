@@ -17,19 +17,46 @@ fresh, explicit approval for that run. Steps 1-3 are free and must pass first.
 
 ## What is measured
 
-**Task set.** Four tasks share one store of six human-approved decisions, all anchored to
-the fixture's only module, `app/svc_{seed}_core.py`. That is twice the three full-content
-slots the prompt hook fills. Each task needs a different decision (`needed_decision`, an
-index into `seed_decisions`):
+**Task set.** Four tasks share one store of 19 decisions modelled on a real project store,
+not written to make a check pass: their lengths (a short rule up to a multi-paragraph
+codebase summary), wording, mix of anchored and unanchored decisions, and mix of approved
+and capture-time "suggested" decisions follow the spread of a real store. Twelve are anchored
+to files, most to the fixture's only module, `app/svc_{seed}_core.py`, which is far more
+than the three full-content slots the prompt hook fills. Each task needs a different
+decision (`needed_decision`, an index into `seed_decisions`):
 
 | Task | Needs | Check passes only if |
 | --- | --- | --- |
-| `retr-batch` | batch results as `{'items', 'failed'}` | `fetch_records_batch([1, 0, -3, 2])` puts exactly `0` and `-3` in `failed`, and `items` holds record dicts with ids `1` and `2` |
+| `retr-batch` | batch results as `{'items', 'failed'}` | `fetch_records_batch([1, 0, -3, 2])` puts exactly `0` and `-3` in `failed`, and `items` holds record dicts with ids `1` and `2` (as a list, or a dict keyed by id) |
 | `retr-cache` | `lru_cache(maxsize=256)` | every cache in the module reports `maxsize == 256`, and repeating `fetch_record_{seed}_0(5)` hits one |
 | `retr-audit` | epoch-millisecond `at_ms` | `record_audit_entry(...)['at_ms']` is a current int in ms |
 | `retr-errors` | `RecordInputError(ValueError)` | id `0` raises `RecordInputError`; id `1` still returns |
 
-The store also holds a constraint (preloaded in full at session start) and a convention, so
+**Every agent writes decisions differently.** Each needed decision exists in three author
+styles: `terse` (a one-sentence rule, as a developer dictates it), `narrative` (an AI capture
+with incident history, issue numbers and a because-clause) and `plan` (a numbered plan where
+the rule is one point among several). Rep `r` shows each decision in style
+`(r + position) % 3`, so one store always mixes styles while each needed decision appears in
+every style once per three reps; each row records the needed decision's `needed_style`.
+
+**Was the decision actually delivered?** Success says the code matched the decision, not that
+the agent saw it. On the Contexer arms each row also records, from the session transcript,
+`needed_delivery` (`full` when the decision's whole text reached the agent through a hook or a
+tool result, `named` when only its id did, `none` otherwise; the agent's own messages never
+count) and `contexer_lookups` (the agent's calls to Contexer's `get_context` tools). The
+`claudemd` arm's file sits in the system prompt, which the transcript doesn't record, so those
+fields are absent there rather than a false `none`. `rationale` carries no signal on these
+tasks: they have no gold facts, so it is always 1.0. Use
+rep counts in multiples of three. The check for a task only tests what every style of its
+decision states.
+
+**Seeding is the agent path.** Decisions are stored with `update_context` as the AI author
+(title, anchors, capture-quality gate and novelty filter all applied); the ones the store
+queues for review are then approved one by one, and the ones it makes active on capture stay
+"suggested". A decision the measured version refuses fails setup loudly with the store's own
+message (`benchmarks/seeding.py`).
+
+The store also holds constraints (preloaded in full at session start) and conventions, so
 it exercises both retrieval fixes: ranking anchored decisions (#341) and not re-delivering
 startup rules (#342). Needed decisions are never constraints, so they must be retrieved, not
 preloaded. `tests/test_bench_retrieval_kit.py` proves every check fails on the untouched
@@ -40,7 +67,7 @@ fixture and on a plausible decision-ignorant implementation, and passes on a com
 | Condition | What the agent gets |
 | --- | --- |
 | `without` | nothing |
-| `claudemd` | all six decisions in `CLAUDE.md` (the honest static competitor) |
+| `claudemd` | the same decisions, same styles and titles, in `CLAUDE.md` (the honest static competitor) |
 | `with_prev` | Contexer at the previous version, via `--contexer-sources` |
 | `with` | Contexer from this checkout |
 
@@ -59,22 +86,23 @@ uv run --frozen python benchmarks/replay_delivery.py tasks
 uv run --frozen --project ../contexer-prev python benchmarks/replay_delivery.py tasks
 ```
 
-It seeds each task exactly as the `with` arm does (bootstrap, then the six decisions, via
-the shared `benchmarks/seeding.py`), runs SessionStart and the prompt hook, and reports
-whether the needed decision arrived in full, only named in a pointer, or not at all. "In
-full" means the decision's title and body (as that version's own `title_and_body` splits
-them) both appear. Recorded on 2026-10-01 at seed 0:
+It seeds each task exactly as the `with` arm does (bootstrap, then the decisions, via the
+shared `benchmarks/seeding.py`), once per author style, runs SessionStart and the prompt
+hook, and reports whether the needed decision arrived in full, only named in a pointer, or
+not at all. "In full" means the decision's title and body (as that version's own
+`title_and_body` splits them) both appear. Recorded on 2026-10-02 at seed 0 (12 = 4 tasks x
+3 styles):
 
 | Contexer | Needed decision in full | Named only | Missing | Startup rules re-sent |
 | --- | --- | --- | --- | --- |
-| this checkout (#350, #353) | 3/4 | 1 (`retr-cache`) | 0 | 0 |
-| `72b73f3` (#347) | 3/4 | 1 (`retr-cache`) | 0 | 2 (the convention) |
-| `1d8701b` (before) | 1/4 | 0 | 3 | 8 (constraint and convention, every task) |
+| this checkout (#350, #353) | 9/12 (terse 1/4, narrative 4/4, plan 4/4) | 3 (all terse) | 0 | 0 |
+| `1d8701b` (before) | 3/12 (1/4 in each style) | 0 | 9 | 12 |
 
-One known gap shows here, kept on purpose so the live run measures it: `retr-cache` is only
-named, because the ranker has no stemmer, so "caching" shares no token with
-"Caches"/"lru_cache" (#351). The live run shows whether the pointer is enough. The startup
-re-send (#350) is fixed in this checkout.
+The gap the realistic store exposes: a needed decision written as one short rule loses its
+full slot to longer decisions and is only named, while the long narrative and plan versions
+arrive in full. The live run shows whether the pointer is enough. (On the earlier
+six-short-decision store the same checkout delivered 3/4 in full, with only `retr-cache`
+named, #351.)
 
 A seed the measured version refuses to store is reported as `not_stored` and counted as
 missing; the live `with` arm fails setup on it rather than running without the decision.
@@ -101,7 +129,7 @@ All must pass before any spend.
 
 Before the first paid run, write down and keep with the artifacts:
 
-- the model (`claude-sonnet-5` unless decided otherwise), seed, and `with_prev` commit;
+- the model (`claude-sonnet-5-5` unless decided otherwise), seed, and `with_prev` commit;
 - the rep count for step 5, fixed now (see below), never raised after seeing results;
 - the headline: pooled success, `with` vs `with_prev`, then `with` vs `without` and `with`
   vs `claudemd`. Per-task cells are diagnostic.
@@ -112,16 +140,17 @@ compare it between the smoke and the full campaign.
 
 ## Step 4: smoke (paid)
 
-2 reps x 4 tasks x 4 conditions = 32 sessions. Estimate the per-session cost from the
-medians in your own `benchmarks/artifacts/*/runs.jsonl`; the last memory-campaign recompute
-was $0.04-$0.12 per session, and these editing tasks run tests, so expect the upper end or
-above: roughly $2-$6. Recompute before quoting.
+3 reps (one per author style) x 4 tasks x 4 conditions = 48 sessions. Estimate the
+per-session cost from the medians in your own `benchmarks/artifacts/*/runs.jsonl`; the
+2026-10-02 smoke on this store cost $3.13 for 48 `claude-sonnet-5-5` sessions (about $0.07 each;
+one `claude-sonnet-5` session cost $0.29). Recompute for the model you use from a single
+session first (`--tasks retr-batch --conditions with --reps 1`), which also proves setup.
 
 ```bash
 uv run python -m benchmarks.run --tasks-file benchmarks/retrieval_tasks.json \
   --conditions without,claudemd,with_prev,with \
   --contexer-sources with_prev=../contexer-prev \
-  --model claude-sonnet-5 --reps 2 --out benchmarks/artifacts/retrieval-smoke
+  --model claude-sonnet-5-5 --reps 3 --out benchmarks/artifacts/retrieval-smoke
 uv run python -m benchmarks.validate benchmarks/artifacts/retrieval-smoke
 uv run python -m benchmarks.report benchmarks/artifacts/retrieval-smoke/runs.jsonl
 ```
@@ -130,8 +159,9 @@ Stop if validation fails or any row errored for a harness reason.
 
 ## Step 5: full campaign (paid)
 
-Ten reps give n=40 per arm on the pooled headline: 160 sessions, roughly $8-$32 at the
-same assumptions. Use the rep count frozen in step 3 and a new `--out`
+Twelve reps (four per style) give n=48 per arm on the pooled headline: 192 sessions,
+roughly $13-$20 on `claude-sonnet-5-5` at the smoke's per-session cost (about $56 at the
+`claude-sonnet-5` figure). Use the rep count frozen in step 3 and a new `--out`
 (`benchmarks/artifacts/retrieval1`). Raising reps after seeing overlapping intervals is
 optional stopping; publish an overlap as "no distinguishable difference at this sample".
 
