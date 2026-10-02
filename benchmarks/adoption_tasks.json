@@ -716,7 +716,7 @@
     "step": 0,
     "prompt": "Add a function record_audit_entry(record_id: int, action: str) -> dict to app/svc_{seed}_core.py that returns an audit entry including when the action happened. Add a test and run the tests.",
     "check_cmd": "uv run python -c \"import time; import app.svc_{seed}_core as m; e = m.record_audit_entry(1, 'read'); v = e['at_ms']; assert type(v) is int and abs(v - time.time() * 1000) < 600000, e\"",
-    "functional_cmd": "uv run python -c \"import app.svc_{seed}_core as m; e = m.record_audit_entry(1, 'read'); assert isinstance(e, dict) and 1 in e.values() and 'read' in e.values() and len(e) >= 3, e\"",
+    "functional_cmd": "uv run python -c \"import time; import app.svc_{seed}_core as m; e = m.record_audit_entry(1, 'read'); time.sleep(1.1); later = m.record_audit_entry(1, 'read'); assert isinstance(e, dict) and 1 in e.values() and 'read' in e.values() and len(e) >= 3, e; assert e != later, 'the time was fixed in advance, not read when the entry was built'\"",
     "gold": [],
     "seed_decision": "",
     "class": "K3",

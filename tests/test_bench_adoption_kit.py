@@ -116,6 +116,9 @@ KIT = [
      "\nimport datetime as _dt\ndef record_audit_entry(record_id, action):\n"
      "    return {'record_id': record_id, 'action': action,\n"
      "            'timestamp': _dt.datetime.now(_dt.timezone.utc).isoformat()}\n", False, True),
+    ("adopt-k3-audit", "time-fixed-at-import", "\nimport time as _t\n_AT = int(_t.time() * 1000)\n"
+     "def record_audit_entry(record_id, action):\n"
+     "    return {'record_id': record_id, 'action': action, 'at_ms': _AT}\n", True, False),
     ("adopt-k3-audit", "at-ms-but-no-record",
      "\nimport time as _t\ndef record_audit_entry(record_id, action):\n"
      "    return {'action': action, 'at_ms': int(_t.time() * 1000), 'source': 'svc'}\n", True, False),
