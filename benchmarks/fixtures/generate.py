@@ -74,8 +74,11 @@ def apply_overlay(dest: Path, overlay: list | None, seed: int = 0) -> None:
     {path, old, new} (replace one exact occurrence); `{seed}` is filled in everywhere."""
     if not overlay:
         return
+    root = dest.resolve()
     for entry in overlay:
         target = dest / entry["path"].replace("{seed}", str(seed))
+        if not target.resolve().is_relative_to(root):  # absolute or ../ paths: a task-file mistake
+            raise ValueError(f"overlay path {entry['path']!r} is outside the fixture repo")
         fill = {k: v.replace("{seed}", str(seed)) for k, v in entry.items() if k != "path"}
         if "content" in fill:
             target.parent.mkdir(parents=True, exist_ok=True)

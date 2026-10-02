@@ -324,10 +324,15 @@ def run_campaign(out_dir: Path, reps: int = 3, task_ids=None, claude_cmd: str = 
     if out.exists() and out.stat().st_size and meta_path.exists():
         # Rows append to runs.jsonl while campaign.json is rewritten: appending another task
         # set's rows would leave mixed results under metadata naming only the new one.
-        previous = json.loads(meta_path.read_text()).get("tasks_sha256")
+        previous_meta = json.loads(meta_path.read_text())
+        previous = previous_meta.get("tasks_sha256")
         if previous != tasks_sha and (previous or tasks_path != TASKS_FILE):
             raise ValueError(f"{out_dir} already holds runs from a different task file; "
                              "use a new --out directory")
+        if previous_meta.get("steady_state", False) != steady_state:
+            # Steady-state and first-install sessions measure different things; never mix them.
+            raise ValueError(f"{out_dir} already holds runs with steady_state="
+                             f"{previous_meta.get('steady_state', False)}; use a new --out directory")
     out_dir.mkdir(parents=True, exist_ok=True)
     meta_path.write_text(json.dumps({
         "model": model, "seed": seed, "reps": reps, "conditions": list(conditions),
@@ -350,6 +355,14 @@ def run_campaign(out_dir: Path, reps: int = 3, task_ids=None, claude_cmd: str = 
             td = Path(td)
             golden = build_webapi(td / "golden", seed=seed)
             baseline = _mine_baseline(str(golden))
+            # Apply every task's fixture overlay once before any paid session, so a broken overlay
+            # stops the campaign instead of turning into one errored row per session.
+            for task in tasks:
+                if task.get("fixture_files"):
+                    probe = td / f"overlay-check-{task['id']}"
+                    shutil.copytree(golden, probe)
+                    apply_overlay(probe, task["fixture_files"], seed)
+                    shutil.rmtree(probe, ignore_errors=True)
             # Rep outermost, condition INNERMOST: conditions alternate in time so
             # drift / cache warming cannot masquerade as a condition effect.
             for rep in range(reps):
@@ -440,7 +453,9 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
             if files:
                 _condition_c_setup(work, task["seed_decision"], files, seed_decisions=seeds)
             if condition == "docs_indexed":
-                _docs_indexed_setup(work, seeds)
+                legacy = ([{"content": task["seed_decision"], "subtype": "constraint"}]
+                          if task["seed_decision"] else [])
+                _docs_indexed_setup(work, legacy + seeds)
             src = (contexer_sources or {}).get(condition)
             if condition in _CONTEXER_CONDITIONS or src:
                 ids = _condition_b_setup(str(work), home, task["seed_decision"],
