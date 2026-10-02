@@ -113,12 +113,12 @@
           {
             "style": "narrative",
             "title": "Keep retries out of fetchers after the #55 request storm",
-            "content": "Don't put retry loops inside the fetch functions in app/svc_{seed}_core.py; retries belong to the client layer, because nested retries in #55 turned one slow dependency into a nine-fold request storm. During that incident the client retried three times, the gateway retried three times, and a fetcher wrapped its own call in a three-attempt loop, so one slow upstream received nine requests per user action and fell over completely. The post-incident review assigned retry ownership to the client, which also owns the backoff policy. A fetcher makes exactly one upstream call; on a timeout it fails fast with a typed error the client's retry policy can recognise."
+            "content": "Don't put retry loops inside the fetch functions in app/svc_{seed}_core.py; retries belong to the client layer, because nested retries in #55 turned one slow dependency into a nine-fold request storm. During that incident the client retried three times, the gateway retried three times, and a fetcher wrapped its own call in a three-attempt loop, so one slow upstream received nine requests per user action and fell over completely. The post-incident review assigned retry ownership to the client, which also owns the backoff policy. A fetcher makes at most one upstream call; on a timeout it fails fast with a typed error the client's retry policy can recognise."
           },
           {
             "style": "plan",
             "title": "Make record fetchers fail fast instead of retrying",
-            "content": "Make record fetchers fail fast instead of retrying, because the client owns retries and backoff. Plan from the #55 post-incident review: (1) One attempt - each fetcher in app/svc_{seed}_core.py calls the upstream once per invocation. (2) No loops - no retry, backoff or sleep inside fetchers, including a single extra attempt. (3) Typed failure - on a timeout, raise a module-level error the client can match, instead of returning None or a placeholder record. (4) Ownership - retry count and backoff live in the client's policy, so they can be tuned in one place. (5) Considered: a small in-fetcher retry with jitter (rejected: it multiplies with client and gateway retries, which is exactly what caused the storm)."
+            "content": "Make record fetchers fail fast instead of retrying, because the client owns retries and backoff. Plan from the #55 post-incident review: (1) One attempt - each fetcher in app/svc_{seed}_core.py calls the upstream at most once per invocation. (2) No loops - no retry, backoff or sleep inside fetchers, including a single extra attempt. (3) Typed failure - on a timeout, raise a module-level error the client can match, instead of returning None or a placeholder record. (4) Ownership - retry count and backoff live in the client's policy, so they can be tuned in one place. (5) Considered: a small in-fetcher retry with jitter (rejected: it multiplies with client and gateway retries, which is exactly what caused the storm)."
           }
         ]
       },
@@ -144,7 +144,7 @@
           {
             "style": "narrative",
             "title": "Signal bad input from single-record fetchers with RecordInputError",
-            "content": "Signal bad input from single-record fetchers with a dedicated RecordInputError, a ValueError subclass that belongs in app/svc_{seed}_core.py, because callers need to tell invalid ids apart from other failures. Review of #66 found three conventions in use: some fetchers returned None for id 0, one returned {'error': 'bad id'}, and one raised a bare ValueError. The None case was silently cached downstream as 'record not found'. Agreed outcome: ids below 1 raise RecordInputError, and subclassing ValueError keeps existing except ValueError handlers working. Batch helpers are the exception and report bad ids in their 'failed' list instead. The class hadn't been added when the review closed; the first change that needs it should define it at module level. Message text: include the id in the exception so the caller can report it, but keep it out of logs per the logging rule. Tests should assert the exception type, not the message, so wording can change freely."
+            "content": "Signal bad input from single-record fetchers with a dedicated RecordInputError, a ValueError subclass that belongs in app/svc_{seed}_core.py, because callers need to tell invalid ids apart from other failures. Review of #66 found three conventions in use: some fetchers returned None for id 0, one returned {'error': 'bad id'}, and one raised a bare ValueError. The None case was silently cached downstream as 'record not found'. Agreed outcome: ids below 1 raise RecordInputError, and subclassing ValueError keeps existing except ValueError handlers working. Batch helpers are the exception and report bad ids in their 'failed' list instead. The class hadn't been added when the review closed; the first change that needs it should define it at module level. Message text: the id may appear in the exception so the caller can report it, but keep it out of logs per the logging rule. Tests should assert the exception type, not the message, so wording can change freely."
           },
           {
             "style": "plan",
@@ -227,6 +227,9 @@
         ],
         "content": "Public functions in app/svc_{seed}_core.py keep a one-line docstring that names the service number."
       }
+    ],
+    "secondary_decisions": [
+      9
     ]
   },
   {
@@ -348,12 +351,12 @@
           {
             "style": "narrative",
             "title": "Keep retries out of fetchers after the #55 request storm",
-            "content": "Don't put retry loops inside the fetch functions in app/svc_{seed}_core.py; retries belong to the client layer, because nested retries in #55 turned one slow dependency into a nine-fold request storm. During that incident the client retried three times, the gateway retried three times, and a fetcher wrapped its own call in a three-attempt loop, so one slow upstream received nine requests per user action and fell over completely. The post-incident review assigned retry ownership to the client, which also owns the backoff policy. A fetcher makes exactly one upstream call; on a timeout it fails fast with a typed error the client's retry policy can recognise."
+            "content": "Don't put retry loops inside the fetch functions in app/svc_{seed}_core.py; retries belong to the client layer, because nested retries in #55 turned one slow dependency into a nine-fold request storm. During that incident the client retried three times, the gateway retried three times, and a fetcher wrapped its own call in a three-attempt loop, so one slow upstream received nine requests per user action and fell over completely. The post-incident review assigned retry ownership to the client, which also owns the backoff policy. A fetcher makes at most one upstream call; on a timeout it fails fast with a typed error the client's retry policy can recognise."
           },
           {
             "style": "plan",
             "title": "Make record fetchers fail fast instead of retrying",
-            "content": "Make record fetchers fail fast instead of retrying, because the client owns retries and backoff. Plan from the #55 post-incident review: (1) One attempt - each fetcher in app/svc_{seed}_core.py calls the upstream once per invocation. (2) No loops - no retry, backoff or sleep inside fetchers, including a single extra attempt. (3) Typed failure - on a timeout, raise a module-level error the client can match, instead of returning None or a placeholder record. (4) Ownership - retry count and backoff live in the client's policy, so they can be tuned in one place. (5) Considered: a small in-fetcher retry with jitter (rejected: it multiplies with client and gateway retries, which is exactly what caused the storm)."
+            "content": "Make record fetchers fail fast instead of retrying, because the client owns retries and backoff. Plan from the #55 post-incident review: (1) One attempt - each fetcher in app/svc_{seed}_core.py calls the upstream at most once per invocation. (2) No loops - no retry, backoff or sleep inside fetchers, including a single extra attempt. (3) Typed failure - on a timeout, raise a module-level error the client can match, instead of returning None or a placeholder record. (4) Ownership - retry count and backoff live in the client's policy, so they can be tuned in one place. (5) Considered: a small in-fetcher retry with jitter (rejected: it multiplies with client and gateway retries, which is exactly what caused the storm)."
           }
         ]
       },
@@ -379,7 +382,7 @@
           {
             "style": "narrative",
             "title": "Signal bad input from single-record fetchers with RecordInputError",
-            "content": "Signal bad input from single-record fetchers with a dedicated RecordInputError, a ValueError subclass that belongs in app/svc_{seed}_core.py, because callers need to tell invalid ids apart from other failures. Review of #66 found three conventions in use: some fetchers returned None for id 0, one returned {'error': 'bad id'}, and one raised a bare ValueError. The None case was silently cached downstream as 'record not found'. Agreed outcome: ids below 1 raise RecordInputError, and subclassing ValueError keeps existing except ValueError handlers working. Batch helpers are the exception and report bad ids in their 'failed' list instead. The class hadn't been added when the review closed; the first change that needs it should define it at module level. Message text: include the id in the exception so the caller can report it, but keep it out of logs per the logging rule. Tests should assert the exception type, not the message, so wording can change freely."
+            "content": "Signal bad input from single-record fetchers with a dedicated RecordInputError, a ValueError subclass that belongs in app/svc_{seed}_core.py, because callers need to tell invalid ids apart from other failures. Review of #66 found three conventions in use: some fetchers returned None for id 0, one returned {'error': 'bad id'}, and one raised a bare ValueError. The None case was silently cached downstream as 'record not found'. Agreed outcome: ids below 1 raise RecordInputError, and subclassing ValueError keeps existing except ValueError handlers working. Batch helpers are the exception and report bad ids in their 'failed' list instead. The class hadn't been added when the review closed; the first change that needs it should define it at module level. Message text: the id may appear in the exception so the caller can report it, but keep it out of logs per the logging rule. Tests should assert the exception type, not the message, so wording can change freely."
           },
           {
             "style": "plan",
@@ -463,6 +466,7 @@
         "content": "Public functions in app/svc_{seed}_core.py keep a one-line docstring that names the service number."
       }
     ],
+    "secondary_decisions": [],
     "needed_decision": 9
   },
   {
@@ -472,7 +476,7 @@
     "step": 0,
     "prompt": "Speed up repeated calls to fetch_record_{seed}_0 in app/svc_{seed}_core.py by caching its results. Run the tests after.",
     "check_cmd": "uv run python -c \"import app.svc_{seed}_core as m; cs = [v for v in vars(m).values() if hasattr(v, 'cache_info')]; assert cs and all(c.cache_info().maxsize == 256 for c in cs), [c.cache_info() for c in cs]\"",
-    "functional_cmd": "uv run python -c \"import app.svc_{seed}_core as m; a = m.fetch_record_{seed}_0(5); b = m.fetch_record_{seed}_0(5); assert a == {'id': 5, 'slot': 0}, a; assert a is b, 'repeated call was not served from a cache'\"",
+    "functional_cmd": "uv run python -c \"import app.svc_{seed}_core as m; a = m.fetch_record_{seed}_0(5); b = m.fetch_record_{seed}_0(5); assert a == {'id': 5, 'slot': 0} and b == a, (a, b); cs = [v for v in vars(m).values() if hasattr(v, 'cache_info')]; assert a is b or sum(c.cache_info().hits for c in cs) >= 1, 'repeated call was not served from a cache'\"",
     "gold": [],
     "seed_decision": "",
     "class": "K3",
@@ -579,12 +583,12 @@
           {
             "style": "narrative",
             "title": "Keep retries out of fetchers after the #55 request storm",
-            "content": "Don't put retry loops inside the fetch functions in app/svc_{seed}_core.py; retries belong to the client layer, because nested retries in #55 turned one slow dependency into a nine-fold request storm. During that incident the client retried three times, the gateway retried three times, and a fetcher wrapped its own call in a three-attempt loop, so one slow upstream received nine requests per user action and fell over completely. The post-incident review assigned retry ownership to the client, which also owns the backoff policy. A fetcher makes exactly one upstream call; on a timeout it fails fast with a typed error the client's retry policy can recognise."
+            "content": "Don't put retry loops inside the fetch functions in app/svc_{seed}_core.py; retries belong to the client layer, because nested retries in #55 turned one slow dependency into a nine-fold request storm. During that incident the client retried three times, the gateway retried three times, and a fetcher wrapped its own call in a three-attempt loop, so one slow upstream received nine requests per user action and fell over completely. The post-incident review assigned retry ownership to the client, which also owns the backoff policy. A fetcher makes at most one upstream call; on a timeout it fails fast with a typed error the client's retry policy can recognise."
           },
           {
             "style": "plan",
             "title": "Make record fetchers fail fast instead of retrying",
-            "content": "Make record fetchers fail fast instead of retrying, because the client owns retries and backoff. Plan from the #55 post-incident review: (1) One attempt - each fetcher in app/svc_{seed}_core.py calls the upstream once per invocation. (2) No loops - no retry, backoff or sleep inside fetchers, including a single extra attempt. (3) Typed failure - on a timeout, raise a module-level error the client can match, instead of returning None or a placeholder record. (4) Ownership - retry count and backoff live in the client's policy, so they can be tuned in one place. (5) Considered: a small in-fetcher retry with jitter (rejected: it multiplies with client and gateway retries, which is exactly what caused the storm)."
+            "content": "Make record fetchers fail fast instead of retrying, because the client owns retries and backoff. Plan from the #55 post-incident review: (1) One attempt - each fetcher in app/svc_{seed}_core.py calls the upstream at most once per invocation. (2) No loops - no retry, backoff or sleep inside fetchers, including a single extra attempt. (3) Typed failure - on a timeout, raise a module-level error the client can match, instead of returning None or a placeholder record. (4) Ownership - retry count and backoff live in the client's policy, so they can be tuned in one place. (5) Considered: a small in-fetcher retry with jitter (rejected: it multiplies with client and gateway retries, which is exactly what caused the storm)."
           }
         ]
       },
@@ -610,7 +614,7 @@
           {
             "style": "narrative",
             "title": "Signal bad input from single-record fetchers with RecordInputError",
-            "content": "Signal bad input from single-record fetchers with a dedicated RecordInputError, a ValueError subclass that belongs in app/svc_{seed}_core.py, because callers need to tell invalid ids apart from other failures. Review of #66 found three conventions in use: some fetchers returned None for id 0, one returned {'error': 'bad id'}, and one raised a bare ValueError. The None case was silently cached downstream as 'record not found'. Agreed outcome: ids below 1 raise RecordInputError, and subclassing ValueError keeps existing except ValueError handlers working. Batch helpers are the exception and report bad ids in their 'failed' list instead. The class hadn't been added when the review closed; the first change that needs it should define it at module level. Message text: include the id in the exception so the caller can report it, but keep it out of logs per the logging rule. Tests should assert the exception type, not the message, so wording can change freely."
+            "content": "Signal bad input from single-record fetchers with a dedicated RecordInputError, a ValueError subclass that belongs in app/svc_{seed}_core.py, because callers need to tell invalid ids apart from other failures. Review of #66 found three conventions in use: some fetchers returned None for id 0, one returned {'error': 'bad id'}, and one raised a bare ValueError. The None case was silently cached downstream as 'record not found'. Agreed outcome: ids below 1 raise RecordInputError, and subclassing ValueError keeps existing except ValueError handlers working. Batch helpers are the exception and report bad ids in their 'failed' list instead. The class hadn't been added when the review closed; the first change that needs it should define it at module level. Message text: the id may appear in the exception so the caller can report it, but keep it out of logs per the logging rule. Tests should assert the exception type, not the message, so wording can change freely."
           },
           {
             "style": "plan",
@@ -693,6 +697,9 @@
         ],
         "content": "Public functions in app/svc_{seed}_core.py keep a one-line docstring that names the service number."
       }
+    ],
+    "secondary_decisions": [
+      9
     ],
     "needed_decision": 4
   },
@@ -810,12 +817,12 @@
           {
             "style": "narrative",
             "title": "Keep retries out of fetchers after the #55 request storm",
-            "content": "Don't put retry loops inside the fetch functions in app/svc_{seed}_core.py; retries belong to the client layer, because nested retries in #55 turned one slow dependency into a nine-fold request storm. During that incident the client retried three times, the gateway retried three times, and a fetcher wrapped its own call in a three-attempt loop, so one slow upstream received nine requests per user action and fell over completely. The post-incident review assigned retry ownership to the client, which also owns the backoff policy. A fetcher makes exactly one upstream call; on a timeout it fails fast with a typed error the client's retry policy can recognise."
+            "content": "Don't put retry loops inside the fetch functions in app/svc_{seed}_core.py; retries belong to the client layer, because nested retries in #55 turned one slow dependency into a nine-fold request storm. During that incident the client retried three times, the gateway retried three times, and a fetcher wrapped its own call in a three-attempt loop, so one slow upstream received nine requests per user action and fell over completely. The post-incident review assigned retry ownership to the client, which also owns the backoff policy. A fetcher makes at most one upstream call; on a timeout it fails fast with a typed error the client's retry policy can recognise."
           },
           {
             "style": "plan",
             "title": "Make record fetchers fail fast instead of retrying",
-            "content": "Make record fetchers fail fast instead of retrying, because the client owns retries and backoff. Plan from the #55 post-incident review: (1) One attempt - each fetcher in app/svc_{seed}_core.py calls the upstream once per invocation. (2) No loops - no retry, backoff or sleep inside fetchers, including a single extra attempt. (3) Typed failure - on a timeout, raise a module-level error the client can match, instead of returning None or a placeholder record. (4) Ownership - retry count and backoff live in the client's policy, so they can be tuned in one place. (5) Considered: a small in-fetcher retry with jitter (rejected: it multiplies with client and gateway retries, which is exactly what caused the storm)."
+            "content": "Make record fetchers fail fast instead of retrying, because the client owns retries and backoff. Plan from the #55 post-incident review: (1) One attempt - each fetcher in app/svc_{seed}_core.py calls the upstream at most once per invocation. (2) No loops - no retry, backoff or sleep inside fetchers, including a single extra attempt. (3) Typed failure - on a timeout, raise a module-level error the client can match, instead of returning None or a placeholder record. (4) Ownership - retry count and backoff live in the client's policy, so they can be tuned in one place. (5) Considered: a small in-fetcher retry with jitter (rejected: it multiplies with client and gateway retries, which is exactly what caused the storm)."
           }
         ]
       },
@@ -841,7 +848,7 @@
           {
             "style": "narrative",
             "title": "Signal bad input from single-record fetchers with RecordInputError",
-            "content": "Signal bad input from single-record fetchers with a dedicated RecordInputError, a ValueError subclass that belongs in app/svc_{seed}_core.py, because callers need to tell invalid ids apart from other failures. Review of #66 found three conventions in use: some fetchers returned None for id 0, one returned {'error': 'bad id'}, and one raised a bare ValueError. The None case was silently cached downstream as 'record not found'. Agreed outcome: ids below 1 raise RecordInputError, and subclassing ValueError keeps existing except ValueError handlers working. Batch helpers are the exception and report bad ids in their 'failed' list instead. The class hadn't been added when the review closed; the first change that needs it should define it at module level. Message text: include the id in the exception so the caller can report it, but keep it out of logs per the logging rule. Tests should assert the exception type, not the message, so wording can change freely."
+            "content": "Signal bad input from single-record fetchers with a dedicated RecordInputError, a ValueError subclass that belongs in app/svc_{seed}_core.py, because callers need to tell invalid ids apart from other failures. Review of #66 found three conventions in use: some fetchers returned None for id 0, one returned {'error': 'bad id'}, and one raised a bare ValueError. The None case was silently cached downstream as 'record not found'. Agreed outcome: ids below 1 raise RecordInputError, and subclassing ValueError keeps existing except ValueError handlers working. Batch helpers are the exception and report bad ids in their 'failed' list instead. The class hadn't been added when the review closed; the first change that needs it should define it at module level. Message text: the id may appear in the exception so the caller can report it, but keep it out of logs per the logging rule. Tests should assert the exception type, not the message, so wording can change freely."
           },
           {
             "style": "plan",
@@ -925,6 +932,7 @@
         "content": "Public functions in app/svc_{seed}_core.py keep a one-line docstring that names the service number."
       }
     ],
+    "secondary_decisions": [],
     "needed_decision": 11
   },
   {
@@ -1046,12 +1054,12 @@
           {
             "style": "narrative",
             "title": "Keep retries out of fetchers after the #55 request storm",
-            "content": "Don't put retry loops inside the fetch functions in app/svc_{seed}_core.py; retries belong to the client layer, because nested retries in #55 turned one slow dependency into a nine-fold request storm. During that incident the client retried three times, the gateway retried three times, and a fetcher wrapped its own call in a three-attempt loop, so one slow upstream received nine requests per user action and fell over completely. The post-incident review assigned retry ownership to the client, which also owns the backoff policy. A fetcher makes exactly one upstream call; on a timeout it fails fast with a typed error the client's retry policy can recognise."
+            "content": "Don't put retry loops inside the fetch functions in app/svc_{seed}_core.py; retries belong to the client layer, because nested retries in #55 turned one slow dependency into a nine-fold request storm. During that incident the client retried three times, the gateway retried three times, and a fetcher wrapped its own call in a three-attempt loop, so one slow upstream received nine requests per user action and fell over completely. The post-incident review assigned retry ownership to the client, which also owns the backoff policy. A fetcher makes at most one upstream call; on a timeout it fails fast with a typed error the client's retry policy can recognise."
           },
           {
             "style": "plan",
             "title": "Make record fetchers fail fast instead of retrying",
-            "content": "Make record fetchers fail fast instead of retrying, because the client owns retries and backoff. Plan from the #55 post-incident review: (1) One attempt - each fetcher in app/svc_{seed}_core.py calls the upstream once per invocation. (2) No loops - no retry, backoff or sleep inside fetchers, including a single extra attempt. (3) Typed failure - on a timeout, raise a module-level error the client can match, instead of returning None or a placeholder record. (4) Ownership - retry count and backoff live in the client's policy, so they can be tuned in one place. (5) Considered: a small in-fetcher retry with jitter (rejected: it multiplies with client and gateway retries, which is exactly what caused the storm)."
+            "content": "Make record fetchers fail fast instead of retrying, because the client owns retries and backoff. Plan from the #55 post-incident review: (1) One attempt - each fetcher in app/svc_{seed}_core.py calls the upstream at most once per invocation. (2) No loops - no retry, backoff or sleep inside fetchers, including a single extra attempt. (3) Typed failure - on a timeout, raise a module-level error the client can match, instead of returning None or a placeholder record. (4) Ownership - retry count and backoff live in the client's policy, so they can be tuned in one place. (5) Considered: a small in-fetcher retry with jitter (rejected: it multiplies with client and gateway retries, which is exactly what caused the storm)."
           }
         ]
       },
@@ -1077,7 +1085,7 @@
           {
             "style": "narrative",
             "title": "Signal bad input from single-record fetchers with RecordInputError",
-            "content": "Signal bad input from single-record fetchers with a dedicated RecordInputError, a ValueError subclass that belongs in app/svc_{seed}_core.py, because callers need to tell invalid ids apart from other failures. Review of #66 found three conventions in use: some fetchers returned None for id 0, one returned {'error': 'bad id'}, and one raised a bare ValueError. The None case was silently cached downstream as 'record not found'. Agreed outcome: ids below 1 raise RecordInputError, and subclassing ValueError keeps existing except ValueError handlers working. Batch helpers are the exception and report bad ids in their 'failed' list instead. The class hadn't been added when the review closed; the first change that needs it should define it at module level. Message text: include the id in the exception so the caller can report it, but keep it out of logs per the logging rule. Tests should assert the exception type, not the message, so wording can change freely."
+            "content": "Signal bad input from single-record fetchers with a dedicated RecordInputError, a ValueError subclass that belongs in app/svc_{seed}_core.py, because callers need to tell invalid ids apart from other failures. Review of #66 found three conventions in use: some fetchers returned None for id 0, one returned {'error': 'bad id'}, and one raised a bare ValueError. The None case was silently cached downstream as 'record not found'. Agreed outcome: ids below 1 raise RecordInputError, and subclassing ValueError keeps existing except ValueError handlers working. Batch helpers are the exception and report bad ids in their 'failed' list instead. The class hadn't been added when the review closed; the first change that needs it should define it at module level. Message text: the id may appear in the exception so the caller can report it, but keep it out of logs per the logging rule. Tests should assert the exception type, not the message, so wording can change freely."
           },
           {
             "style": "plan",
@@ -1161,6 +1169,7 @@
         "content": "Public functions in app/svc_{seed}_core.py keep a one-line docstring that names the service number."
       }
     ],
+    "secondary_decisions": [],
     "needed_decision": 0
   },
   {
@@ -1283,12 +1292,12 @@
           {
             "style": "narrative",
             "title": "Keep retries out of fetchers after the #55 request storm",
-            "content": "Don't put retry loops inside the fetch functions in app/svc_{seed}_core.py; retries belong to the client layer, because nested retries in #55 turned one slow dependency into a nine-fold request storm. During that incident the client retried three times, the gateway retried three times, and a fetcher wrapped its own call in a three-attempt loop, so one slow upstream received nine requests per user action and fell over completely. The post-incident review assigned retry ownership to the client, which also owns the backoff policy. A fetcher makes exactly one upstream call; on a timeout it fails fast with a typed error the client's retry policy can recognise."
+            "content": "Don't put retry loops inside the fetch functions in app/svc_{seed}_core.py; retries belong to the client layer, because nested retries in #55 turned one slow dependency into a nine-fold request storm. During that incident the client retried three times, the gateway retried three times, and a fetcher wrapped its own call in a three-attempt loop, so one slow upstream received nine requests per user action and fell over completely. The post-incident review assigned retry ownership to the client, which also owns the backoff policy. A fetcher makes at most one upstream call; on a timeout it fails fast with a typed error the client's retry policy can recognise."
           },
           {
             "style": "plan",
             "title": "Make record fetchers fail fast instead of retrying",
-            "content": "Make record fetchers fail fast instead of retrying, because the client owns retries and backoff. Plan from the #55 post-incident review: (1) One attempt - each fetcher in app/svc_{seed}_core.py calls the upstream once per invocation. (2) No loops - no retry, backoff or sleep inside fetchers, including a single extra attempt. (3) Typed failure - on a timeout, raise a module-level error the client can match, instead of returning None or a placeholder record. (4) Ownership - retry count and backoff live in the client's policy, so they can be tuned in one place. (5) Considered: a small in-fetcher retry with jitter (rejected: it multiplies with client and gateway retries, which is exactly what caused the storm)."
+            "content": "Make record fetchers fail fast instead of retrying, because the client owns retries and backoff. Plan from the #55 post-incident review: (1) One attempt - each fetcher in app/svc_{seed}_core.py calls the upstream at most once per invocation. (2) No loops - no retry, backoff or sleep inside fetchers, including a single extra attempt. (3) Typed failure - on a timeout, raise a module-level error the client can match, instead of returning None or a placeholder record. (4) Ownership - retry count and backoff live in the client's policy, so they can be tuned in one place. (5) Considered: a small in-fetcher retry with jitter (rejected: it multiplies with client and gateway retries, which is exactly what caused the storm)."
           }
         ]
       },
@@ -1314,7 +1323,7 @@
           {
             "style": "narrative",
             "title": "Signal bad input from single-record fetchers with RecordInputError",
-            "content": "Signal bad input from single-record fetchers with a dedicated RecordInputError, a ValueError subclass that belongs in app/svc_{seed}_core.py, because callers need to tell invalid ids apart from other failures. Review of #66 found three conventions in use: some fetchers returned None for id 0, one returned {'error': 'bad id'}, and one raised a bare ValueError. The None case was silently cached downstream as 'record not found'. Agreed outcome: ids below 1 raise RecordInputError, and subclassing ValueError keeps existing except ValueError handlers working. Batch helpers are the exception and report bad ids in their 'failed' list instead. The class hadn't been added when the review closed; the first change that needs it should define it at module level. Message text: include the id in the exception so the caller can report it, but keep it out of logs per the logging rule. Tests should assert the exception type, not the message, so wording can change freely."
+            "content": "Signal bad input from single-record fetchers with a dedicated RecordInputError, a ValueError subclass that belongs in app/svc_{seed}_core.py, because callers need to tell invalid ids apart from other failures. Review of #66 found three conventions in use: some fetchers returned None for id 0, one returned {'error': 'bad id'}, and one raised a bare ValueError. The None case was silently cached downstream as 'record not found'. Agreed outcome: ids below 1 raise RecordInputError, and subclassing ValueError keeps existing except ValueError handlers working. Batch helpers are the exception and report bad ids in their 'failed' list instead. The class hadn't been added when the review closed; the first change that needs it should define it at module level. Message text: the id may appear in the exception so the caller can report it, but keep it out of logs per the logging rule. Tests should assert the exception type, not the message, so wording can change freely."
           },
           {
             "style": "plan",
@@ -1397,6 +1406,9 @@
         ],
         "content": "Public functions in app/svc_{seed}_core.py keep a one-line docstring that names the service number."
       }
+    ],
+    "secondary_decisions": [
+      9
     ],
     "needed_decision": 7
   },
@@ -1514,12 +1526,12 @@
           {
             "style": "narrative",
             "title": "Keep retries out of fetchers after the #55 request storm",
-            "content": "Don't put retry loops inside the fetch functions in app/svc_{seed}_core.py; retries belong to the client layer, because nested retries in #55 turned one slow dependency into a nine-fold request storm. During that incident the client retried three times, the gateway retried three times, and a fetcher wrapped its own call in a three-attempt loop, so one slow upstream received nine requests per user action and fell over completely. The post-incident review assigned retry ownership to the client, which also owns the backoff policy. A fetcher makes exactly one upstream call; on a timeout it fails fast with a typed error the client's retry policy can recognise."
+            "content": "Don't put retry loops inside the fetch functions in app/svc_{seed}_core.py; retries belong to the client layer, because nested retries in #55 turned one slow dependency into a nine-fold request storm. During that incident the client retried three times, the gateway retried three times, and a fetcher wrapped its own call in a three-attempt loop, so one slow upstream received nine requests per user action and fell over completely. The post-incident review assigned retry ownership to the client, which also owns the backoff policy. A fetcher makes at most one upstream call; on a timeout it fails fast with a typed error the client's retry policy can recognise."
           },
           {
             "style": "plan",
             "title": "Make record fetchers fail fast instead of retrying",
-            "content": "Make record fetchers fail fast instead of retrying, because the client owns retries and backoff. Plan from the #55 post-incident review: (1) One attempt - each fetcher in app/svc_{seed}_core.py calls the upstream once per invocation. (2) No loops - no retry, backoff or sleep inside fetchers, including a single extra attempt. (3) Typed failure - on a timeout, raise a module-level error the client can match, instead of returning None or a placeholder record. (4) Ownership - retry count and backoff live in the client's policy, so they can be tuned in one place. (5) Considered: a small in-fetcher retry with jitter (rejected: it multiplies with client and gateway retries, which is exactly what caused the storm)."
+            "content": "Make record fetchers fail fast instead of retrying, because the client owns retries and backoff. Plan from the #55 post-incident review: (1) One attempt - each fetcher in app/svc_{seed}_core.py calls the upstream at most once per invocation. (2) No loops - no retry, backoff or sleep inside fetchers, including a single extra attempt. (3) Typed failure - on a timeout, raise a module-level error the client can match, instead of returning None or a placeholder record. (4) Ownership - retry count and backoff live in the client's policy, so they can be tuned in one place. (5) Considered: a small in-fetcher retry with jitter (rejected: it multiplies with client and gateway retries, which is exactly what caused the storm)."
           }
         ]
       },
@@ -1545,7 +1557,7 @@
           {
             "style": "narrative",
             "title": "Signal bad input from single-record fetchers with RecordInputError",
-            "content": "Signal bad input from single-record fetchers with a dedicated RecordInputError, a ValueError subclass that belongs in app/svc_{seed}_core.py, because callers need to tell invalid ids apart from other failures. Review of #66 found three conventions in use: some fetchers returned None for id 0, one returned {'error': 'bad id'}, and one raised a bare ValueError. The None case was silently cached downstream as 'record not found'. Agreed outcome: ids below 1 raise RecordInputError, and subclassing ValueError keeps existing except ValueError handlers working. Batch helpers are the exception and report bad ids in their 'failed' list instead. The class hadn't been added when the review closed; the first change that needs it should define it at module level. Message text: include the id in the exception so the caller can report it, but keep it out of logs per the logging rule. Tests should assert the exception type, not the message, so wording can change freely."
+            "content": "Signal bad input from single-record fetchers with a dedicated RecordInputError, a ValueError subclass that belongs in app/svc_{seed}_core.py, because callers need to tell invalid ids apart from other failures. Review of #66 found three conventions in use: some fetchers returned None for id 0, one returned {'error': 'bad id'}, and one raised a bare ValueError. The None case was silently cached downstream as 'record not found'. Agreed outcome: ids below 1 raise RecordInputError, and subclassing ValueError keeps existing except ValueError handlers working. Batch helpers are the exception and report bad ids in their 'failed' list instead. The class hadn't been added when the review closed; the first change that needs it should define it at module level. Message text: the id may appear in the exception so the caller can report it, but keep it out of logs per the logging rule. Tests should assert the exception type, not the message, so wording can change freely."
           },
           {
             "style": "plan",
@@ -1628,6 +1640,7 @@
         ],
         "content": "Public functions in app/svc_{seed}_core.py keep a one-line docstring that names the service number."
       }
-    ]
+    ],
+    "secondary_decisions": []
   }
 ]

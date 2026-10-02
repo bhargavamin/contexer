@@ -22,6 +22,7 @@ recorded random order, `store_order_seed`), and adds:
 | `functional_cmd` | **functional**: the change works, independent of any decision |
 | `forbids_action` | the decision forbids something, so adherence alone can pass an untouched fixture |
 | `fixture_files` | per-task overlay on the fixture repo (write, append, or replace-once), committed before setup |
+| `secondary_decisions` | decisions that also apply to the task but are not graded (an agent may follow them at some cost); checks must not penalise following them |
 
 A row's `success` requires every check the task has. Rows also record `adherence` and
 `functional` separately, and `check_output` names which check failed.
