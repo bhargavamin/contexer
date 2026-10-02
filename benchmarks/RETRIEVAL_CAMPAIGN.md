@@ -67,7 +67,7 @@ fixture and on a plausible decision-ignorant implementation, and passes on a com
 | Condition | What the agent gets |
 | --- | --- |
 | `without` | nothing |
-| `claudemd` | the same decisions, same styles, in `CLAUDE.md` (the honest static competitor) |
+| `claudemd` | the same decisions, same styles and titles, in `CLAUDE.md` (the honest static competitor) |
 | `with_prev` | Contexer at the previous version, via `--contexer-sources` |
 | `with` | Contexer from this checkout |
 
@@ -141,10 +141,10 @@ compare it between the smoke and the full campaign.
 ## Step 4: smoke (paid)
 
 3 reps (one per author style) x 4 tasks x 4 conditions = 48 sessions. Estimate the
-per-session cost from the medians in your own `benchmarks/artifacts/*/runs.jsonl`; one
-`claude-sonnet-5` session on the realistic store cost $0.29 (2026-10-02). Recompute for the
-model you use from a single session first (`--tasks retr-batch --conditions with --reps 1`),
-which also proves setup.
+per-session cost from the medians in your own `benchmarks/artifacts/*/runs.jsonl`; the
+2026-10-02 smoke on this store cost $3.13 for 48 `claude-sonnet-5-5` sessions (about $0.07 each;
+one `claude-sonnet-5` session cost $0.29). Recompute for the model you use from a single
+session first (`--tasks retr-batch --conditions with --reps 1`), which also proves setup.
 
 ```bash
 uv run python -m benchmarks.run --tasks-file benchmarks/retrieval_tasks.json \
@@ -160,7 +160,8 @@ Stop if validation fails or any row errored for a harness reason.
 ## Step 5: full campaign (paid)
 
 Twelve reps (four per style) give n=48 per arm on the pooled headline: 192 sessions,
-roughly $30-$50 at the same assumptions. Use the rep count frozen in step 3 and a new `--out`
+roughly $13-$20 on `claude-sonnet-5-5` at the smoke's per-session cost (about $56 at the
+`claude-sonnet-5` figure). Use the rep count frozen in step 3 and a new `--out`
 (`benchmarks/artifacts/retrieval1`). Raising reps after seeing overlapping intervals is
 optional stopping; publish an overlap as "no distinguishable difference at this sample".
 

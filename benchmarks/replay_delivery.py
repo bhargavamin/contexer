@@ -162,7 +162,8 @@ def replay_tasks(tasks_file: Path, seed: int) -> dict:
                 except AssertionError as exc:  # a seed this version refused
                     refusal = str(exc)
                 done = [_short(i) for i in scope.get("seeded_ids", [])]
-                ids = done + [None] * (len(items) - len(done))
+                # A refusal aborts the live arm's setup, so no decision of this run counts.
+                ids = [None] * len(items) if refusal else done + [None] * (len(items) - len(done))
                 prompt = task["prompt"].replace("{seed}", str(seed))
                 result = _deliver(repo, prompt, f"replay-{task['id']}-{rep}")
                 index = task.get("needed_decision")

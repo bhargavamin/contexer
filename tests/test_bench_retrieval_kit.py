@@ -30,6 +30,11 @@ VARIANTS = [
      "\ndef fetch_records_batch(record_ids):\n"
      "    return {'items': {r: {'id': r} for r in record_ids if r >= 1},\n"
      "            'failed': [r for r in record_ids if r < 1]}\n", True),
+    ("retr-batch", "dict-keyed-by-position",
+     "\ndef fetch_records_batch(record_ids):\n"
+     "    good = [{'id': r} for r in record_ids if r >= 1]\n"
+     "    return {'items': dict(enumerate(good)),\n"
+     "            'failed': [r for r in record_ids if r < 1]}\n", False),
     ("retr-batch", "list-skipping-bad-ids",
      "\ndef fetch_records_batch(record_ids):\n"
      "    return [{'id': r} for r in record_ids if r >= 1]\n", False),
@@ -243,7 +248,9 @@ class TestSeeding:
         shutil.copytree(golden, work)
         run._condition_c_setup(work, "", seed_decisions=items)
         text = (work / "CLAUDE.md").read_text()
-        assert all(f"- {i['content']}" in text for i in items)
+        # Titled as Contexer shows them, so the static arm isn't missing what titles say.
+        assert all(f"- {i['title']}: {i['content']}" in text if i["title"]
+                   else f"- {i['content']}" in text for i in items)
 
         split = tmp_path / "two"
         shutil.copytree(golden, split)
@@ -392,6 +399,34 @@ class TestDeliveryPreview:
                 "content": [row["startup_text"], row["prompt_text"]]}}) + "\n")
             assert run._needed_delivery(home, content, row["needed_id"]) == (
                 row["needed"], 0), (row["task_id"], row["rep"])
+
+    def test_only_what_contexer_gave_counts_as_delivery(self, tmp_path):
+        content = "Bound every cache at 256 entries, because memory is fixed."
+        transcript = tmp_path / ".claude" / "projects" / "p" / "s.jsonl"
+        transcript.parent.mkdir(parents=True)
+
+        def write(*entries):
+            transcript.write_text("".join(json.dumps(e) + "\n" for e in entries))
+
+        def call(tool_id, name):
+            return {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": tool_id, "name": name, "input": {}}]}}
+
+        def result(tool_id, text):
+            return {"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": tool_id, "content": text}]}}
+
+        # A file the agent read, or its own message, is not delivery.
+        write(call("t1", "Read"), result("t1", content),
+              {"type": "assistant", "message": {"content": [{"type": "text", "text": content}]}})
+        assert run._needed_delivery(tmp_path, content, "abcd1234ef") == ("none", 0)
+        # A Contexer lookup's result is, and counts as a lookup.
+        write(call("t2", "mcp__contexer__get_context"), result("t2", content))
+        assert run._needed_delivery(tmp_path, content, "abcd1234ef") == ("full", 1)
+        # A pointer in hook context names it.
+        write({"type": "attachment", "attachment": {
+            "type": "hook_additional_context", "content": ["more: Caches (id=abcd1234)"]}})
+        assert run._needed_delivery(tmp_path, content, "abcd1234ef") == ("named", 0)
 
     def test_no_startup_rule_is_delivered_twice(self, preview):
         # #350: a short convention shown whole at startup is credited too.

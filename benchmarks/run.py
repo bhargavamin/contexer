@@ -114,9 +114,11 @@ def _condition_c_setup(work: Path, seed_decision: str,
     capture mid-session decisions, and that asymmetry IS the thing measured."""
     from contexer import miner
     convs = [c["content"] for c in miner.mine_conventions(str(work))]
-    # Every seed the contexer arm stores, so both arms carry the same knowledge.
+    # Every seed the contexer arm stores, titled as Contexer shows it, so both arms carry the
+    # same knowledge.
     seeds = ([seed_decision] if seed_decision else []) + [
-        item["content"] for item in seed_decisions or []]
+        f"{item['title']}: {item['content']}" if item.get("title") else item["content"]
+        for item in seed_decisions or []]
 
     def _is_rule(text: str) -> bool:
         return text.lower().startswith(("never", "always", "don't", "do not"))
@@ -207,29 +209,41 @@ def _strings(value) -> list[str]:
     return []
 
 
+def _blocks(entry: dict) -> list[dict]:
+    content = (entry.get("message") or {}).get("content")
+    return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+
+
 def _needed_delivery(home: Path, content: str, entry_id: str) -> tuple[str, int]:
     """(how the needed decision reached the agent, Contexer lookups the agent made), read
-    from the session transcript. Only what the agent RECEIVED counts (hook context and tool
-    results, never its own messages, so an echo can't): "full" when the decision's whole
-    text arrived, "named" when only its id did (a pointer), else "none". Lookups count the
-    agent's calls to Contexer's get_context tools, the way a pointer is followed up."""
-    received, lookups = [], 0
+    from the session transcript. Only what CONTEXER gave the agent counts: hook context
+    (`hook_additional_context` attachments) and results of the agent's own Contexer tool calls,
+    so neither an echo nor a file the agent read can: "full" when the decision's whole text
+    arrived, "named" when only its id did (a pointer), else "none". Lookups count the agent's
+    calls to Contexer's get_context tools, the way a pointer is followed up."""
+    entries = []
     for transcript in (home / ".claude" / "projects").rglob("*.jsonl"):
         for line in transcript.read_text(errors="ignore").splitlines():
             try:
                 entry = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if not isinstance(entry, dict):
-                continue
-            if entry.get("type") == "assistant":
-                content_blocks = (entry.get("message") or {}).get("content") or []
-                lookups += sum(1 for block in content_blocks if isinstance(block, dict)
-                               and block.get("type") == "tool_use"
-                               and "contexer" in str(block.get("name", ""))
-                               and "get_context" in str(block.get("name", "")))
-            else:
-                received.extend(_strings(entry))
+            if isinstance(entry, dict):
+                entries.append(entry)
+    contexer_calls = {block.get("id"): str(block.get("name", ""))
+                      for entry in entries if entry.get("type") == "assistant"
+                      for block in _blocks(entry)
+                      if block.get("type") == "tool_use" and "contexer" in str(block.get("name"))}
+    lookups = sum("get_context" in name for name in contexer_calls.values())
+    received = []
+    for entry in entries:
+        attachment = entry.get("attachment")
+        if isinstance(attachment, dict) and attachment.get("type") == "hook_additional_context":
+            received.extend(_strings(attachment))
+        received.extend(s for block in _blocks(entry)
+                        if block.get("type") == "tool_result"
+                        and block.get("tool_use_id") in contexer_calls
+                        for s in _strings(block.get("content")))
     text = " ".join(" ".join(received).split())
     if " ".join(content.split()) in text:
         return "full", lookups
@@ -430,8 +444,8 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
             row["success"] = chk.returncode == 0
             if not row["success"]:
                 # The session's folders are discarded after scoring: keep why the check failed.
-                row["check_output"] = (chk.stderr or chk.stdout or b"").decode(
-                    errors="replace")[-400:]
+                row["check_output"] = ((chk.stdout or b"") + (chk.stderr or b"")).decode(
+                    errors="replace")[-1500:]
         else:
             row["success"] = True
         if task["chain"]:
