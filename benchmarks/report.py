@@ -13,11 +13,13 @@ from pathlib import Path
 
 METRICS = ["tokens_total", "cost_usd", "turns", "tool_calls", "duration_ms",
            "violations", "rationale", "success"]
-_CONDITION_ORDER = ("without", "agentsmd", "claudemd", "claudemd_agentsmd",
+_CONDITION_ORDER = ("without", "agentsmd", "claudemd", "claudemd_full", "docs_indexed",
+                    "claudemd_agentsmd",
                     "with_prev", "with", "claudemd_with")
 _COMPARISONS = (("with", "without"), ("with", "claudemd"),
                 ("claudemd_with", "claudemd"), ("agentsmd", "claudemd"),
-                ("claudemd_agentsmd", "claudemd"), ("with", "with_prev"))
+                ("claudemd_agentsmd", "claudemd"), ("with", "with_prev"),
+                ("with", "claudemd_full"), ("with", "docs_indexed"))
 _RATIONALE_NOTE = ("_Note: rationale 0.0 can mean the information was unavailable "
                    "to that condition, not model failure — see per-condition design._")
 

@@ -58,6 +58,10 @@ KIT = [
     ("adopt-k2-errors", "plain-valueerror",
      "\n_orig = fetch_record_7_1\ndef fetch_record_7_1(record_id):\n    if record_id < 1:\n"
      "        raise ValueError(record_id)\n    return _orig(record_id)\n", False, True),
+    ("adopt-k2-errors", "zero-only-subclass", "\nclass RecordInputError(ValueError):\n    pass\n"
+     "_orig = fetch_record_7_1\ndef fetch_record_7_1(record_id):\n    if record_id == 0:\n"
+     "        raise RecordInputError(record_id)\n    if record_id < 0:\n"
+     "        raise ValueError(record_id)\n    return _orig(record_id)\n", False, True),
     ("adopt-k2-errors", "rejects-every-id",
      "\nclass RecordInputError(ValueError):\n    pass\ndef fetch_record_7_1(record_id):\n"
      "    raise RecordInputError(record_id)\n", True, False),
@@ -98,6 +102,9 @@ KIT = [
     ("adopt-k3-cache", "bounded-but-wrong-function",
      "\nimport functools\nfetch_record_7_1 = functools.lru_cache(maxsize=256)(fetch_record_7_1)\n",
      True, False),
+    ("adopt-k3-cache", "same-result-for-every-id", "\n_first = []\ndef fetch_record_7_0(record_id):\n"
+     "    if not _first:\n        _first.append(_load_record(record_id, 0))\n    return _first[0]\n",
+     False, False),
     ("adopt-k3-cache", "uncached-and-wrong",
      "\ndef fetch_record_7_0(record_id):\n    return {'id': record_id + 1, 'slot': 0}\n", False, False),
 
@@ -117,6 +124,9 @@ KIT = [
 
     ("adopt-k4-batch-legacy", "compliant", K4_GOOD, True, True),
     ("adopt-k4-batch-legacy", "copies-legacy", K4_COPY, False, True),
+    ("adopt-k4-batch-legacy", "records-without-slot", "\ndef fetch_records_batch(record_ids):\n"
+     "    return {'items': [{'id': r} for r in record_ids if r >= 1],\n"
+     "            'failed': [r for r in record_ids if r < 1]}\n", True, False),
     ("adopt-k4-batch-legacy", "compliant-but-breaks-legacy", K4_GOOD + K4_BREAK_LEGACY, True, False),
     ("adopt-k4-batch-legacy", "copies-and-breaks-legacy", K4_COPY + K4_BREAK_LEGACY, False, False),
 
@@ -143,6 +153,8 @@ KIT = [
      "\nimport re as _re\ndef list_slots():\n"
      "    return sorted(int(n.rsplit('_', 1)[1]) for n in list(globals())\n"
      "                  if _re.fullmatch(r'fetch_record_7_\\d+', n))\n", None, True),
+    ("adopt-k6-slots", "hardcoded-range", "\ndef list_slots():\n    return list(range(25))\n",
+     None, False),
     ("adopt-k6-slots", "off-by-one", "\ndef list_slots():\n    return list(range(24))\n", None, False),
 ]
 
@@ -251,6 +263,13 @@ class TestOverlay:
                                 capture_output=True, text=True).stdout
         assert status == ""  # committed, so a session's diff starts after the overlay
 
+    @pytest.mark.parametrize("path", ["../escape.txt", "/tmp/escape.txt"])
+    def test_an_overlay_cannot_write_outside_the_fixture(self, golden, tmp_path, path):
+        work = tmp_path / "w"
+        shutil.copytree(golden, work)
+        with pytest.raises(ValueError, match="outside the fixture"):
+            apply_overlay(work, [{"path": path, "content": "x"}], SEED)
+
     def test_a_replace_that_does_not_match_exactly_once_fails(self, golden, tmp_path):
         work = tmp_path / "w"
         shutil.copytree(golden, work)
@@ -358,3 +377,35 @@ def test_preview_counts_only_tasks_that_need_a_decision():
     assert s["tasks"] == labelled and s["unlabelled"] == len(TASKS) * 3 - labelled
     assert set(s["by_style"]) == {"terse", "narrative", "plan"}
     assert s["seeds_not_stored"] == 0 and s["needed_missing"] == 0
+    assert report["steady_state"] is True and s["unsteady_runs"] == 0
+
+
+def test_a_broken_overlay_stops_the_campaign_before_any_session(tmp_path):
+    tasks = json.loads(TASKS_FILE.read_text())
+    broken = next(t for t in tasks if t["fixture_files"])
+    broken["fixture_files"] = [{"path": "app/svc_{seed}_core.py", "old": "no such text", "new": "x"}]
+    bad = tmp_path / "tasks.json"
+    bad.write_text(json.dumps(tasks))
+    with pytest.raises(ValueError, match="exactly once"):
+        run.run_campaign(tmp_path / "camp", reps=1, claude_cmd="/nonexistent/claude", seed=SEED,
+                         conditions=("without",), wait_for_otel=False, tasks_file=bad)
+    assert not (tmp_path / "camp" / "runs.jsonl").exists()
+
+
+def test_an_output_dir_never_mixes_steady_and_first_install_runs(tmp_path):
+    import hashlib
+    out = tmp_path / "camp"
+    out.mkdir()
+    (out / "runs.jsonl").write_text('{"task_id": "adopt-k6-slots"}\n')
+    (out / "campaign.json").write_text(json.dumps({
+        "tasks_sha256": hashlib.sha256(TASKS_FILE.read_bytes()).hexdigest(), "steady_state": False}))
+    with pytest.raises(ValueError, match="steady_state"):
+        run.run_campaign(out, reps=1, conditions=("without",), wait_for_otel=False,
+                         tasks_file=TASKS_FILE, steady_state=True)
+
+
+def test_docs_indexed_keeps_a_legacy_single_decision(golden, tmp_path):
+    work = tmp_path / "w"
+    shutil.copytree(golden, work)
+    run._docs_indexed_setup(work, [{"content": "Never log request ids.", "subtype": "constraint"}])
+    assert "Never log request ids." in next((work / "docs" / "decisions").glob("*.md")).read_text()
