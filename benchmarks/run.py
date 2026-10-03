@@ -119,10 +119,9 @@ def _condition_c_setup(work: Path, seed_decision: str,
     from contexer import miner
     convs = [c["content"] for c in miner.mine_conventions(str(work))]
     # Every seed the contexer arm stores, titled as Contexer shows it, so both arms carry the
-    # same knowledge.
+    # same knowledge, superseded revisions included (dated and marked).
     seeds = ([seed_decision] if seed_decision else []) + [
-        f"{item['title']}: {item['content']}" if item.get("title") else item["content"]
-        for item in seed_decisions or []]
+        line for item in seed_decisions or [] for line in _static_entries(item)]
 
     def _is_rule(text: str) -> bool:
         return text.lower().startswith(("never", "always", "don't", "do not"))
@@ -162,6 +161,29 @@ def _condition_c_setup(work: Path, seed_decision: str,
         (work / name).write_text(text)
 
 
+def _static_entries(item: dict) -> list[str]:
+    """A seed as static-file lines: each superseded revision, dated and marked as replaced by the
+    current one, then the current revision with its date. A plain seed is one titled line."""
+    def titled(rev: dict) -> str:
+        return f"{rev['title']}: {rev['content']}" if rev.get("title") else rev["content"]
+    current = titled(item)
+    if not item.get("history"):
+        return [current]
+    lines = [f"{titled(old)} (In force from {old.get('date') or 'an earlier date'}; superseded on "
+             f"{item.get('date') or 'a later date'} by: {_decision_title(item)}.)"
+             for old in item["history"]]
+    lines.append(f"{current} (Decided {item.get('date') or 'later'}; replaces the earlier rule "
+                 f"\"{_decision_title(item['history'][-1])}\".)")
+    return lines
+
+
+def _clarified(result: str, sides: list, side_taken: bool) -> bool:
+    """K7c: the session names both colliding decisions (at least one term from each side in its
+    final message) and its code takes neither side."""
+    text = result.lower()
+    return not side_taken and all(any(term.lower() in text for term in side) for side in sides)
+
+
 def _decision_title(item: dict) -> str:
     """The title a decision record shows: its own, or its first sentence (capped)."""
     if item.get("title"):
@@ -183,14 +205,31 @@ def _docs_indexed_setup(work: Path, seed_decisions: list) -> None:
              "## Decision records", "",
              "Engineering decisions live in `docs/decisions/`, one file each. Read the ones that "
              "apply before changing code:", ""]
-    for number, item in enumerate(seed_decisions or [], start=1):
-        title = _decision_title(item)
-        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:50]
-        name = f"{number:03d}-{slug}.md"
-        (records / name).write_text(f"# {title}\n\n- Status: accepted\n"
-                                    f"- Type: {item.get('subtype') or 'decision'}\n\n"
-                                    f"{item['content']}\n")
-        index.append(f"- [{title}](docs/decisions/{name})")
+    number = 0
+    for item in seed_decisions or []:
+        # A superseded revision keeps its own record, marked and pointing at its replacement.
+        revisions = [(old, "superseded") for old in item.get("history", [])] + [(item, "accepted")]
+        names = []
+        for revision, status in revisions:
+            number += 1
+            title = _decision_title(revision)
+            slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:50]
+            names.append((f"{number:03d}-{slug}.md", title, revision, status))
+        for position, (name, title, revision, status) in enumerate(names):
+            if status == "superseded":
+                status_line = (f"- Status: superseded on {item.get('date') or 'a later date'} by "
+                               f"{names[-1][0]}\n- In force from: "
+                               f"{revision.get('date') or 'an earlier date'}")
+            elif len(names) > 1:
+                status_line = (f"- Status: accepted ({item.get('date') or 'later'}), supersedes "
+                               f"{names[position - 1][0]}")
+            else:
+                status_line = "- Status: accepted"
+            (records / name).write_text(f"# {title}\n\n{status_line}\n"
+                                        f"- Type: {item.get('subtype') or 'decision'}\n\n"
+                                        f"{revision['content']}\n")
+            index.append(f"- [{title}](docs/decisions/{name})"
+                         + (" (superseded)" if status == "superseded" else ""))
     (work / "CLAUDE.md").write_text("\n".join(index) + "\n")
 
 
@@ -515,6 +554,17 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
                 failures.append(f"[{name}] " + ((chk.stdout or b"") + (chk.stderr or b"")).decode(
                     errors="replace")[-1500:])
         row["success"] = not failures
+        clarification = task.get("clarification")
+        if clarification:
+            # K7c: the correct outcome is to stop and name the conflict, never to implement.
+            taken_cmd = clarification["side_taken_cmd"].replace("{seed}", str(seed))
+            # Exit 1 alone means "no side taken"; 0 (a side) or anything else (the check crashed on
+            # code the session wrote) means the session acted instead of stopping.
+            taken = subprocess.run(taken_cmd, shell=True, cwd=work, capture_output=True,
+                                   timeout=600, env=_session_env(home, 0)).returncode != 1
+            row["clarified"] = _clarified(str(res.get("result", "")), clarification["sides"],
+                                          taken)
+            row["success"] = row["clarified"]
         if failures:
             # The session's folders are discarded after scoring: keep why the check failed.
             row["check_output"] = "\n".join(failures)[-3000:]
