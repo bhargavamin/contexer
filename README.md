@@ -235,6 +235,7 @@ These results describe the measured tasks, not a guarantee for every project. A 
 | **[Local console](docs/ui.md)** | `contexer ui`, the seven views, `[ui]` settings, security model |
 | **[Decision-impact pilot](docs/decision-impact-pilot.md)** | Explicitly requested file checks, local receipts, consent, setup, and claim limits |
 | **[Benchmark](docs/benchmark.md)** | Live-session A/B methodology, findings (including negative ones), raw data |
+| **[Adoption readiness](docs/adoption-readiness.md)** | For a team lead: what holds today, known gaps, and the issues tracking them |
 
 ---
 
