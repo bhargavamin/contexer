@@ -359,15 +359,17 @@ def _check_paired(ok_rows, warnings, recomputed):
 
 
 def _check_chains(rows, failures):
-    """Check 7 (coverage only): each chain must cover steps 1..3 in every
-    condition observed in the campaign."""
+    """Check 7 (coverage only): each chain must cover steps 1..N in every condition observed in
+    the campaign, where N is the chain's highest step in any condition (chains differ in length:
+    the memory chains have three steps, the capture loop two)."""
     chains = sorted({r.get("chain") for r in rows if r.get("chain")})
     conds = _conditions_present(rows)
     for chain in chains:
+        last = max(int(r.get("step", 0) or 0) for r in rows if r.get("chain") == chain)
         for c in conds:
             steps = {int(r.get("step", 0) or 0) for r in rows
                      if r.get("chain") == chain and r.get("condition") == c}
-            missing = [s for s in (1, 2, 3) if s not in steps]
+            missing = [s for s in range(1, last + 1) if s not in steps]
             if missing:
                 failures.append(f"chain '{chain}' condition '{c}' missing step(s): "
                                 f"{missing}")

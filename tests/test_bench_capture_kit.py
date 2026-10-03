@@ -269,3 +269,16 @@ def test_matching_ignores_the_runs_own_path_and_chain_name(tmp_path):
     assert run._matches([r"\bcents\b"], text) is True
     assert run._matches([r"\bcents\b"], text, noise) is False
     assert run._matches([r"\bcents\b"], text + " Keep money in cents.", noise) is True
+
+
+def test_validator_accepts_two_step_chains_and_flags_a_missing_step():
+    from benchmarks import validate
+    rows = [{"chain": "cap-x", "step": s, "condition": c}
+            for c in ("without", "with") for s in (1, 2)]
+    failures = []
+    validate._check_chains(rows, failures)
+    assert failures == []
+    failures = []
+    validate._check_chains([r for r in rows if not (r["condition"] == "with" and r["step"] == 2)],
+                           failures)
+    assert failures == ["chain 'cap-x' condition 'with' missing step(s): [2]"]
