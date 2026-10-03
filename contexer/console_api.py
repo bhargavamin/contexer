@@ -169,6 +169,7 @@ def _console_proposed(prop: dict) -> dict:
     """A pending `proposed_revision` as the console renders the "after" side of a diff."""
     return {
         "content": prop.get("content", ""),
+        "applies_when": list(prop.get("applies_when") or []),
         "title": prop.get("title", ""),
         "subtype": prop.get("subtype", ""),
         "source": prop.get("source", ""),
@@ -188,7 +189,7 @@ def _console_proposal(entry: dict) -> dict:
         "subtype": entry.get("subtype", ""),
         "status": store.entry_status(entry),
         "revision": version,
-        "current": {"content": revisions.current_content(entry), "title": rev.get("title", ""),
+        "current": {"content": revisions.current_content(entry), "applies_when": list(entry.get("applies_when") or []), "title": rev.get("title", ""),
                     "version_number": version},
         "proposed": _console_proposed(entry.get("proposed_revision") or {}),
     }

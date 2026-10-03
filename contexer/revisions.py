@@ -90,7 +90,11 @@ def normalize_applies_when(value: list[str] | None) -> list[str] | None:
         if not isinstance(phrase, str):
             raise ValueError("applies_when phrases must be strings")
         clean = " ".join(phrase.split())
-        if not clean or len(clean) > 100 or len(re.findall(r"[a-z0-9]+", clean.lower())) < 2:
+        from contexer import retrieval
+        subject = clean
+        for artifact in retrieval.raw_path_artifacts(clean):
+            subject = subject.replace(artifact, " ")
+        if not clean or len(clean) > 100 or len(set(retrieval.index_tokens(subject))) < 2:
             raise ValueError("applies_when needs specific task phrases of 2+ words, at most 100 characters")
         if clean not in phrases:
             phrases.append(clean)

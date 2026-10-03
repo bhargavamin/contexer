@@ -413,6 +413,9 @@ def review_impact(repo_path: str, entry: dict, context: dict | None = None) -> d
     proposed = _origin_label(prop.get("source")) if prop else ""
     from contexer import bootstrap
     return {
+        "applicability": {"current": list(entry.get("applies_when") or []),
+                          "proposed": list(prop.get("applies_when") or [])}
+                         if "applies_when" in prop else {},
         "bootstrap_evidence": bootstrap.render(entry, repo_path),
         "identity": {
             "id": str(entry.get("id") or ""),
@@ -495,6 +498,10 @@ def impact_lines(impact: dict, seen_coverage: set | None = None) -> list[str]:
     invariant, not the only guard.
     """
     lines = []
+    applicability = impact.get("applicability") or {}
+    if applicability:
+        lines += ["Current applicability: " + "; ".join(applicability.get("current") or ["none"]),
+                  "Proposed applicability: " + "; ".join(applicability.get("proposed") or ["none"])]
     identity = impact.get("identity") or {}
     if identity.get("origin"):
         standing = identity.get("standing_origin") or ""
