@@ -20,14 +20,18 @@ def _stage(first: dict, second: dict) -> str:
 
 
 def summarize(rows: list) -> dict:
-    rows = [r for r in rows if r.get("kind") == "capture" and not r.get("error")]
+    rows = [r for r in rows if r.get("kind") == "capture"]
+    # Every attempted chain-rep, errored or not, so lost runs show up instead of vanishing.
+    attempted = Counter(c for c in {(r["chain"], r["condition"], r["rep"]) for r in rows})
+    rows = [r for r in rows if not r.get("error")]
     pairs: dict = {}
     for r in rows:
         pairs.setdefault((r["chain"], r["condition"], r["rep"]), {})[r["step"]] = r
     arms = {}
     for arm in ARMS:
         runs = [p for (_, c, _), p in pairs.items() if c == arm and 1 in p and 2 in p]
-        arms[arm] = {"runs": len(runs),
+        tried = sum(n for (_, c, _), n in attempted.items() if c == arm)
+        arms[arm] = {"runs": len(runs), "incomplete": tried - len(runs),
                      "captured": None if arm == "without" else sum(bool(p[1].get("captured"))
                                                                    for p in runs),
                      "success": sum(bool(p[2].get("success")) for p in runs)}
@@ -41,11 +45,16 @@ def summarize(rows: list) -> dict:
 
 
 def render(summary: dict) -> str:
-    out = ["| Arm | Runs | Rule recorded after session 1 | Session 2 success |",
-           "| --- | --- | --- | --- |"]
+    out = ["| Arm | Runs | Incomplete (errored) | Rule recorded after session 1 | Session 2 success |",
+           "| --- | --- | --- | --- | --- |"]
     for arm, a in summary["arms"].items():
         captured = "-" if a["captured"] is None else f"{a['captured']}/{a['runs']}"
-        out.append(f"| {arm} | {a['runs']} | {captured} | {a['success']}/{a['runs']} |")
+        out.append(f"| {arm} | {a['runs']} | {a['incomplete']} | {captured} | "
+                   f"{a['success']}/{a['runs']} |")
+    lost = sum(a["incomplete"] for a in summary["arms"].values())
+    if lost:
+        out += ["", f"**{lost} chain run(s) errored and are excluded above; rerun them before "
+                "comparing arms.**"]
     out += ["", "Contexer drop-off (stage, session 2 succeeded): count", ""]
     out += [f"- {stage}, {'succeeded' if ok else 'failed'}: {n}"
             for (stage, ok), n in sorted(summary["funnel"].items())]

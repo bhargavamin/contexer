@@ -352,10 +352,16 @@ def test_capture_report_counts_each_arm_and_stage():
             row("with", 1, captured=True, capture_status="pending_approval"),
             row("with", 2, success=False, needed_delivery="none")]
     s = capture_report.summarize(rows)
-    assert s["arms"]["without"] == {"runs": 1, "captured": None, "success": 0}
-    assert s["arms"]["claudemd_maintained"] == {"runs": 1, "captured": 1, "success": 1}
+    assert s["arms"]["without"] == {"runs": 1, "incomplete": 0, "captured": None, "success": 0}
+    assert s["arms"]["claudemd_maintained"] == {"runs": 1, "incomplete": 0, "captured": 1,
+                                                "success": 1}
     assert s["funnel"] == {("captured, pending review", False): 1}
-    assert "| with | 1 | 1/1 | 0/1 |" in capture_report.render(s)
+    assert "| with | 1 | 0 | 1/1 | 0/1 |" in capture_report.render(s)
+    # An errored session 1 stops its chain: the run is counted as incomplete, never dropped.
+    errored = {**row("with", 1), "rep": 1, "error": "session error"}
+    s = capture_report.summarize(rows + [errored])
+    assert s["arms"]["with"]["incomplete"] == 1 and s["arms"]["with"]["runs"] == 1
+    assert "1 chain run(s) errored" in capture_report.render(s)
 
 
 def test_validator_requires_capture_measurements_and_task_file_length(tmp_path):
