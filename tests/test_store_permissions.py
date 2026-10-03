@@ -39,6 +39,7 @@ def test_status_reports_unsafe_directory_without_reading_target(tmp_path, monkey
     cli.status([])
     text = capsys.readouterr().out
     assert "contexer " in text and "unavailable" in text and "symlink" in text
+    assert "guard hook:" in text and "update:" in text
     assert target.stat().st_mode & 0o777 == 0o755
 
 
@@ -72,4 +73,17 @@ def test_console_state_write_tightens_existing_directory(tmp_path, monkeypatch):
     target.mkdir(mode=0o755)
     monkeypatch.setattr(daemon, "STATE_PATH", target / "ui.json")
     daemon.write_state(daemon.UiState(0, 31415, "fixture", "now", "dev"))
+    assert target.stat().st_mode & 0o777 == 0o700
+
+
+def test_readable_linux_directory_does_not_require_procfs(tmp_path, monkeypatch):
+    from contexer import permissions
+    target = tmp_path / "private"
+    target.mkdir(mode=0o755)
+    original = permissions.os.chmod
+    def no_proc(path, *args, **kwargs):
+        assert not str(path).startswith("/proc/")
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(permissions.os, "chmod", no_proc)
+    permissions.ensure_private_directory(target)
     assert target.stat().st_mode & 0o777 == 0o700

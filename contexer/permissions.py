@@ -14,8 +14,13 @@ def ensure_private_directory(path: Path) -> Path:
     if not stat.S_IMODE(info.st_mode) & 0o077:
         return path
     # Metadata-only opens preserve write/search-only owner modes such as 0300.
-    access = getattr(os, "O_PATH", getattr(os, "O_SEARCH", os.O_RDONLY))
-    descriptor = os.open(path, access | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    flags = getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, os.O_RDONLY | flags)
+        access = os.O_RDONLY
+    except PermissionError:
+        access = getattr(os, "O_PATH", getattr(os, "O_SEARCH", os.O_RDONLY))
+        descriptor = os.open(path, access | flags)
     try:
         info = os.fstat(descriptor)
         if not stat.S_ISDIR(info.st_mode) or (hasattr(os, "getuid") and info.st_uid != os.getuid()):

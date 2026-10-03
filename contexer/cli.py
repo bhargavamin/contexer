@@ -1028,6 +1028,9 @@ def status(rest: list | None = None) -> None:
                 for line in adapter.status_lines(home):
                     print(line)
             print(f"  store dir:    {store_dir} (unavailable: {exc})")
+            print(f"  guard hook:   {_guard_hook_status_line()}")
+            print("  update:       unavailable while the store directory is unsafe")
+            _installation_status_warnings(home, installed_ok)
             return
     swept = 0
     if store_dir.exists():
@@ -1172,6 +1175,10 @@ def status(rest: list | None = None) -> None:
                 kb = _num(last_render.get("chars")) / 1024
                 print(f"    last render: {last_render.get('rows', 0)} rows, ~{kb:.1f}KB")
 
+    _installation_status_warnings(home, installed_ok)
+
+
+def _installation_status_warnings(home: Path, installed_ok: bool) -> None:
     config_paths = (
         home / ".claude.json",
         home / ".claude" / "settings.json",
