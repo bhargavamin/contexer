@@ -119,6 +119,18 @@ KIT = [
     ("adopt-k3-audit", "ignores-its-arguments", "\nimport time as _t\n"
      "def record_audit_entry(record_id, action):\n"
      "    return {'record_id': 1, 'action': 'read', 'at_ms': int(_t.time() * 1000)}\n", True, False),
+    ("adopt-k3-audit", "fixed-time-fresh-id", "\nimport time as _t, uuid as _u\n_AT = int(_t.time() * 1000)\n"
+     "def record_audit_entry(record_id, action):\n"
+     "    return {'id': str(_u.uuid4()), 'record_id': record_id, 'action': action, 'at_ms': _AT}\n", True, False),
+    ("adopt-k3-audit", "fixed-iso-fresh-id", "\nimport datetime as _dt, uuid as _u\n"
+     "_AT = _dt.datetime.now(_dt.timezone.utc).isoformat()\ndef record_audit_entry(record_id, action):\n"
+     "    return {'id': str(_u.uuid4()), 'record_id': record_id, 'action': action, 'timestamp': _AT}\n", False, False),
+    ("adopt-k3-audit", "iso-with-fresh-id", "\nimport datetime as _dt, uuid as _u\ndef record_audit_entry(record_id, action):\n"
+     "    return {'id': str(_u.uuid4()), 'record_id': record_id, 'action': action,\n"
+     "            'timestamp': _dt.datetime.now(_dt.timezone.utc).isoformat()}\n", False, True),
+    ("adopt-k3-audit", "counter-id-and-clock", "\nimport itertools as _i, time as _t\n_N = _i.count(1)\n"
+     "def record_audit_entry(record_id, action):\n"
+     "    return {'id': next(_N), 'record_id': record_id, 'action': action, 'at_ms': int(_t.time() * 1000)}\n", True, True),
     ("adopt-k3-audit", "time-fixed-at-import", "\nimport time as _t\n_AT = int(_t.time() * 1000)\n"
      "def record_audit_entry(record_id, action):\n"
      "    return {'record_id': record_id, 'action': action, 'at_ms': _AT}\n", True, False),
@@ -270,6 +282,18 @@ KIT += [
 
     ("adopt-k4-change-event", "compliant", "\nimport time as _t\ndef record_change_event(record_id, change):\n"
      "    return {'record_id': record_id, 'change': change, 'at_ms': int(_t.time() * 1000)}\n", True, True),
+    ("adopt-k4-change-event", "fixed-time-fresh-id", "\nimport time as _t, uuid as _u\n_AT = int(_t.time() * 1000)\n"
+     "def record_change_event(record_id, change):\n"
+     "    return {'id': str(_u.uuid4()), 'record_id': record_id, 'change': change, 'at_ms': _AT}\n", True, False),
+    ("adopt-k4-change-event", "fixed-iso-fresh-id", "\nimport datetime as _dt, uuid as _u\n"
+     "_AT = _dt.datetime.now(_dt.timezone.utc).isoformat()\ndef record_change_event(record_id, change):\n"
+     "    return {'id': str(_u.uuid4()), 'record_id': record_id, 'change': change, 'timestamp': _AT}\n", False, False),
+    ("adopt-k4-change-event", "iso-with-fresh-id", "\nimport datetime as _dt, uuid as _u\ndef record_change_event(record_id, change):\n"
+     "    return {'id': str(_u.uuid4()), 'record_id': record_id, 'change': change,\n"
+     "            'timestamp': _dt.datetime.now(_dt.timezone.utc).isoformat()}\n", False, True),
+    ("adopt-k4-change-event", "counter-id-and-clock", "\nimport itertools as _i, time as _t\n_N = _i.count(1)\n"
+     "def record_change_event(record_id, change):\n"
+     "    return {'id': next(_N), 'record_id': record_id, 'change': change, 'at_ms': int(_t.time() * 1000)}\n", True, True),
     ("adopt-k4-change-event", "time-fixed-at-import", "\nimport time as _t\n_AT = int(_t.time() * 1000)\n"
      "def record_change_event(record_id, change):\n"
      "    return {'record_id': record_id, 'change': change, 'at_ms': _AT}\n", True, False),
