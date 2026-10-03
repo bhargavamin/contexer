@@ -121,3 +121,7 @@ Directory tightening uses an opened directory descriptor, refuses symlinks and u
 Private directory tightening uses metadata/search descriptors and preserves write/search-only modes such as 0300. Already-private directories keep every owner bit unchanged; status reports an unsafe directory without reading through it.
 
 Private-directory tightening uses an owner-readable descriptor when possible, so readable Linux directories do not require procfs. Write/search-only Linux directories require the verified O_PATH procfs route; if it is unavailable, access refuses without loosening permissions. An unsafe store directory still allows status to report guard and installation diagnostics; update diagnostics explicitly report unavailable rather than reading or writing through that directory.
+
+### Privacy erasure
+
+`lifecycle.erase_decision` is called only by the human CLI and authenticated console; it is absent from MCP. It preflights strict live/tombstone reads, acquires sharing/reconciliation/store locks, and refuses known shared copies. Related queued records and copied payloads are removed or scrubbed across the store directory, including evidence and derived indexes. Cleanup publishes before removing the live entry so failures remain retryable. The existing tombstone sidecar retains only type `erasure`, id, dates, actor and fixed reason; restoration explicitly refuses it.
