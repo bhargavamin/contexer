@@ -120,7 +120,69 @@ def is_present(home: Path) -> bool:
     return (home / ".claude").exists() or (home / ".claude.json").exists()
 
 
-def format_session_start(payload: dict) -> dict:
+SESSION_CONTEXT_BYTES = 8_000
+
+
+def budget_session_context(context: str) -> tuple[str, set[str]]:
+    """Keep complete guidance blocks below Claude's observed inline-output cutoff."""
+    def size(text: str) -> int:
+        # Installed hooks serialize with json.dumps' default ASCII escaping. Account
+        # for that wire size as well as the decoded text so Unicode cannot evade the cap.
+        return len(json.dumps(text).encode("utf-8"))
+
+    if size(context) <= SESSION_CONTEXT_BYTES:
+        return context, set()
+    blocks: list[tuple[str, str]] = []
+    heading = ""
+    current: list[str] = []
+    for line in context.splitlines():
+        # A current conflict is one delivery: retain both alternatives and the guide.
+        if "Conflicting current decisions" in heading and not line.startswith("## "):
+            current.append(line)
+            continue
+        if line.startswith("## ") or line.startswith("- ") or (line and not line.startswith(" ")):
+            if current:
+                blocks.append((heading, "\n".join(current)))
+                current = []
+            if line.startswith("## "):
+                heading = line
+                continue
+        current.append(line)
+    if current:
+        blocks.append((heading, "\n".join(current)))
+
+    def priority(block: tuple[str, str]) -> int:
+        section, body = block
+        if "Conflicting current decisions" in section:
+            return 1
+        if "[constraint]" in body.splitlines()[0] and "[suggested]" not in body.splitlines()[0]:
+            return 0
+        if "Global rules" in section:
+            return 1
+        if "update pending approval" in body:
+            return 2
+        if "Project rules" in section:
+            return 3
+        return 4
+
+    pointer = "More stored context omitted to fit Claude's inline limit; call get_context with subject keywords or files before relying on unseen guidance."
+    selected: list[tuple[str, str]] = []
+    dropped: set[str] = set()
+    used = size(pointer) + 2
+    seen_headings: set[str] = set()
+    for section, body in sorted(blocks, key=priority):
+        prefix = section + "\n" if section and section not in seen_headings else ""
+        cost = size(prefix + body + "\n")
+        if used + cost <= SESSION_CONTEXT_BYTES:
+            selected.append((prefix, body))
+            seen_headings.add(section)
+            used += cost
+        else:
+            dropped.update(re.findall(r"\(id=([a-f0-9]{8})\)", body))
+    return "\n".join(prefix + body for prefix, body in selected) + "\n\n" + pointer, dropped
+
+
+def format_session_start(payload: dict, *, host: str = "claude") -> dict:
     """Neutral payload -> Claude SessionStart hook output. Empty context => status only."""
     if not payload.get("context"):
         return {"systemMessage": payload["status"]} if payload.get("status") else {}
@@ -128,7 +190,8 @@ def format_session_start(payload: dict) -> dict:
         "systemMessage": payload["status"],
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": payload["context"],
+            "additionalContext": (budget_session_context(payload["context"])[0]
+                                  if host == "claude" else payload["context"]),
         },
     }
 
