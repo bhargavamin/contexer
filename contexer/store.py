@@ -60,7 +60,7 @@ def store_dir() -> Path:
 
 
 def ensure_store_dir() -> Path:
-    """`store_dir()`, created with mode 0o700 if it is missing.
+    """Create the store directory privately and remove existing non-owner permissions.
 
     Raises whatever `mkdir` raises. Every caller already sat inside its own try or on a
     path that must fail loudly, so swallowing here would hide an unwritable home from the
@@ -68,6 +68,9 @@ def ensure_store_dir() -> Path:
     """
     target = store_dir()
     target.mkdir(mode=0o700, exist_ok=True)
+    mode = target.stat().st_mode & 0o7777
+    if mode & 0o077:
+        target.chmod(mode & ~0o077)
     return target
 
 

@@ -212,7 +212,11 @@ def _resolve_targets(rest: list) -> list:
 
 def install(rest: list | None = None) -> None:
     home = Path.home()
-    (home / ".contexer").mkdir(exist_ok=True)
+    context_dir = home / ".contexer"
+    context_dir.mkdir(mode=0o700, exist_ok=True)
+    mode = context_dir.stat().st_mode & 0o7777
+    if mode & 0o077:
+        context_dir.chmod(mode & ~0o077)
     for adapter in _resolve_targets(rest or []):
         print(f"Installing for {adapter.NAME}...")
         for line in adapter.install(home):
