@@ -2,8 +2,8 @@
 
 The properties asserted here are the ones the design is FOR, not incidental behaviour:
 
-* a write is one file and nothing else - no listing, no lock, no contention, so two racing
-  hook writers both land;
+* a write creates one event file without listing or serializing ordinary writers; the
+  nonblocking shared publication gate excludes privacy erasure, so racing hook writers land;
 * a write is atomic - a reader sees the whole event or no event, never a torn one;
 * one bad file never hides its valid siblings (it is quarantined as it is met);
 * loss is RECORDED (`.gap`) rather than silent, whether it came from a failed write or a
