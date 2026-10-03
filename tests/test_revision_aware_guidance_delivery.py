@@ -1039,7 +1039,7 @@ class TestAnchorOverflow:
         assert all(title in text for title in titles)
         assert "4 more decisions anchored to files in this prompt not shown" in text
         # #353: the path's bare basename is matched on but not listed a second time.
-        assert "call get_context(files=['src/outbox.py']) if relevant." in text
+        assert "call get_context(files=['src/outbox.py']) before editing" in text
 
     def test_unrelated_constraint_is_named_without_displacing_task_guidance(self, tmp_repo):
         for title in ("Add credit notes as separate documents", "Number credit notes in sequence",
@@ -1098,5 +1098,5 @@ class TestPointerFiles:
         text, meta = store.get_context_for_prompt_with_meta(
             tmp_repo, "check src/billing.py logic", "mention-pointer")
         assert text.startswith("[Contexer] Related stored decisions mention src/billing.py:")
-        assert "call get_context(files=['src/billing.py']) if relevant." in text
+        assert "call get_context(files=['src/billing.py']) before editing" in text
         assert meta["topics"] == ["src/billing.py"]

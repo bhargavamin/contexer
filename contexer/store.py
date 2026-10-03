@@ -6481,7 +6481,8 @@ def _anchor_overflow_pointer(overflow: list[dict], files: list[str], index: dict
     # Not "anchored to <file>": with several files in the prompt, which one matched is unknown.
     return (f"[Contexer] {_pl(len(overflow), 'more decision')} anchored to files in this "
             f"prompt not shown: {'; '.join(named)}{more} - "
-            f"call get_context(files={_pointer_files(files, prompt)!r}) if relevant.")
+            f"call get_context(files={_pointer_files(files, prompt)!r}) before editing if a listed "
+            "rule applies. Add query=<task subject> to focus the lookup on missing guidance.")
 
 
 def _prompt_file_hits(
@@ -6785,10 +6786,11 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
             # redundant fetch, but a lexical candidate can still be a false positive. Tell
             # the model to judge relevance and recover through Contexer before reading files.
             subject = "task" if task_origin else "question"
-            request_kind = "task" if task_origin else "question"
+            request_kind = "request"
             text = (f"[Contexer: auto-fetched for this {subject}] "
                     f"(use the relevant context below; if it does not answer the {request_kind}, "
-                    "call Contexer's get_context with concise subject keywords before reading files; "
+                    "you must make one focused lookup using Contexer's get_context with concise subject "
+                    "keywords before reading or editing files; narrow by files when available; "
                     "do not substitute another memory, graph, or search tool)\n"
                     f"{rendered}")
             if overflow:
@@ -6849,7 +6851,8 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
         shown_files = _pointer_files(file_artifacts_prompt, prompt)
         text = (f"[Contexer] Related stored decisions mention "
                 f"{', '.join(shown_files[:3])}: {named}{more} - "
-                f"call get_context(files={shown_files!r}) if relevant.")
+                f"call get_context(files={shown_files!r}) before editing if a listed rule applies. "
+                "Add query=<task subject> to focus the lookup on missing guidance.")
         if overflow_text:
             text = overflow_text + "\n" + text
         meta = {"kind": "pointer", "count": len(mention_hits) + len(overflow), "topics": shown_files}

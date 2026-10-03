@@ -250,3 +250,5 @@ MIT. See [LICENSE](LICENSE) for full terms.
 The Contexer name and logo are trademarks of Contexer.ai. The MIT license does not grant rights to use the Contexer name, logo, or brand in any way that implies official affiliation.
 
 When saving a decision, the agent can include concrete situations where it applies, such as “slow upstream reads.” These help later tasks find the rule even when the task uses different words from the decision. File-specific decisions remain discoverable through lookup pointers when their subject does not fit the current task.
+
+Experimental lookup wording asks for one focused context lookup when guidance leaves a request unanswered. An eight-session comparison did not show an improvement; this draft is not ready for release.

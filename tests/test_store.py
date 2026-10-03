@@ -4605,7 +4605,7 @@ class TestIndexSelfHeal:
         store.session_start_payload(tmp_repo)
         healed = store.get_context_for_prompt(tmp_repo, "why do jwt refresh tokens live in cookies?")
         assert "(filtered: query=" not in healed
-        assert "if it does not answer the question" in healed
+        assert "if it does not answer the request" in healed
         assert "JWT" in healed and "cookies" in healed
 
 
@@ -4706,7 +4706,7 @@ class TestBM25Router:
         result = store.get_context_for_prompt(tmp_repo, "why was bm25 algorithm implemented?")
         assert "Use BM25 for prompt retrieval" in result
         assert "Keep generated release notes concise" not in result
-        assert "if it does not answer the question" in result
+        assert "if it does not answer the request" in result
         assert "do not substitute another memory, graph, or search tool" in result
 
     def test_multiword_get_context_recovery_uses_ranked_terms(self, tmp_repo):
@@ -6570,7 +6570,7 @@ class TestRationaleSessionIdPlumbing:
         assert "tokens" not in msg  # small injection -> cost note suppressed
         ctx = out["hookSpecificOutput"]["additionalContext"]
         assert ctx.startswith("[Contexer: auto-fetched for this question]")
-        assert "if it does not answer the question" in ctx
+        assert "if it does not answer the request" in ctx
         assert "Contexer's get_context" in ctx
 
     def test_large_injection_flags_cost(self, tmp_repo):

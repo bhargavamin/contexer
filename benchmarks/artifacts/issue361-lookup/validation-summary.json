@@ -1,0 +1,275 @@
+{
+  "session_count": 9,
+  "approved_max_usd": 10,
+  "per_session_cli_cap_usd": 1,
+  "actual_cost_usd": 0.6409182,
+  "model": "claude-sonnet-5-5",
+  "seed": 0,
+  "repetitions_per_cell": 1,
+  "startup": {
+    "task_id": "adopt-k2-config",
+    "store_size": 150,
+    "needed_delivery": "full",
+    "success": true,
+    "transcript": "startup-canary-transcripts/-private-var-folders-zp-q8mqb4s11d3f-rxq753y9-z80000gn-T-tmphskj9xzy-w-adopt-k2-config-with-0/65398273-50a3-4b2a-9b6e-73ca3dd8595e.jsonl",
+    "full_constraint_seed_indices": [
+      1,
+      24,
+      28,
+      48,
+      72,
+      88,
+      107,
+      120,
+      123,
+      126,
+      141
+    ],
+    "content_utf8_bytes": 7764,
+    "json_escaped_content_bytes": 7885,
+    "inline_pointer_received": true
+  },
+  "lookup_comparison": [
+    {
+      "task_id": "adopt-k1-pattern",
+      "condition": "with_prev",
+      "needed_delivery": null,
+      "adherence": true,
+      "functional": true,
+      "success": true,
+      "cost_usd": 0.0770509,
+      "transcript": "lookup-comparison-transcripts/-private-var-folders-zp-q8mqb4s11d3f-rxq753y9-z80000gn-T-tmpgtark-su-w-adopt-k1-pattern-with-prev-0/10fa5bb4-d7c6-41d0-8b48-55385c2d0d87.jsonl",
+      "contexer_lookups": 0,
+      "full_seed_indices_by_delivery": {
+        "SessionStart": [
+          6,
+          12,
+          23,
+          25,
+          28
+        ],
+        "UserPromptSubmit": [
+          11,
+          17,
+          27
+        ],
+        "explicit_lookup": []
+      },
+      "unlabelled_control": true,
+      "published_receipt": "k1-pattern-with-prev-0.jsonl"
+    },
+    {
+      "task_id": "adopt-k1-pattern",
+      "condition": "with",
+      "needed_delivery": null,
+      "adherence": true,
+      "functional": true,
+      "success": true,
+      "cost_usd": 0.05556969999999999,
+      "transcript": "lookup-comparison-transcripts/-private-var-folders-zp-q8mqb4s11d3f-rxq753y9-z80000gn-T-tmpgtark-su-w-adopt-k1-pattern-with-0/b0918a7c-3aae-436d-9c8b-28e60bffb806.jsonl",
+      "contexer_lookups": 0,
+      "full_seed_indices_by_delivery": {
+        "SessionStart": [
+          6,
+          12,
+          23,
+          25,
+          28
+        ],
+        "UserPromptSubmit": [
+          11,
+          17,
+          27
+        ],
+        "explicit_lookup": []
+      },
+      "unlabelled_control": true,
+      "published_receipt": "k1-pattern-with-0.jsonl"
+    },
+    {
+      "task_id": "adopt-k3-cache",
+      "condition": "with_prev",
+      "needed_delivery": "none",
+      "adherence": false,
+      "functional": true,
+      "success": false,
+      "cost_usd": 0.08654999999999999,
+      "transcript": "lookup-comparison-transcripts/-private-var-folders-zp-q8mqb4s11d3f-rxq753y9-z80000gn-T-tmpgtark-su-w-adopt-k3-cache-with-prev-0/7e43f333-43f8-49e2-84d3-20923bebdb85.jsonl",
+      "contexer_lookups": 0,
+      "full_seed_indices_by_delivery": {
+        "SessionStart": [
+          6,
+          12,
+          23,
+          25,
+          28
+        ],
+        "UserPromptSubmit": [
+          2,
+          11,
+          30
+        ],
+        "explicit_lookup": []
+      },
+      "unlabelled_control": false,
+      "published_receipt": "k3-cache-with-prev-0.jsonl"
+    },
+    {
+      "task_id": "adopt-k3-cache",
+      "condition": "with",
+      "needed_delivery": "none",
+      "adherence": false,
+      "functional": true,
+      "success": false,
+      "cost_usd": 0.0756357,
+      "transcript": "lookup-comparison-transcripts/-private-var-folders-zp-q8mqb4s11d3f-rxq753y9-z80000gn-T-tmpgtark-su-w-adopt-k3-cache-with-0/43892ae3-8586-4a90-b793-27f325e6b668.jsonl",
+      "contexer_lookups": 0,
+      "full_seed_indices_by_delivery": {
+        "SessionStart": [
+          6,
+          12,
+          23,
+          25,
+          28
+        ],
+        "UserPromptSubmit": [
+          2,
+          11,
+          30
+        ],
+        "explicit_lookup": []
+      },
+      "unlabelled_control": false,
+      "published_receipt": "k3-cache-with-0.jsonl"
+    },
+    {
+      "task_id": "adopt-k2-digest",
+      "condition": "with_prev",
+      "needed_delivery": "full",
+      "adherence": true,
+      "functional": true,
+      "success": true,
+      "cost_usd": 0.0829804,
+      "transcript": "lookup-comparison-transcripts/-private-var-folders-zp-q8mqb4s11d3f-rxq753y9-z80000gn-T-tmpgtark-su-w-adopt-k2-digest-with-prev-0/b4558b8f-f37c-4913-b8f0-2f9cded30b24.jsonl",
+      "contexer_lookups": 1,
+      "full_seed_indices_by_delivery": {
+        "SessionStart": [
+          6,
+          12,
+          23,
+          25,
+          28
+        ],
+        "UserPromptSubmit": [
+          2,
+          16,
+          27
+        ],
+        "explicit_lookup": [
+          10,
+          22,
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          32,
+          33
+        ]
+      },
+      "unlabelled_control": false,
+      "published_receipt": "k2-digest-with-prev-0.jsonl"
+    },
+    {
+      "task_id": "adopt-k2-digest",
+      "condition": "with",
+      "needed_delivery": "named",
+      "adherence": true,
+      "functional": true,
+      "success": true,
+      "cost_usd": 0.0604603,
+      "transcript": "lookup-comparison-transcripts/-private-var-folders-zp-q8mqb4s11d3f-rxq753y9-z80000gn-T-tmpgtark-su-w-adopt-k2-digest-with-0/718fccdb-066d-4e88-aff2-2dd626dc039e.jsonl",
+      "contexer_lookups": 0,
+      "full_seed_indices_by_delivery": {
+        "SessionStart": [
+          6,
+          12,
+          23,
+          25,
+          28
+        ],
+        "UserPromptSubmit": [
+          2,
+          16,
+          27
+        ],
+        "explicit_lookup": []
+      },
+      "unlabelled_control": false,
+      "published_receipt": "k2-digest-with-0.jsonl"
+    },
+    {
+      "task_id": "adopt-k6-ids",
+      "condition": "with_prev",
+      "needed_delivery": null,
+      "adherence": null,
+      "functional": true,
+      "success": true,
+      "cost_usd": 0.0629169,
+      "transcript": "lookup-comparison-transcripts/-private-var-folders-zp-q8mqb4s11d3f-rxq753y9-z80000gn-T-tmpgtark-su-w-adopt-k6-ids-with-prev-0/01f0dede-3533-4260-94be-646e46f6d2e9.jsonl",
+      "contexer_lookups": 0,
+      "full_seed_indices_by_delivery": {
+        "SessionStart": [
+          6,
+          12,
+          23,
+          25,
+          28
+        ],
+        "UserPromptSubmit": [
+          1,
+          11,
+          31
+        ],
+        "explicit_lookup": []
+      },
+      "unlabelled_control": true,
+      "published_receipt": "k6-ids-with-prev-0.jsonl"
+    },
+    {
+      "task_id": "adopt-k6-ids",
+      "condition": "with",
+      "needed_delivery": null,
+      "adherence": null,
+      "functional": true,
+      "success": true,
+      "cost_usd": 0.0577549,
+      "transcript": "lookup-comparison-transcripts/-private-var-folders-zp-q8mqb4s11d3f-rxq753y9-z80000gn-T-tmpgtark-su-w-adopt-k6-ids-with-0/8124c8f0-b358-4914-b2b3-2e397ff9c177.jsonl",
+      "contexer_lookups": 0,
+      "full_seed_indices_by_delivery": {
+        "SessionStart": [
+          6,
+          12,
+          23,
+          25,
+          28
+        ],
+        "UserPromptSubmit": [
+          1,
+          11,
+          31
+        ],
+        "explicit_lookup": []
+      },
+      "unlabelled_control": true,
+      "published_receipt": "k6-ids-with-0.jsonl"
+    }
+  ],
+  "conclusion": "Do not promote #361 candidate: on two needed-guidance tasks baseline made one lookup and delivered one needed body in full; candidate made zero lookups and delivered zero needed bodies in full. One repetition is diagnostic, not a robust effectiveness estimate. Control tasks are unlabelled, so full seed bodies are injection-volume evidence rather than automatically proven irrelevant.",
+  "fixture": "benchmarks/adoption_tasks.json",
+  "fixture_sha256": "31dba96178b819ae5c5c9645560a22df85878435b8019c99b776a3de1eea6e91",
+  "source_scope": "Comparison used identical retrieval code and authored applicability, differing only in prompt instruction wording.",
+  "baseline_commit": "1ea2e65",
+  "candidate_parent": "1ea2e65"
+}
