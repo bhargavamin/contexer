@@ -862,6 +862,18 @@ def test_runner_scores_k7c_by_clarification(tmp_path, patch, clarified):
     assert row["clarified"] is clarified and row["success"] is clarified
 
 
+@pytest.mark.parametrize("task", [t for t in TASKS if t["class"] == "K7c"], ids=lambda t: t["id"])
+def test_k7c_sides_are_stored_at_the_same_status(task):
+    # A K7c pair has no recorded winner. If the store queued one side for approval (seeding then
+    # approves it) and left the other suggested, Contexer would correctly show a winner the task
+    # says doesn't exist: "instead of raising" once did exactly that to the tombstone rule.
+    from contexer import store
+    levels = {store._classify_level(task["seed_decisions"][i]["content"],
+                                    task["seed_decisions"][i]["subtype"], "ai")
+              for i in task["conflict_decisions"]}
+    assert len(levels) == 1, levels
+
+
 def test_a_broken_overlay_stops_the_campaign_before_any_session(tmp_path):
     tasks = json.loads(TASKS_FILE.read_text())
     broken = next(t for t in tasks if t["fixture_files"])
