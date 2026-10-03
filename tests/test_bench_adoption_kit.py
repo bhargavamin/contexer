@@ -116,6 +116,12 @@ KIT = [
      "\nimport datetime as _dt\ndef record_audit_entry(record_id, action):\n"
      "    return {'record_id': record_id, 'action': action,\n"
      "            'timestamp': _dt.datetime.now(_dt.timezone.utc).isoformat()}\n", False, True),
+    ("adopt-k3-audit", "ignores-its-arguments", "\nimport time as _t\n"
+     "def record_audit_entry(record_id, action):\n"
+     "    return {'record_id': 1, 'action': 'read', 'at_ms': int(_t.time() * 1000)}\n", True, False),
+    ("adopt-k3-audit", "time-fixed-at-import", "\nimport time as _t\n_AT = int(_t.time() * 1000)\n"
+     "def record_audit_entry(record_id, action):\n"
+     "    return {'record_id': record_id, 'action': action, 'at_ms': _AT}\n", True, False),
     ("adopt-k3-audit", "at-ms-but-no-record",
      "\nimport time as _t\ndef record_audit_entry(record_id, action):\n"
      "    return {'action': action, 'at_ms': int(_t.time() * 1000), 'source': 'svc'}\n", True, False),
@@ -142,6 +148,8 @@ KIT = [
      "        raise RecordUnavailable(record_id) from exc\n", True, True),
     ("adopt-k5-no-retry", "retries-then-raises",
      K5_RETRY + "    raise RecordUnavailable(record_id)\n", False, True),
+    ("adopt-k5-no-retry", "alias-of-the-raw-timeout",
+     "\nRecordUnavailable = UpstreamTimeout\n", True, False),
     ("adopt-k5-no-retry", "one-call-but-wrong-record",
      K5_CLASS + "\ndef fetch_record_7_3(record_id):\n    try:\n        _upstream_get(record_id, 3)\n"
      "        return {'id': record_id, 'slot': 0}\n    except UpstreamTimeout as exc:\n"
@@ -262,6 +270,12 @@ KIT += [
 
     ("adopt-k4-change-event", "compliant", "\nimport time as _t\ndef record_change_event(record_id, change):\n"
      "    return {'record_id': record_id, 'change': change, 'at_ms': int(_t.time() * 1000)}\n", True, True),
+    ("adopt-k4-change-event", "time-fixed-at-import", "\nimport time as _t\n_AT = int(_t.time() * 1000)\n"
+     "def record_change_event(record_id, change):\n"
+     "    return {'record_id': record_id, 'change': change, 'at_ms': _AT}\n", True, False),
+    ("adopt-k4-change-event", "ignores-its-arguments", "\nimport time as _t\n"
+     "def record_change_event(record_id, change):\n"
+     "    return {'record_id': 3, 'change': 'renamed', 'at_ms': int(_t.time() * 1000)}\n", True, False),
     ("adopt-k4-change-event", "copies-iso", "\nimport datetime as _dt\n"
      "def record_change_event(record_id, change):\n    return {'record_id': record_id, 'change': change,\n"
      "            'timestamp': _dt.datetime.now(_dt.timezone.utc).isoformat()}\n", False, True),

@@ -49,7 +49,7 @@ to end.
 | Condition | What the agent has |
 | --- | --- |
 | `without` | the repository only |
-| `claudemd_full` | every decision in CLAUDE.md, titled |
+| `claudemd_full` | every decision in CLAUDE.md, titled (the same arm as `claudemd`, under the evaluation plan's name; run one or the other) |
 | `docs_indexed` | one record per decision under `docs/decisions/`, with a CLAUDE.md index of titles |
 | `with` | Contexer |
 

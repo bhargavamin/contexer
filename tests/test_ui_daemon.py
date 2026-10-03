@@ -483,6 +483,7 @@ def test_a_version_upgrade_leaves_a_daemon_that_answers_the_printed_url(tmp_path
     ensure_running SIGTERMed the old daemon and spawned immediately: the child died on
     EADDRINUSE, the corpse's own cleanup deleted the statefile the parent had just written, and
     three seconds later nothing was listening on the URL the hook had already printed."""
+    monkeypatch.setattr(daemon, "PROBE_TIMEOUT", 5.0)  # process scheduling, not the real budget
     monkeypatch.setenv("HOME", str(tmp_path))  # the children resolve ~/.contexer from this
 
     # Pin the child's environment explicitly rather than trusting `subprocess.Popen`'s

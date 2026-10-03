@@ -241,8 +241,9 @@ def test_the_cookie_alone_authenticates_a_read(console):
     assert reply.status == 200 and reply.data["csrf"] == console.csrf
 
 
-def test_the_persisted_token_authenticates_healthz(console):
+def test_the_persisted_token_authenticates_healthz(console, monkeypatch):
     """This is the liveness path: daemon.probe() sends exactly this and wants a 200."""
+    monkeypatch.setattr(daemon, "PROBE_TIMEOUT", 5.0)  # thread scheduling, not the real budget
     assert call(console, "GET", "/healthz", token=console.token).status == 200
     assert daemon.probe(console.port, console.token)
 
@@ -636,6 +637,7 @@ def test_an_unwritable_log_never_breaks_a_request(console, home, monkeypatch):
 # --- daemon lifecycle (bind-as-mutex, statefile) ---------------------------------------
 
 def test_main_serves_records_the_statefile_and_clears_it_on_exit(home, monkeypatch):
+    monkeypatch.setattr(daemon, "PROBE_TIMEOUT", 5.0)  # thread scheduling, not the real budget
     import os
 
     thread, srv = main_in_a_thread(monkeypatch)
