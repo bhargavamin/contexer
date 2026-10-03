@@ -769,7 +769,7 @@ def arm_guard(repo_path: str, entry_id: str, check_type: str, pattern: str = "",
                     "armed_at": datetime.now(timezone.utc).isoformat()}
 
     with store.store_lock(store.repo_slug(repo)):
-        data = store.load(repo)
+        data = store.load_for_update(repo)
         entry = store.entry_by_id(data["entries"], entry_id)
         if entry is not None:
             if store.entry_status(entry) != "approved":
@@ -779,7 +779,7 @@ def arm_guard(repo_path: str, entry_id: str, check_type: str, pattern: str = "",
             return f"Armed {entry['id'][:8]} ({check_type})."
 
     with store.store_lock(store.GLOBAL_SLUG):
-        data = store.load_global()
+        data = store.load_global_for_update()
         entry = store.entry_by_id(data["entries"], entry_id)
         if entry is not None:
             if store.entry_status(entry) != "approved":
@@ -800,7 +800,7 @@ def disarm_guard(repo_path: str, entry_id: str) -> str:
     repo = store.resolve_repo(repo_path)
 
     with store.store_lock(store.repo_slug(repo)):
-        data = store.load(repo)
+        data = store.load_for_update(repo)
         entry = store.entry_by_id(data["entries"], entry_id)
         if entry is not None:
             had_check = entry.pop("guard_check", None) is not None
@@ -810,7 +810,7 @@ def disarm_guard(repo_path: str, entry_id: str) -> str:
             return f"{entry['id'][:8]} was not armed."
 
     with store.store_lock(store.GLOBAL_SLUG):
-        data = store.load_global()
+        data = store.load_global_for_update()
         entry = store.entry_by_id(data["entries"], entry_id)
         if entry is not None:
             had_check = entry.pop("guard_check", None) is not None

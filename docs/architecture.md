@@ -54,6 +54,8 @@ The new-release notice is bounded by TWO rules, not one: a given release is anno
 
 ## Storage
 
+All repository read-modify-write paths use `store.load_for_update`; global guard management uses `load_global_for_update`. Unreadable or malformed files raise a refusal before any mutation and remain in place for recovery. Rendering retains the fail-soft `load` / `load_global` readers.
+
 Context is stored at `~/.contexer/<repo_slug>.json` - one file per repo, plus `_global.json` for cross-repo decisions. The slug is the repo path with non-alphanumeric characters replaced by underscores. Each file holds a flat list of entries. Writes are atomic (unique temp file + `os.replace`, mode `0o600`) so readers never see a torn file; a corrupt file is read as empty on RENDER paths, but any write path that could destroy queued data (e.g. the share outbox) must read through a reader that raises on corruption rather than silently treating "unreadable" as "empty" - the two are not the same thing, and collapsing them on a write path risks overwriting data that was actually still there.
 
 **Every store-owned sidecar path goes through one reader and one builder.** `store.store_dir()` is the only place the store-owned code reads the directory, `store.sidecar_path(kind, **fields)` the only function that joins a declared sidecar name onto it, `sidecars.glob_for(kind)` the only one that renders a family's pattern, and `store.ensure_store_dir()` the only one that creates it (mode `0o700`) and tightens existing group/world permissions without adding owner permissions. Production reads the `STORE_DIR` constant nowhere; `sidecars.py` owns what a file is CALLED and how long it lives, `store` owns where it lives, and neither knows the other's half.

@@ -396,13 +396,16 @@ def load(repo_path: str) -> dict:
 
 
 def load_for_update(repo_path: str) -> dict:
-    """Strict read for bootstrap transactions; corrupt context must never become empty."""
+    """Strict transactional read; corrupt context must never become an empty write."""
     path = _store_path(repo_path)
     if not path.exists():
         return {"repo_path": repo_path, "entries": []}
-    data = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as exc:
+        raise ValueError(f"Decision store {path} is unreadable; refusing write and preserving the file") from exc
     if not isinstance(data, dict) or _entries_error(data.get("entries")) is not None:
-        raise ValueError("Decision store is malformed; refusing bootstrap write")
+        raise ValueError("Decision store is malformed; refusing write and preserving the file")
     if "bootstrap_scan" in data and (not isinstance(data["bootstrap_scan"], dict)
                                     or data["bootstrap_scan"].get("version") != 1):
         raise ValueError("Unknown bootstrap state; refusing to overwrite it")
@@ -562,6 +565,14 @@ def load_global() -> dict:
     must tell empty from unreadable uses `_read_global` (internal) or `global_diagnostics`
     (public), and every writer uses `_read_global`."""
     return _read_global()[0]
+
+
+def load_global_for_update() -> dict:
+    """Strict read for mutations of the cross-repository rules."""
+    data, error = _read_global()
+    if error is not None:
+        raise ValueError(f"Global decision store is unreadable; refusing write: {error}")
+    return data
 
 
 def global_diagnostics() -> dict:
@@ -2220,7 +2231,7 @@ def capture_user_constraint_with_meta(
     review_required = status != "approved"
     entry_status_value = "pending_approval" if review_required else "approved"
     with store_lock(repo_slug(repo_path), blocking=blocking):
-        data = load(repo_path)
+        data = load_for_update(repo_path)
         # 'ignored' entries never block a re-typed rule from landing fresh (Fix 3).
         decisions_only = [e for e in data["entries"]
                           if e["type"] == "decision" and e.get("status") != "ignored"]
@@ -2838,7 +2849,7 @@ def attach_team_reconciliation_proposal(repo_path: str, entry_id: str, *, conten
     never overwritten by a pull. Repeated deltas for the same team head are idempotent.
     """
     with store_lock(repo_slug(repo_path)):
-        data = load(repo_path)
+        data = load_for_update(repo_path)
         entry = entry_by_id([e for e in data["entries"] if e.get("type") == "decision"], entry_id)
         if entry is None or entry_status(entry) == "pending_approval":
             return False
@@ -2865,7 +2876,7 @@ def clear_team_reconciliation_proposal(repo_path: str, entry_id: str, *,
                                        team_head: str = "") -> bool:
     """Clear only a pull-created proposal after the server reports convergence."""
     with store_lock(repo_slug(repo_path)):
-        data = load(repo_path)
+        data = load_for_update(repo_path)
         entry = entry_by_id([e for e in data["entries"] if e.get("type") == "decision"], entry_id)
         if entry is None:
             return False
@@ -3045,7 +3056,7 @@ def record_evidence_summary(repo_path: str, entry_id: str, summary: dict) -> boo
         entry["evidence_summary"] = history[-MAX_EVIDENCE_SUMMARIES:]
 
     with store_lock(repo_slug(repo_path)):
-        data = load(repo_path)
+        data = load_for_update(repo_path)
         entry = entry_by_id([e for e in data["entries"] if e.get("type") == "decision"],
                             entry_id)
         if entry is not None:
@@ -3203,7 +3214,7 @@ def apply_backfill_anchors(repo_path: str, selections: dict) -> int:
         return 0
     repo = resolve_repo(repo_path)
     with store_lock(repo_slug(repo)):
-        data = load(repo)
+        data = load_for_update(repo)
         anchored = 0
         changed = False
         for entry in data["entries"]:
@@ -3372,7 +3383,7 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
         raise ValueError("confirmed anchor candidates require an explicit candidate list")
     content = revisions.normalize_content(content)
     with store_lock(repo_slug(repo_path)):
-        data = load(repo_path)
+        data = load_for_update(repo_path)
         # Explicit correction: caller knows which entry is wrong and wants to change it.
         # Runs before _is_storable - an explicit correction always writes.
         # Accepts both full UUIDs and the 8-char short IDs shown in get_context output.
@@ -3637,7 +3648,7 @@ def approve_decision(repo_path: str, entry_id: str, action: str,
             raise ValueError("source_files requires action 'approve' or 'edit'")
 
     with store_lock(repo_slug(repo_path)):
-        data = load(repo_path)
+        data = load_for_update(repo_path)
         ok, msg, changed = apply_approval(
             data, entry_id, action, content, datetime.now(timezone.utc).isoformat(), repo_path,
             has_caller_source_files=bool(source_files))
@@ -4164,7 +4175,7 @@ def edit_decision(repo_path: str, entry_id: str, *, content: str | None = None,
     if content is None and title is None and subtype is None:
         return False, "Nothing to change - pass content, title, or subtype.", None
     with store_lock(repo_slug(repo_path)):
-        data = load(repo_path)
+        data = load_for_update(repo_path)
         entry = entry_by_id(data["entries"], entry_id)
         if entry is None:
             return False, f"Decision {entry_id!r} not found.", None
@@ -4818,7 +4829,7 @@ def upsert_memory_decision(repo_path: str, content: str, session_id: str,
     Convenience wrapper around `_apply_memory_upsert` (load + apply + save). For
     bulk import use `upsert_memory_batch`. Returns the apply status."""
     with store_lock(repo_slug(repo_path)):
-        data = load(repo_path)
+        data = load_for_update(repo_path)
         status = _apply_memory_upsert(data["entries"], content, session_id, subtype, memory_key,
                                      _load_deleted(repo_path).get("entries", []))
         if status == "created":
@@ -4835,7 +4846,7 @@ def upsert_memory_batch(repo_path: str, items: list[tuple[str, str, str, str]]) 
     write, so a multi-section file imports all-or-nothing. Returns newly-created
     count."""
     with store_lock(repo_slug(repo_path)):
-        data = load(repo_path)
+        data = load_for_update(repo_path)
         entries = data["entries"]
         tombstones = _load_deleted(repo_path).get("entries", [])
         created = touched = 0
@@ -6107,7 +6118,7 @@ def migrate_worktree_strays(repo_path: str) -> int:
                 if key == str(canonical_store) or not stray.exists():
                     continue
                 with store_lock(repo_slug(canonical)):
-                    data = load(canonical)
+                    data = load_for_update(canonical)
                     try:
                         stray_data = json.loads(stray.read_text(encoding="utf-8"))
                     except (json.JSONDecodeError, OSError, UnicodeDecodeError):
@@ -7115,7 +7126,7 @@ def verify_scan_conventions(repo_path: str, force: bool = False) -> int:
     and silence-over-noise says never manufacture a disappearance from an inconclusive
     signal."""
     with store_lock(repo_slug(repo_path)):
-        data = load(repo_path)
+        data = load_for_update(repo_path)
         participants = []
         for entry in data["entries"]:
             if entry.get("type") != "decision" or entry.get("created_by") != "scan":

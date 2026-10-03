@@ -150,7 +150,7 @@ def record_conflict_memo(repo_path: str, entry_id: str, choice: str,
         return False, ("entry_id must be at least 8 characters — use the id shown with the "
                        "decision, e.g. (id=6fb28fd9).")
     with store.store_lock(store.repo_slug(repo_path)):
-        data = store.load(repo_path)
+        data = store.load_for_update(repo_path)
         entry = store.entry_by_id(data.get("entries", []), entry_id)
         if entry is None:
             return False, f"Decision {entry_id!r} not found."

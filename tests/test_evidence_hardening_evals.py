@@ -746,7 +746,7 @@ def test_reconciliation_survives_a_corrupt_live_store_and_tombstone_sidecar(tmp_
     `.gap` and the held manifest are already covered (`test_spool.py`, scenario 17). These two
     are the sidecars reconciliation reads that nothing pinned: the live store it classifies
     against, and the tombstone sidecar the reconsideration lane looks an inactive decision up
-    in. Both read fail-soft as empty, so the pass must complete without losing the evidence -
+    in. The strict writer refuses the pass and holds the evidence for recovery -
     an unreadable store is not a licence to delete a pending event.
     """
     _spool(tmp_repo, [_event("corrupt-directive", "user_directive",
@@ -757,11 +757,12 @@ def test_reconciliation_survives_a_corrupt_live_store_and_tombstone_sidecar(tmp_
 
     receipt = reconcile.reconcile_session(tmp_repo)
 
-    assert receipt["incomplete"] is False
-    assert receipt["proposed"] == 1
+    assert receipt["incomplete"] is True
+    assert receipt["proposed"] == 0
     assert (spool.evidence_diagnostics(tmp_repo)["gap"] or {}).get("drops", 0) == 0
-    entries = store.load(tmp_repo)["entries"]
-    assert [e["status"] for e in entries] == ["pending_approval"]
+    assert store._store_path(tmp_repo).read_text() == "{ not json"
+    assert store._deleted_path(tmp_repo).read_text() == "{ also not json"
+    assert spool.evidence_diagnostics(tmp_repo)["held_events"] == 1
 
 
 def test_an_armed_old_revision_judges_the_approved_content_not_the_pending_one(tmp_repo):
