@@ -168,7 +168,7 @@ case "$2" in
     printf '\n\ndef order_total(prices):\n    return {"amount_cents": round(sum(prices) * 100)}\n' >> app/svc_7_core.py
     if [ -f CLAUDE.md ]; then echo '- Money is integer amount_cents (reconciliation).' >> CLAUDE.md; fi ;;
   *refund_amount*)
-    if grep -q amount_cents CLAUDE.md 2>/dev/null; then KEY=amount_cents; else KEY=refund_cents; fi
+    if grep -qs amount_cents CLAUDE.md app/svc_7_core.py; then KEY=amount_cents; else KEY=refund_cents; fi
     printf '\n\ndef refund_amount(total_cents, percent):\n    return {"%s": total_cents * percent // 100}\n' "$KEY" >> app/svc_7_core.py ;;
 esac
 echo '{"result": "stub", "usage": {"input_tokens": 1, "output_tokens": 1, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}, "total_cost_usd": 0, "num_turns": 1, "duration_ms": 1, "session_id": "stub"}'
@@ -178,7 +178,9 @@ echo '{"result": "stub", "usage": {"input_tokens": 1, "output_tokens": 1, "cache
 def test_stub_campaign_runs_the_loop_and_measures_capture(tmp_path):
     # End to end through the runner: session 1 records the rule (only the maintained arm has a
     # CLAUDE.md to record it in), the capture state lands on session 1's row, and session 2
-    # succeeds only where the rule survived between sessions.
+    # succeeds only where the rule survived between sessions. The stub's session 2 also copies
+    # the rule from session 1's code if it's still there, so `without` failing proves the code is
+    # reverted between sessions.
     stub = tmp_path / "claude"
     stub.write_text(STUB)
     stub.chmod(0o755)
@@ -251,3 +253,13 @@ def test_review_counterexamples(golden, tmp_path, chain, patch, adherence, funct
 def test_capture_patterns_recognise_the_reviewers_paraphrases(chain, paraphrase):
     terms = BY_ID[f"cap-{chain}-1"]["capture_terms"]
     assert any(re.search(p, paraphrase, re.IGNORECASE) for p in terms), (chain, paraphrase)
+
+
+def test_matching_ignores_the_runs_own_path_and_chain_name(tmp_path):
+    # The first smoke run's work dir, w-cap-cents-with-0, matched the cents rule in hook output.
+    work = tmp_path / "w-cap-cents-with-0"
+    noise = run._run_noise(work, {"chain": "cap-cents"})
+    text = f"Context for {work}: Python requirement is >=3.12."
+    assert run._matches([r"\bcents\b"], text) is True
+    assert run._matches([r"\bcents\b"], text, noise) is False
+    assert run._matches([r"\bcents\b"], text + " Keep money in cents.", noise) is True

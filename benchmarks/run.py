@@ -349,11 +349,36 @@ def _needed_delivery(home: Path, content: str, entry_id: str) -> tuple[str, int]
     return "none", lookups
 
 
-def _matches(patterns: list, text: str) -> bool:
+def _matches(patterns: list, text: str, noise: tuple = ()) -> bool:
+    """Whether any pattern appears in `text`, after removing `noise`: the run's own repository
+    path and chain name, which hook output repeats and which can contain a rule word
+    (`w-cap-cents-with-0` matched the cents rule in the first smoke run)."""
+    for word in noise:
+        text = text.replace(word, " ")
     return any(re.search(p, text, re.IGNORECASE) for p in patterns)
 
 
-def _capture_state(condition: str, work: Path, home: Path, patterns: list) -> dict:
+def _run_noise(work: Path, task: dict) -> tuple:
+    return tuple(w for w in (str(work), str(work.resolve()), work.name, task.get("chain", "")) if w)
+
+
+def _revert_code_keep_memory(work: Path, base_sha: str) -> None:
+    """Capture loop, between sessions: put the code back where session 1 started, keeping only
+    what an arm uses as memory (CLAUDE.md here; Contexer's store lives in HOME). Session 1's code
+    applies the rule, so leaving it would let session 2 copy the rule from the module and the
+    `without` arm would pass without anything having been remembered."""
+    claude_md = work / "CLAUDE.md"
+    kept = claude_md.read_text(errors="replace") if claude_md.exists() else None
+    subprocess.run(["git", "-C", str(work), "reset", "-q", "--hard", base_sha],
+                   capture_output=True, timeout=60)
+    subprocess.run(["git", "-C", str(work), "clean", "-fdq", "--", "app", "tests"],
+                   capture_output=True, timeout=60)
+    if kept is not None:
+        claude_md.write_text(kept)
+
+
+def _capture_state(condition: str, work: Path, home: Path, patterns: list,
+                   noise: tuple = ()) -> dict:
     """Capture loop, between sessions: whether session 1 recorded the rule where session 2 can
     find it, judged by the task's `capture_terms` patterns over what was stored (the rule's
     wording is the agent's own, so there's no fixed text to compare). Contexer: the decisions
@@ -371,7 +396,7 @@ def _capture_state(condition: str, work: Path, home: Path, patterns: list) -> di
             decisions += [e for e in data.get("entries", [])
                           if isinstance(e, dict) and e.get("type") == "decision"]
         hits = [e for e in decisions
-                if _matches(patterns, f"{e.get('title', '')} {e.get('content', '')}")]
+                if _matches(patterns, f"{e.get('title', '')} {e.get('content', '')}", noise)]
         return {"captured": bool(hits),
                 "capture_status": hits[0].get("status", "approved") if hits else None,
                 "decisions_stored": len(decisions),
@@ -381,7 +406,7 @@ def _capture_state(condition: str, work: Path, home: Path, patterns: list) -> di
         claude_md = work / "CLAUDE.md"
         text = claude_md.read_text(errors="replace") if claude_md.exists() else ""
         decisions = text.split(_MAINTAINED_HEADING, 1)[1] if _MAINTAINED_HEADING in text else ""
-        return {"captured": _matches(patterns, decisions)}
+        return {"captured": _matches(patterns, decisions, noise)}
     return {}
 
 
@@ -596,7 +621,8 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
         if task.get("capture_terms") and condition in _CONTEXER_CONDITIONS and task["step"] > 1:
             # Capture loop, session 2: did the rule session 1 recorded reach this agent?
             text, row["contexer_lookups"] = _contexer_received(home)
-            row["needed_delivery"] = "full" if _matches(task["capture_terms"], text) else "none"
+            row["needed_delivery"] = ("full" if _matches(task["capture_terms"], text,
+                                                         _run_noise(work, task)) else "none")
         if needed:
             # Contexer arms only: a static rules file is loaded into the system prompt, which
             # the transcript doesn't record, so "none" there would be a false reading.
@@ -632,7 +658,9 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
             # The session's folders are discarded after scoring: keep why the check failed.
             row["check_output"] = "\n".join(failures)[-3000:]
         if task.get("capture_terms") and task["step"] == 1:
-            row.update(_capture_state(condition, work, home, task["capture_terms"]))
+            row.update(_capture_state(condition, work, home, task["capture_terms"],
+                                      _run_noise(work, task)))
+            _revert_code_keep_memory(work, base_sha)
         if task["chain"]:
             # Snapshot the worktree so the next step scores ONLY its own work —
             # otherwise an untracked file left by step 1 is re-counted by steps 2-3

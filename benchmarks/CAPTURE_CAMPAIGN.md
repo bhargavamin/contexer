@@ -40,10 +40,16 @@ Contexer can also capture a rule straight from the prompt, while the CLAUDE.md a
 agent making the edit. Nothing Contexer captures is approved between sessions, and session 2 gets
 only what Contexer chooses to show.
 
+Between the sessions the harness puts the code back where session 1 started and keeps only the
+arm's memory (the maintained CLAUDE.md, or Contexer's store in HOME). Session 1's code applies the
+rule, so leaving it would let session 2 copy the rule from the module and measure nothing. This
+models a rule agreed in discussion before the code exists, or applied in another repository.
+
 Capture is judged by patterns over the stored text, so a faithful paraphrase that matches none
 of them counts as not captured. The patterns were broadened after a blind review, and the kit
 pins the reviewer's paraphrases; when a capture is reported missing, read the stored text before
-blaming the arm.
+blaming the arm. Matching ignores the run's own repository path and chain name, which hook
+output repeats (a work directory named after the cents chain once matched the cents rule).
 
 ## What a row records
 
