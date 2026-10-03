@@ -1297,8 +1297,11 @@ def _snapshot(repo_path: str) -> dict:
       `lifecycle.propose_reconsideration` so the attach under the store lock refuses outright
       if either moved in between.
     """
-    entries = [e for e in store.load(repo_path).get("entries", []) if isinstance(e, dict)]
-    tombstones = [e for e in store.load_deleted(repo_path).get("entries", [])
+    entries = [e for e in store.load_for_update(repo_path).get("entries", []) if isinstance(e, dict)]
+    deleted, error = store.read_deleted(repo_path)
+    if error:
+        raise ValueError("Unreadable tombstones; refusing evidence disposition")
+    tombstones = [e for e in deleted.get("entries", [])
                   if isinstance(e, dict) and e.get("type") == "decision"]
     decisions = [e for e in entries if e.get("type") == "decision"]
     return {

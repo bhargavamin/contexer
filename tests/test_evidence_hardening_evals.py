@@ -762,7 +762,7 @@ def test_reconciliation_survives_a_corrupt_live_store_and_tombstone_sidecar(tmp_
     assert (spool.evidence_diagnostics(tmp_repo)["gap"] or {}).get("drops", 0) == 0
     assert store._store_path(tmp_repo).read_text() == "{ not json"
     assert store._deleted_path(tmp_repo).read_text() == "{ also not json"
-    assert spool.evidence_diagnostics(tmp_repo)["held_events"] == 1
+    assert len(spool.list_pending_evidence(tmp_repo)) == 1
 
 
 def test_an_armed_old_revision_judges_the_approved_content_not_the_pending_one(tmp_repo):
@@ -1335,3 +1335,18 @@ def _markdown(report: dict) -> str:
     lines += ["", "Asserted by:", ""]
     lines += [f"- `{name}`" for name in teams["asserted_by"]] + [""]
     return "\n".join(lines)
+
+
+def test_corruption_never_dismisses_existing_review_evidence(tmp_repo):
+    _spool(tmp_repo, [_event("held-before-corrupt", "user_directive", "never commit a generated file")])
+    receipt = reconcile.reconcile_session(tmp_repo)
+    assert receipt["proposed"] == 1
+    before = {p: p.read_bytes() for p in store.store_dir().rglob("*") if p.is_file() and not p.name.endswith(".lock")}
+    damaged = b'{"entries": ['
+    store._store_path(tmp_repo).write_bytes(damaged)
+    receipt = reconcile.reconcile_session(tmp_repo)
+    assert receipt["incomplete"]
+    assert spool.evidence_diagnostics(tmp_repo)["held_events"] == 1
+    for p, raw in before.items():
+        if p != store._store_path(tmp_repo):
+            assert p.read_bytes() == raw

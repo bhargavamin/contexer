@@ -89,3 +89,16 @@ def test_direct_store_writers_never_use_render_reader():
                     continue
                 failures.append(f"{path.name}:{node.name}")
     assert not failures, failures
+
+
+@pytest.mark.parametrize("operation", [guard_engine.arm_guard, guard_engine.disarm_guard])
+def test_healthy_global_guard_survives_corrupt_local_store(tmp_repo, operation):
+    _, did = store.update_global_decision("Never log raw request secrets", "s", "constraint")
+    path = store._store_path(tmp_repo)
+    damaged = b'{"entries": ['
+    path.write_bytes(damaged)
+    if operation is guard_engine.arm_guard:
+        assert "Armed" in operation(tmp_repo, did, "secret")
+    else:
+        assert "was not armed" in operation(tmp_repo, did)
+    assert path.read_bytes() == damaged
