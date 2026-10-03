@@ -219,6 +219,13 @@ def _locked_refresh(profile: Profile) -> str | None:
         return creds["access_token"]
 
 
+def confirmation_binding(profile: Profile) -> str:
+    """Local credential generation for confirmation; never return or refresh a token."""
+    creds = _load_creds()
+    binding = creds if _creds_match(creds, profile) else {"token": profile.token}
+    return hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
+
+
 def resolve_token(profile: Profile) -> str | None:
     """The bearer RemoteStore should use for this profile, or None.
 

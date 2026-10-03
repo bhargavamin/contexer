@@ -801,8 +801,10 @@ def _selection_digest(projections: list, missing: list, key, profile: Profile) -
     # Legacy render loads synthesize revision UUIDs; bind the displayed content and metadata
     # without persisting a migration from a read-only preview. Send the checked snapshot.
     displayed = [{k: v for k, v in decision.items() if k != "revision_id"} for decision in projections]
+    from contexer import auth
     payload = {"decisions": displayed, "missing": missing, "repo": key,
-               "endpoint": profile.endpoint, "mode": profile.mode, "redact_secrets": profile.redact_secrets}
+               "endpoint": profile.endpoint, "mode": profile.mode, "redact_secrets": profile.redact_secrets,
+               "credentials": auth.confirmation_binding(profile)}
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
@@ -1701,9 +1703,12 @@ def _share_ids_unlocked(repo_path: str, decision_ids: list, *,
     if not projs:
         return share_status.ShareStatus(
             share_status.NO_MATCH, unknown_ids=tuple(str(m) for m in missing))
-    remote = RemoteStore.from_profile(profile)
+    remote = (RemoteStore.from_profile(profile) if expected_digest is None
+              else RemoteStore.from_profile(profile, reactive_refresh=False))
     if remote is None:
         return share_status.ShareStatus(share_status.NOT_TEAM_MODE)
+    if expected_digest is not None and _selection_digest(projs, missing, key, profile) != expected_digest:
+        raise ValueError("Share credentials changed; review a fresh preview before sending")
     if expected_digest is None:
         key = canonical_repo_key(store.run_git(repo_path, "remote", "get-url", "origin"))
     return share_status.with_unknown(

@@ -224,3 +224,28 @@ def test_confirmed_share_reuses_checked_repository_destination(tmp_repo, monkeyp
     result = share.share_ids(tmp_repo, [did], profile=OFF, expected_digest=digest)
     assert share_status.is_ok(result) and len(reads) == 1
     assert fake.batches[0][0]["repo"] == "github.com/owner/first"
+
+
+def test_confirmation_digest_rejects_same_endpoint_account_change(tmp_repo, monkeypatch):
+    from contexer import auth
+    profile = config.Profile(mode="team", endpoint="https://team.example/mcp", token="first-account", redact_secrets=False)
+    monkeypatch.setattr(share, "_resolve_ids", lambda *a, **kw: ([{"id": "d", "content": "secret"}], []))
+    monkeypatch.setattr(store, "run_git", lambda *a: "git@github.com:org/repo.git")
+    monkeypatch.setattr(auth, "_load_creds", lambda: None)
+    monkeypatch.setattr(share, "_drain_outbox_unlocked", lambda *a: None)
+    digest = share.selection_digest(tmp_repo, ["d"], profile=profile)
+    changed = config.Profile(mode="team", endpoint=profile.endpoint, token="second-account", redact_secrets=False)
+    monkeypatch.setattr(share.RemoteStore, "from_profile", lambda *a, **kw: pytest.fail("must refuse before network"))
+    with pytest.raises(ValueError, match="changed"):
+        share.share_ids(tmp_repo, ["d"], profile=changed, expected_digest=digest)
+
+
+def test_oauth_account_change_invalidates_preview_without_network(tmp_repo, monkeypatch):
+    from contexer import auth
+    creds = {"issuer": "https://team.example", "access_token": "account-one", "client_id": "one"}
+    monkeypatch.setattr(auth, "_load_creds", lambda: creds)
+    profile = config.Profile(mode="team", endpoint="https://team.example/mcp", redact_secrets=False)
+    first = auth.confirmation_binding(profile)
+    creds["access_token"] = "account-two"
+    assert auth.confirmation_binding(profile) != first
+    assert "account-one" not in first
