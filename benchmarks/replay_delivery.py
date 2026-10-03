@@ -126,6 +126,8 @@ def _by_style(rows: list[dict]) -> dict:
     """Per author style: rows, and how many delivered the needed decision full/named/missing."""
     by_style = {}
     for row in rows:
+        if row["needed"] == "unlabelled":
+            continue  # no needed decision, so nothing to deliver
         counts = by_style.setdefault(row["needed_style"], {"full": 0, "named": 0, "missing": 0,
                                                            "tasks": 0})
         counts["tasks"] += 1
@@ -135,11 +137,11 @@ def _by_style(rows: list[dict]) -> dict:
     return by_style
 
 
-def replay_tasks(tasks_file: Path, seed: int) -> dict:
+def replay_tasks(tasks_file: Path, seed: int, steady: bool = False) -> dict:
     tasks = [t for t in json.loads(tasks_file.read_text()) if t.get("seed_decisions")]
     if not tasks:
         raise SystemExit(f"{tasks_file}: no task carries seed_decisions")
-    build_webapi = _load("generate", "fixtures/generate.py").build_webapi
+    generate = _load("generate", "fixtures/generate.py")
     seeding = _load("seeding", "seeding.py")
     # One pass per writing style: rep r is what a live campaign's rep r seeds.
     reps = max(len(s.get("variants") or [s]) for t in tasks for s in t["seed_decisions"])
@@ -147,13 +149,13 @@ def replay_tasks(tasks_file: Path, seed: int) -> dict:
     with (tempfile.TemporaryDirectory(prefix="contexer-replay-") as tmp,
           _sandbox_store(Path(tmp) / ".contexer")):
         tmp_path = Path(tmp)
-        from contexer import server
         for rep in range(reps):
             for task in tasks:
-                repo = str(build_webapi(tmp_path / f"{task['id']}-rep{rep}", seed=seed)
-                           .resolve())
-                # Same order as run.py's contexer arm: bootstrap first, then the seeds.
-                server.bootstrap_context(repo_path=repo)
+                repo_dir = generate.build_webapi(tmp_path / f"{task['id']}-rep{rep}", seed=seed)
+                generate.apply_overlay(repo_dir, task.get("fixture_files"), seed)
+                repo = str(repo_dir.resolve())
+                # Same order as run.py's contexer arm: fixture, bootstrap, then the seeds.
+                exec(compile(seeding.bootstrap_script(repo, steady), "<boot>", "exec"), {})
                 items = seeding.seed_items(task, seed, rep)
                 scope = {}
                 refusal = ""
@@ -161,6 +163,12 @@ def replay_tasks(tasks_file: Path, seed: int) -> dict:
                     exec(compile(seeding.seed_script(repo, items), "<seed>", "exec"), scope)
                 except AssertionError as exc:  # a seed this version refused
                     refusal = str(exc)
+                unsteady = False
+                if steady and not refusal:
+                    try:  # the same gate run.py applies: the bootstrap prompt must be silent
+                        exec(compile(seeding.steady_check_script(repo), "<steady>", "exec"), {})
+                    except AssertionError:
+                        unsteady = True
                 done = [_short(i) for i in scope.get("seeded_ids", [])]
                 # A refusal aborts the live arm's setup, so no decision of this run counts.
                 ids = [None] * len(items) if refusal else done + [None] * (len(items) - len(done))
@@ -172,18 +180,21 @@ def replay_tasks(tasks_file: Path, seed: int) -> dict:
                              "needed_style": items[index]["style"] if index is not None else "",
                              "seeded_ids": ids, "needed_id": needed,
                              "needed": _verdict(index is not None, needed, result),
-                             "refusal": refusal, **result})
+                             "refusal": refusal, "unsteady": unsteady, **result})
+    labelled = [r for r in rows if r["needed"] != "unlabelled"]
     return {
-        "mode": "tasks", "tasks_file": str(tasks_file), "seed": seed,
+        "mode": "tasks", "tasks_file": str(tasks_file), "seed": seed, "steady_state": steady,
         "contexer": _contexer_revision(), "tasks": rows,
         "summary": {
-            "needed_full": sum(r["needed"] == "full" for r in rows), "tasks": len(rows),
+            "needed_full": sum(r["needed"] == "full" for r in rows), "tasks": len(labelled),
+            "unlabelled": len(rows) - len(labelled),
             "needed_named_only": sum(r["needed"] == "named" for r in rows),
             "needed_missing": sum(r["needed"] in ("missing", "not_stored") for r in rows),
             "seeds_not_stored": sum(i is None for r in rows for i in r["seeded_ids"]),
             "repeated_from_startup": sum(len(r["repeated_from_startup"]) for r in rows),
             "prompt_chars": sum(r["prompt_chars"] for r in rows),
             "by_style": _by_style(rows),
+            "unsteady_runs": sum(r["unsteady"] for r in rows),
         },
     }
 
@@ -207,10 +218,14 @@ def render_text(report: dict) -> str:
         lines.append(f"needed decision in full: {s['needed_full']}/{s['tasks']} "
                      f"(named only {s['needed_named_only']}, missing {s['needed_missing']}); "
                      f"startup rules repeated: {s['repeated_from_startup']}; "
-                     f"prompt chars: {s['prompt_chars']}")
+                     f"prompt chars: {s['prompt_chars']}"
+                     + (f"; {s['unlabelled']} run(s) need no decision" if s["unlabelled"] else ""))
         for style, counts in s["by_style"].items():
             lines.append(f"  {style or 'single'} style: full {counts['full']}/{counts['tasks']}, "
                          f"named only {counts['named']}, missing {counts['missing']}")
+        if s["unsteady_runs"]:
+            lines.append(f"WARNING: {s['unsteady_runs']} run(s) still had the bootstrap prompt due "
+                         "after steady-state setup; run.py would refuse them")
         if s["seeds_not_stored"]:
             lines.append(f"WARNING: {s['seeds_not_stored']} seed(s) refused by this version's "
                          "store; its live arm would fail setup")
@@ -234,6 +249,8 @@ def main(argv: list[str] | None = None) -> int:
     tasks = sub.add_parser("tasks", help="preview delivery for a benchmark task file")
     tasks.add_argument("--tasks-file", type=Path, default=_HERE / "retrieval_tasks.json")
     tasks.add_argument("--seed", type=int, default=0)
+    tasks.add_argument("--steady-state", action="store_true",
+                       help="complete bootstrap during setup, as run.py --steady-state does")
     snap = sub.add_parser("snapshot", help="replay a frozen store against one prompt")
     snap.add_argument("--snapshot", type=Path, required=True)
     snap.add_argument("--repo", type=Path, required=True)
@@ -244,7 +261,7 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--out", type=Path, help="also write the JSON report here")
     args = parser.parse_args(argv)
     if args.mode == "tasks":
-        report = replay_tasks(args.tasks_file, args.seed)
+        report = replay_tasks(args.tasks_file, args.seed, args.steady_state)
     else:
         report = replay_snapshot(args.snapshot, args.repo, args.prompt_file,
                                  args.global_snapshot)

@@ -16,6 +16,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -25,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from benchmarks import score, seeding
-from benchmarks.fixtures.generate import build_webapi
+from benchmarks.fixtures.generate import apply_overlay, build_webapi
 from benchmarks.otel import OtelReceiver
 
 TASKS_FILE = Path(__file__).resolve().parent / "tasks.json"
@@ -62,21 +63,22 @@ _SEEDED_MARK = "BENCH_SEEDED_IDS="
 
 
 def _condition_b_setup(repo: str, home: Path, seed_decision: str, source: Path = None,
-                       seed_decisions: list = None) -> list:
+                       seed_decisions: list = None, steady: bool = False) -> list:
     """contexer install + bootstrap + optional decision seed, in a child process
     whose HOME is the isolated one (store paths must resolve inside it). `source`
     is the contexer checkout `uv run` installs from (its cwd resolves the pyproject
     / venv that provides the `contexer` console script and the `contexer` package
     imported below) — this is what lets an A/B campaign compare two contexer
     versions; it defaults to this harness's own repo root, so callers that don't
-    pass it see no behavior change. Returns the stored ids of `seed_decisions`, in order."""
+    pass it see no behavior change. With `steady`, bootstrap is driven to completion and the
+    setup fails unless the bootstrap prompt is silent afterwards (see `seeding.bootstrap_script`).
+    Returns the stored ids of `seed_decisions`, in order."""
     env = _session_env(home, otel_port=0)
     src = source or Path(__file__).resolve().parent.parent
     subprocess.run(["uv", "run", "contexer", "install"], env=env, check=True,
                    capture_output=True, cwd=src)
     # Use the stable tool surface so campaigns can also target pre-redesign versions.
-    code = (f"from contexer import server, store\n"
-            f"server.bootstrap_context(repo_path={repo!r})\n")
+    code = "from contexer import server, store\n" + seeding.bootstrap_script(repo, steady)
     if seed_decision:
         code += (f"store.update_decision({repo!r}, {seed_decision!r}, 'bench-seed', "
                  "'constraint', created_by='human')\n")
@@ -86,6 +88,8 @@ def _condition_b_setup(repo: str, home: Path, seed_decision: str, source: Path =
         # only `contexer`. See `seeding.seed_script` for why a refused seed fails setup.
         code += seeding.seed_script(repo, seed_decisions)
         code += f"print({_SEEDED_MARK!r} + __import__('json').dumps(seeded_ids))\n"
+    if steady:
+        code += seeding.steady_check_script(repo)
     try:
         proc = subprocess.run(["uv", "run", "python", "-c", code], env=env, check=True,
                               capture_output=True, cwd=src)
@@ -158,9 +162,42 @@ def _condition_c_setup(work: Path, seed_decision: str,
         (work / name).write_text(text)
 
 
+def _decision_title(item: dict) -> str:
+    """The title a decision record shows: its own, or its first sentence (capped)."""
+    if item.get("title"):
+        return item["title"]
+    first = re.split(r"(?<=[.!?])\s", item["content"].strip(), maxsplit=1)[0]
+    return first[:100]
+
+
+def _docs_indexed_setup(work: Path, seed_decisions: list) -> None:
+    """The well-organized-docs competitor: one decision record per decision under
+    docs/decisions/ (ADR style), and a CLAUDE.md index listing every title and file. The layout
+    is mechanical (store order, names from titles), so nothing is placed by hand per task; like
+    Contexer, it needs the agent to open the record that applies."""
+    records = work / "docs" / "decisions"
+    records.mkdir(parents=True, exist_ok=True)
+    index = ["# Project: record service", "",
+             "FastAPI-style record service (Python, managed with uv). Run `uv run pytest tests/ -q`"
+             " before finishing any task.", "",
+             "## Decision records", "",
+             "Engineering decisions live in `docs/decisions/`, one file each. Read the ones that "
+             "apply before changing code:", ""]
+    for number, item in enumerate(seed_decisions or [], start=1):
+        title = _decision_title(item)
+        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:50]
+        name = f"{number:03d}-{slug}.md"
+        (records / name).write_text(f"# {title}\n\n- Status: accepted\n"
+                                    f"- Type: {item.get('subtype') or 'decision'}\n\n"
+                                    f"{item['content']}\n")
+        index.append(f"- [{title}](docs/decisions/{name})")
+    (work / "CLAUDE.md").write_text("\n".join(index) + "\n")
+
+
 # Which static rules file(s) each condition writes into the work repo.
 _FILE_CONDITIONS = {
     "claudemd": ("CLAUDE.md",),
+    "claudemd_full": ("CLAUDE.md",),
     "agentsmd": ("AGENTS.md",),
     "claudemd_agentsmd": ("CLAUDE.md", "AGENTS.md"),
     "claudemd_with": ("CLAUDE.md",),
@@ -267,12 +304,14 @@ def run_campaign(out_dir: Path, reps: int = 3, task_ids=None, claude_cmd: str = 
                  seed: int = 0, model: str = "",
                  conditions: tuple = ("without", "claudemd", "with"),
                  contexer_sources: dict = None, wait_for_otel: bool = True,
-                 tasks_file: Path = None) -> Path:
+                 tasks_file: Path = None, steady_state: bool = False) -> Path:
     """`contexer_sources` maps condition name -> contexer checkout path (see
     `_condition_b_setup`), for A/B comparisons across contexer versions. A
     condition present in the map installs contexer from that path even if it
     isn't one of `_CONTEXER_CONDITIONS`. Omitted/empty: unchanged behavior.
-    `tasks_file` swaps in another task list (e.g. `retrieval_tasks.json`)."""
+    `tasks_file` swaps in another task list (e.g. `retrieval_tasks.json`). `steady_state`
+    completes Contexer's bootstrap during setup, so sessions start as in a repository whose
+    one-time setup is done."""
     contexer_sources = contexer_sources or {}
     if "with_prev" in conditions and not str(contexer_sources.get("with_prev") or "").strip():
         # Without a source (or with an empty one) it gets neither rules files nor an
@@ -285,14 +324,19 @@ def run_campaign(out_dir: Path, reps: int = 3, task_ids=None, claude_cmd: str = 
     if out.exists() and out.stat().st_size and meta_path.exists():
         # Rows append to runs.jsonl while campaign.json is rewritten: appending another task
         # set's rows would leave mixed results under metadata naming only the new one.
-        previous = json.loads(meta_path.read_text()).get("tasks_sha256")
+        previous_meta = json.loads(meta_path.read_text())
+        previous = previous_meta.get("tasks_sha256")
         if previous != tasks_sha and (previous or tasks_path != TASKS_FILE):
             raise ValueError(f"{out_dir} already holds runs from a different task file; "
                              "use a new --out directory")
+        if previous_meta.get("steady_state", False) != steady_state:
+            # Steady-state and first-install sessions measure different things; never mix them.
+            raise ValueError(f"{out_dir} already holds runs with steady_state="
+                             f"{previous_meta.get('steady_state', False)}; use a new --out directory")
     out_dir.mkdir(parents=True, exist_ok=True)
     meta_path.write_text(json.dumps({
         "model": model, "seed": seed, "reps": reps, "conditions": list(conditions),
-        "contexer_sources": contexer_sources,
+        "contexer_sources": contexer_sources, "steady_state": steady_state,
         "tasks_file": str(tasks_path),
         "tasks_sha256": tasks_sha,
         "managed_settings_present": _MANAGED_SETTINGS.exists(),
@@ -311,6 +355,14 @@ def run_campaign(out_dir: Path, reps: int = 3, task_ids=None, claude_cmd: str = 
             td = Path(td)
             golden = build_webapi(td / "golden", seed=seed)
             baseline = _mine_baseline(str(golden))
+            # Apply every task's fixture overlay once before any paid session, so a broken overlay
+            # stops the campaign instead of turning into one errored row per session.
+            for task in tasks:
+                if task.get("fixture_files"):
+                    probe = td / f"overlay-check-{task['id']}"
+                    shutil.copytree(golden, probe)
+                    apply_overlay(probe, task["fixture_files"], seed)
+                    shutil.rmtree(probe, ignore_errors=True)
             # Rep outermost, condition INNERMOST: conditions alternate in time so
             # drift / cache warming cannot masquerade as a condition effect.
             for rep in range(reps):
@@ -318,7 +370,8 @@ def run_campaign(out_dir: Path, reps: int = 3, task_ids=None, claude_cmd: str = 
                     for condition in conditions:
                         work, home = _fresh(td, golden, f"{task['id']}-{condition}-{rep}")
                         row = _one_run(task, condition, rep, work, home, baseline,
-                                       claude_cmd, seed, model, rx, contexer_sources, wait_for_otel)
+                                       claude_cmd, seed, model, rx, contexer_sources, wait_for_otel,
+                                       steady_state)
                         _append(out, row)
                         _discard(work, home)
                 for chain_tasks in chains.values():
@@ -329,7 +382,8 @@ def run_campaign(out_dir: Path, reps: int = 3, task_ids=None, claude_cmd: str = 
                         work, home = _fresh(td, golden, f"{chain_tasks[0]['chain']}-{condition}-{rep}")
                         for task in chain_tasks:  # steps share repo + HOME: accumulation
                             row = _one_run(task, condition, rep, work, home, baseline,
-                                           claude_cmd, seed, model, rx, contexer_sources, wait_for_otel)
+                                           claude_cmd, seed, model, rx, contexer_sources, wait_for_otel,
+                                           steady_state)
                             _append(out, row)
                         _discard(work, home)
     finally:
@@ -370,9 +424,10 @@ def _mine_baseline(repo: str) -> list[dict]:
 
 def _one_run(task, condition, rep, work: Path, home: Path, baseline,
              claude_cmd, seed, model, rx: OtelReceiver, contexer_sources: dict = None,
-             wait_for_otel: bool = True) -> dict:
+             wait_for_otel: bool = True, steady_state: bool = False) -> dict:
     prompt = task["prompt"].replace("{seed}", str(seed))
     check_cmd = task["check_cmd"].replace("{seed}", str(seed))
+    functional_cmd = (task.get("functional_cmd") or "").replace("{seed}", str(seed))
     row = {"task_id": task["id"], "kind": task["kind"], "chain": task["chain"],
            "step": task["step"], "condition": condition, "rep": rep, "model": model,
            "ts": time.time(),
@@ -386,6 +441,9 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
         # "claudemd_with" (condition D) layers contexer on top of a pre-existing
         # CLAUDE.md — the adoption question for repos that already maintain one.
         if not task["chain"] or task["step"] <= 1:
+            # Before any setup: bootstrap's freshness check and the static arms' convention
+            # miner must both see the task's fixture as the starting repository.
+            apply_overlay(work, task.get("fixture_files"), seed)
             seeds = seeding.seed_items(task, seed, rep)
             index = task.get("needed_decision")
             if index is not None:
@@ -394,10 +452,15 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
             files = _FILE_CONDITIONS.get(condition)
             if files:
                 _condition_c_setup(work, task["seed_decision"], files, seed_decisions=seeds)
+            if condition == "docs_indexed":
+                legacy = ([{"content": task["seed_decision"], "subtype": "constraint"}]
+                          if task["seed_decision"] else [])
+                _docs_indexed_setup(work, legacy + seeds)
             src = (contexer_sources or {}).get(condition)
             if condition in _CONTEXER_CONDITIONS or src:
                 ids = _condition_b_setup(str(work), home, task["seed_decision"],
-                                         Path(src) if src else None, seed_decisions=seeds)
+                                         Path(src) if src else None, seed_decisions=seeds,
+                                         steady=steady_state)
                 if index is not None:
                     needed = (seeds[index]["content"], ids[index] if ids else "")
         rx.reset()
@@ -436,18 +499,25 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
             # Contexer arms only: a static rules file is loaded into the system prompt, which
             # the transcript doesn't record, so "none" there would be a false reading.
             row["needed_delivery"], row["contexer_lookups"] = _needed_delivery(home, *needed)
-        if check_cmd:
-            # Same isolated env as the session: success must never come from
-            # developer-local HOME/uv/python configuration the session couldn't see.
-            chk = subprocess.run(check_cmd, shell=True, cwd=work, capture_output=True,
+        # Same isolated env as the session: success must never come from developer-local
+        # HOME/uv/python configuration the session couldn't see. A task with a functional
+        # check is scored on both (adherence: followed the decision; functional: the change
+        # works), and succeeds only when every check it has passes.
+        failures = []
+        for name, cmd in (("adherence", check_cmd), ("functional", functional_cmd)):
+            if not cmd:
+                continue
+            chk = subprocess.run(cmd, shell=True, cwd=work, capture_output=True,
                                  timeout=600, env=_session_env(home, 0))
-            row["success"] = chk.returncode == 0
-            if not row["success"]:
-                # The session's folders are discarded after scoring: keep why the check failed.
-                row["check_output"] = ((chk.stdout or b"") + (chk.stderr or b"")).decode(
-                    errors="replace")[-1500:]
-        else:
-            row["success"] = True
+            if functional_cmd:
+                row[name] = chk.returncode == 0
+            if chk.returncode != 0:
+                failures.append(f"[{name}] " + ((chk.stdout or b"") + (chk.stderr or b"")).decode(
+                    errors="replace")[-1500:])
+        row["success"] = not failures
+        if failures:
+            # The session's folders are discarded after scoring: keep why the check failed.
+            row["check_output"] = "\n".join(failures)[-3000:]
         if task["chain"]:
             # Snapshot the worktree so the next step scores ONLY its own work —
             # otherwise an untracked file left by step 1 is re-counted by steps 2-3
@@ -477,6 +547,8 @@ if __name__ == "__main__":
     ap.add_argument("--model", default="")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--conditions", default="without,claudemd,with")
+    ap.add_argument("--steady-state", action="store_true",
+                    help="complete Contexer's bootstrap during setup (steady-state sessions)")
     ap.add_argument("--contexer-sources", default="",
                     help="condition=path pairs, comma-separated (e.g. "
                          "contexer_pre_v1=/path/a,contexer_v1=/path/b) — selects "
@@ -497,4 +569,5 @@ if __name__ == "__main__":
     print(run_campaign(Path(a.out), reps=a.reps, task_ids=ids,
                        claude_cmd=a.claude_cmd, seed=a.seed, model=a.model,
                        conditions=conds, contexer_sources=sources,
-                       tasks_file=Path(a.tasks_file) if a.tasks_file else None))
+                       tasks_file=Path(a.tasks_file) if a.tasks_file else None,
+                       steady_state=a.steady_state))

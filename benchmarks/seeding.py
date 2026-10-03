@@ -55,3 +55,24 @@ def seed_script(repo: str, items: list[dict]) -> str:
             f"{'seed inactive: ' + item['content'][:60]!r} + ' -> ' + str(_e.get('status'))\n"
             "seeded_ids.append(_m.group(1))")
     return "\n".join(lines) + "\n"
+
+
+def bootstrap_script(repo: str, finish: bool = False) -> str:
+    """Python source that runs Contexer's bootstrap the way setup always has (first call), and
+    with `finish` drives it to its completed stage with no findings, so the bootstrap prompt
+    hook stays silent: the steady state a repository reaches once setup is done. Runs inside the
+    measured checkout, so it imports only `contexer`."""
+    lines = ["import json", "from contexer import server",
+             f"_boot = server.bootstrap_context(repo_path={repo!r})"]
+    if finish:
+        lines.append(f"server.bootstrap_context(repo_path={repo!r}, "
+                     "snapshot_id=json.loads(_boot)['snapshot_id'], findings=[], finish=True)")
+    return "\n".join(lines) + "\n"
+
+
+def steady_check_script(repo: str) -> str:
+    """Python source asserting the bootstrap prompt is not due, run after every setup write so
+    a steady-state session can't silently start with a setup detour."""
+    return ("from contexer import bootstrap\n"
+            f"assert not bootstrap.directive({repo!r}, check_freshness=True), "
+            "'bootstrap prompt still due after steady-state setup'\n")
