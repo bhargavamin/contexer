@@ -90,3 +90,44 @@ def test_irrelevant_anchors_leave_space_for_unanchored_task_rule(tmp_repo):
     assert needed[:8] in text and "Tokenizer stemming stays" in text
     assert "Read decisions through the facade." not in text
     assert "not shown" in text
+
+
+@pytest.mark.parametrize("phrase", ["read it", "UI in Go", "use S3 db", "editing config.py", "add to JSON"])
+def test_unmatchable_phrases_are_refused(tmp_repo, phrase):
+    with pytest.raises(ValueError, match="applies_when"):
+        store.update_decision(tmp_repo, "Keep execution synchronous.", "s", applies_when=[phrase])
+
+
+def test_explicit_lookup_matches_one_term_but_not_two_mixed_phrases(tmp_repo):
+    store.update_decision(tmp_repo, "Keep execution synchronous.", "s", "architecture",
+                          applies_when=["slow upstream", "writing records"])
+    assert "Keep execution synchronous." in store.get_context(tmp_repo, query="upstream")
+    assert "Keep execution synchronous." not in store.get_context(tmp_repo, query="slow records")
+
+
+def test_applicability_only_update_preserves_title_and_is_visible_to_review(tmp_repo):
+    from contexer import review_impact
+    _, did = store.update_decision(tmp_repo, "Keep execution synchronous.", "s", "constraint",
+                                   created_by="human", title="No parallel execution")
+    store.update_decision(tmp_repo, "Keep execution synchronous.", "s", "constraint", replace_id=did,
+                          applies_when=["slow upstream reads"])
+    entry = store.load(tmp_repo)["entries"][0]
+    assert entry["proposed_revision"]["title"] == "No parallel execution"
+    lines = review_impact.impact_lines(review_impact.review_impact(tmp_repo, entry))
+    assert "Proposed applicability: slow upstream reads" in lines
+    assert "slow upstream reads" in store.format_pending_review(tmp_repo)
+    store.approve_decision(tmp_repo, did, "edit", content="Keep synchronous database transactions.")
+    assert store.load(tmp_repo)["entries"][0]["applies_when"] == []
+
+
+def test_global_anchor_uses_cached_index_in_prompt_hook(tmp_repo, monkeypatch):
+    _, did = store.update_global_decision("Keep invoice numbering stable in app/invoices.py because audit trails need it.", "s", "constraint")
+    data = store.load_global()
+    data["entries"][0]["source_files"] = ["app/invoices.py"]
+    store.save_global(data)
+    store.session_start_payload(tmp_repo)
+    def no_inline_index(*args, **kwargs):
+        raise AssertionError("per-prompt index rebuild")
+    monkeypatch.setattr(store, "_build_retrieval_index", no_inline_index)
+    text = store.get_context_for_prompt(tmp_repo, "Why is invoice numbering stable in app/invoices.py?")
+    assert "invoice numbering stable" in text

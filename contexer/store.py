@@ -577,6 +577,7 @@ def global_diagnostics() -> dict:
 
 def save_global(data: dict) -> None:
     atomic_write(_global_path(), json.dumps(data, indent=2, ensure_ascii=False))
+    _write_retrieval_index(GLOBAL_SLUG, data)
 
 
 def update_global_decision(content: str, session_id: str, subtype: str = "", title: str = "",
@@ -2918,7 +2919,7 @@ def _promote_proposal(repo_path: str, entry: dict, content: str | None = None) -
     revisions.append_revision(
         entry, new_content, source=prop.get("source", "human"), approved_at=now,
         title=carried_title, normalize=not prop.get("preserve_case", False),
-        applies_when=prop.get("applies_when"),
+        applies_when=prop.get("applies_when") if new_content == prop_content else [],
     )
     if prop.get("source_files"):
         _anchor_sources(repo_path, entry, prop["source_files"])
@@ -3398,6 +3399,8 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
                 # from wiping a trusted decision.
                 if not _is_storable(content):
                     return False, None, {}
+                if content == target.get("content", "") and applies_when is not None and not title:
+                    title = target.get("title", "")
                 # No-op guard - identical content creates no revision. A title-only correction
                 # (same content, new title) is still handled, but must respect the SAME approval
                 # gate as any change: the title renders as a trusted leading heading, so an AI
@@ -5176,6 +5179,8 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     # fresh one. Fail-soft end to end (log write included), and a no-op read when the index
     # is healthy - no guard needed here.
     ensure_retrieval_index(repo_path)
+    if _global_path().exists() and _read_retrieval_index(GLOBAL_SLUG) is None:
+        _write_retrieval_index(GLOBAL_SLUG, load_global())
     # Periodic spool retention plus the orphan-hold sweep, on a 24h TTL. It landed here as the
     # retention path for a host that never reconciled; the reconcile call below now covers
     # every host, so this is the sweep that runs INDEPENDENTLY of whether a pass happens -
@@ -5656,7 +5661,7 @@ _RETRIEVAL_INDEX_VERSION = 5
 
 
 def _index_path(repo_path: str) -> Path:
-    return sidecar_path("retrieval_index", slug=repo_slug(repo_path))
+    return sidecar_path("retrieval_index", slug=GLOBAL_SLUG if repo_path == GLOBAL_SLUG else repo_slug(repo_path))
 
 
 def _build_retrieval_index(data: dict) -> dict:
@@ -6635,7 +6640,7 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
 
     # BM25 query vector: the SAME tokenizer the index uses (not the legacy alpha-only
     # extraction), so digit-bearing terms like k8s / oauth2 reach the ranker. Artifacts
-    # stay double-weighted. The legacy `keywords`/`ordered_kws` are kept for gating and the
+    # other than file paths stay double-weighted. The legacy `keywords`/`ordered_kws` are kept for gating and the
     # overview/global fallbacks below - only this vector changes.
     ws = working_set.records(repo_path, session_id)
     has_credit = working_set.credit_checker(ws)
@@ -6645,7 +6650,7 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
     # - the gate above already decides whether we're here at all (a real path artifact already
     # makes `artifacts` non-empty); this only refines what happens INSIDE an already-open gate,
     # never widens it. Tiered by signal strength (fix round 1): an explicit `source_files`
-    # anchor is a human governance signal and leads the STRONG set (BM25 fills the rest); a
+    # anchor identifies a candidate whose subject still competes for STRONG slots; a
     # bare content-artifact mention is weaker signal and is downgraded to the WEAK pointer
     # lane below - a wrong pointer costs one line, a wrong STRONG injection plants false
     # context as if human-approved.
@@ -6657,7 +6662,7 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
     # contributes (anchor_requests compete by subject relevance; mention_hits stay capped at pointers)
     # - it does not reach into BM25's separately-existing, already-shipped artifact-double-
     # weighting mechanism (predates #187 - see test_artifact_extraction_routes_paste_to_db).
-    # A decision that also has genuine independent term overlap (e.g. a discriminative word
+    # A decision that also has genuine independent subject overlap (e.g. a discriminative word
     # like "OperationalError" alongside the path) still earns BM25 STRONG on its own merits,
     # exactly as before this feature existed (pinned: TestIndexDominatesLegacy). Only a
     # decision whose sole overlap IS the artifact tokens themselves stays capped at pointer,
@@ -6682,10 +6687,13 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
     scores = {r[0]: r[1] for r in ranked}
     discriminative = {r[0]: r[3] for r in ranked}
     global_scores: dict[str, float] = {}
+    global_discriminative: dict[str, int] = {}
     if any(r.get("scope") == "global" for r in anchor_requests):
-        global_scores = {r[0]: r[1] for r in retrieval.prompt_rank(
-            query_terms, _build_retrieval_index(load_global()))}
-    top_score = max([*scores.values(), *global_scores.values()], default=0.0)
+        global_ranked = retrieval.prompt_rank(query_terms, _read_retrieval_index(GLOBAL_SLUG) or {})
+        global_scores = {r[0]: r[1] for r in global_ranked}
+        global_discriminative = {r[0]: r[3] for r in global_ranked}
+    personal_top = max(scores.values(), default=0.0)
+    global_top = max(global_scores.values(), default=0.0)
 
     def candidate_score(request: str | dict) -> float:
         if isinstance(request, str):
@@ -6695,11 +6703,21 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
 
     # Use the existing relevance floor for every file candidate. A named pointer preserves
     # discoverability when its subject is weak; authority alone cannot manufacture relevance.
-    strong: list[str | dict] = [r for r in anchor_requests
-                               if not query_terms or (candidate_score(r) > 0
-                                   and (candidate_score(r) >= _STRONG_SCORE_FRAC * top_score
-                                        or discriminative.get(r["id"], 0) >= 1))]
-    if is_question and not ranked and len(anchor_requests) == 1:
+    def qualifies_anchor(request: dict) -> bool:
+        if not query_terms:
+            return True
+        score = candidate_score(request)
+        global_scope = request.get("scope") == "global"
+        top = global_top if global_scope else personal_top
+        hits = global_discriminative if global_scope else discriminative
+        return score > 0 and (score >= _STRONG_SCORE_FRAC * top or hits.get(request["id"], 0) >= 1)
+
+    strong: list[str | dict] = [r for r in anchor_requests if qualifies_anchor(r)]
+    focused_paths = _pointer_files(file_artifacts_prompt, prompt)
+    focused_file_question = (is_question and len(focused_paths) == 1
+                             and re.match(r"(?i)^(?:how|what) does\s+" + re.escape(focused_paths[0]) + r"(?:\s|[?])", prompt))
+    if (focused_file_question and not ranked and len(anchor_requests) == 1
+            and anchor_requests[0].get("scope", "personal") == "personal"):
         strong = list(anchor_requests)
     strong_ids = {r["id"] for r in strong}
     if ranked:
@@ -6717,7 +6735,8 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
         # its body deliberately uses different wording. Do this before the generic two-hit
         # loop; otherwise a lower-ranked body matching two incidental words wins merely
         # because the correct title-only candidate has one lexical hit.
-        if allow_strong and subject_artifacts and ranked[0][3] >= 1:
+        if (allow_strong and subject_artifacts and ranked[0][3] >= 1
+                and set(art_tokens) & set((index.get("docs", {}).get(ranked[0][0]) or {}).get("tf", {}))):
             bm25_strong = [ranked[0][0]]
         elif (allow_strong and (is_rationale or is_project)
                 and ranked[0][4] == 0 and ranked[0][5] >= 1):
@@ -6788,9 +6807,8 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
                 meta["origin"] = retrieval._ORDINARY_TASK_VARIANT
             return text, meta
 
-    if overflow:
-        text = _anchor_overflow_pointer(overflow, file_artifacts_prompt, index, prompt)
-        return text, {"kind": "pointer", "count": len(overflow), "topics": file_artifacts_prompt}
+    overflow_text = (_anchor_overflow_pointer(overflow, file_artifacts_prompt, index, prompt)
+                     if overflow else "")
 
     # WEAK: no strong content, but the prompt's topics overlap not-yet-injected docs →
     # a ~15-token pointer instead of full content.
@@ -6809,7 +6827,9 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
                                        "sid": session_id, "ts": time.time()})
             text = (f"[Contexer] Related stored decisions: {parts} - "
                     f"call get_context(query='{ordered_topics[0]}') if relevant.")
-            meta = {"kind": "pointer", "count": sum(counts.values()), "topics": ordered_topics}
+            if overflow_text:
+                text = overflow_text + "\n" + text
+            meta = {"kind": "pointer", "count": sum(counts.values()) + len(overflow), "topics": ordered_topics}
             if task_origin:
                 meta["origin"] = retrieval._ORDINARY_TASK_VARIANT
             return text, meta
@@ -6817,8 +6837,7 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
     # WEAK (file-mention tier, #187 fix round 1): a content-artifact match alone is not a
     # governance signal - no explicit source_files anchor, just the file's name appearing in
     # a decision's prose - so it earns a pointer, never full content. Reached only when
-    # nothing above already returned (an anchor hit renders full content and returns early;
-    # unrelated topic overlap already produced its own pointer and returned too) - a mention
+    # full guidance and topic pointers did not already answer the request - a mention
     # hit is never duplicated alongside a STRONG anchor render or the topic-overlap pointer.
     if mention_hits:
         titles = [t for _, t in mention_hits if t][:3]
@@ -6831,10 +6850,15 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
         text = (f"[Contexer] Related stored decisions mention "
                 f"{', '.join(shown_files[:3])}: {named}{more} - "
                 f"call get_context(files={shown_files!r}) if relevant.")
-        meta = {"kind": "pointer", "count": len(mention_hits), "topics": shown_files}
+        if overflow_text:
+            text = overflow_text + "\n" + text
+        meta = {"kind": "pointer", "count": len(mention_hits) + len(overflow), "topics": shown_files}
         if task_origin:
             meta["origin"] = retrieval._ORDINARY_TASK_VARIANT
         return text, meta
+
+    if overflow_text:
+        return overflow_text, {"kind": "pointer", "count": len(overflow), "topics": file_artifacts_prompt}
 
     # Overview + global fallbacks run ONLY for rationale/project prompts - legacy was silent
     # on an artifact-only prompt that produced no strong hit and no pointer, so we stay silent.
@@ -7016,7 +7040,10 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
                 # Partial applicability matches are useful search results, not hook injections.
                 ranked_ids += [row[0] for row in retrieval.bm25_rank(
                     query_terms, index, tf_field="applies_tf", len_field="applies_len",
-                    df_field="applies_df", avgdl_field="applies_avgdl") if row[2] >= 2]
+                    df_field="applies_df", avgdl_field="applies_avgdl")
+                               if any(len(set(query_terms) & set(phrase))
+                                      >= min(2, len(set(query_terms)))
+                                      for phrase in (index.get("docs", {}).get(row[0]) or {}).get("applies_phrases", []))]
                 matched = [allowed[did] for did in dict.fromkeys(ranked_ids) if did in allowed]
                 relevance_ordered = bool(matched)
         decisions = matched
