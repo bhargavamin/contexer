@@ -173,9 +173,8 @@ def test_two_concurrent_writers_both_land(tmp_repo):
     assert len(spool.list_pending_evidence(tmp_repo)) == 50
 
 
-def test_the_spool_takes_no_locks_at_all():
-    """Structural, in the house style: the no-lock rule is invisible to a behaviour test the
-    moment somebody "fixes" a race by reaching for a lock again."""
+def test_spool_never_takes_a_serializing_store_lock():
+    """Ordinary writers remain concurrent; privacy erasure owns the bounded shared gate."""
     for forbidden in ("fcntl", "flock", "store_lock", "LOCK_EX"):
         assert forbidden not in SPOOL_SOURCE, forbidden
 

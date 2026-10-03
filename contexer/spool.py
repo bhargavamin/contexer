@@ -1,4 +1,4 @@
-"""The evidence spool: one atomic JSON file per event, no locks anywhere.
+"""The evidence spool: one atomic JSON file per event, concurrent shared publication.
 
 Storage for the evidence ledger, laid out as a spool rather than a sidecar document:
 
@@ -14,7 +14,7 @@ Storage for the evidence ledger, laid out as a spool rather than a sidecar docum
 Why per-event files: a host hook appends on every prompt and every tool use, and the one
 property that keeps that affordable is that **the cost of event N does not depend on events
 1..N-1**. `append_evidence` writes exactly one file - it never lists, reads, parses, counts
-or rewrites the spool, and it takes NO lock of any kind. A uuid event id in the filename is
+or rewrites the spool. A nonblocking shared publication gate coordinates only with human erasure; ordinary writers run concurrently. A uuid event id in the filename is
 what removes writer contention: two concurrent writers cannot name the same target, so there
 is nothing to serialize and nothing to lose.
 
@@ -366,7 +366,7 @@ def append_evidence(repo_path: str, event: Mapping) -> dict:
     | `rejected_invalid`.
 
     NEVER raises - host hooks call this on every prompt and tool use. Writes exactly ONE file
-    and reads nothing: no listing, no count, no lock, so cost is independent of how much the
+    and reads nothing: no listing or count, and the shared publication gate never waits, so cost is independent of how much the
     spool already holds. An I/O failure drops the event and bumps `.gap` (recorded loss); an
     invalid event is rejected WITHOUT a gap bump, since a schema rejection is a caller bug
     rather than evidence going missing.
@@ -375,10 +375,13 @@ def append_evidence(repo_path: str, event: Mapping) -> dict:
     if normalized is None:
         return {"status": "rejected_invalid", "errors": errors}
     try:
-        pending = _ensure_dir(_pending_dir(repo_path))
-        _write_json(pending,
-                    f"{_stamp(normalized['occurred_at'])}-{normalized['event_id']}.json",
-                    normalized)
+        with store.evidence_publication_lock(repo_path) as acquired:
+            if not acquired:
+                raise BlockingIOError("privacy erasure is in progress")
+            pending = _ensure_dir(_pending_dir(repo_path))
+            _write_json(pending,
+                        f"{_stamp(normalized['occurred_at'])}-{normalized['event_id']}.json",
+                        normalized)
     except Exception as exc:            # broad on purpose: the never-raises contract
         _bump_gap(repo_path, "write_error")
         return {"status": "dropped_error", "errors": [f"{type(exc).__name__}: {exc}"]}

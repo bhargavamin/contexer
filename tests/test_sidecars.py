@@ -105,6 +105,7 @@ class TestClassification:
     # `None` for the builder means "no function in the package builds this name", which must
     # be a DELIBERATE, listed exception rather than an omission.
     PRODUCERS = {
+        "evidence_publication_lock": (None, {"slug": None}),
         "store":            ("store._store_path", {"slug": None}),
         "deleted":          ("store._deleted_path", {"slug": None}),
         "migrated":         (None, {"slug": None}),          # built by migrate_worktree_strays inline

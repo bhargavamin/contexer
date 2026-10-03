@@ -40,6 +40,8 @@ Two rules carry the lane and neither is negotiable:
 """
 
 import contextlib
+import hashlib
+import fnmatch
 import json
 import re
 import uuid
@@ -47,6 +49,11 @@ from datetime import datetime, timezone
 
 from contexer import revisions
 from contexer import store          # module object, not `from`-imports: see docstring above
+
+
+def erasure_digest(content: str) -> str:
+    """Content-free exact replay suppression, insensitive to whitespace and case."""
+    return hashlib.sha256(" ".join(content.casefold().split()).encode()).hexdigest()
 
 
 def erase_decision(repo_path: str, entry_id: str, *, confirm: bool = False,
@@ -61,7 +68,7 @@ def erase_decision(repo_path: str, entry_id: str, *, confirm: bool = False,
         return False, "Erasure is permanent. Confirm explicitly to remove all local content."
     if actor not in {"human", "cli", "ui"}:
         return False, "Unknown erasure actor; use human, cli or ui."
-    from contexer import redact, share, share_policy
+    from contexer import redact, share, share_policy, sidecars
 
     slug = store.repo_slug(repo_path)
     try:
@@ -75,6 +82,8 @@ def erase_decision(repo_path: str, entry_id: str, *, confirm: bool = False,
                 locks.enter_context(share_policy._sidecar_lock(path))
             locks.enter_context(store.store_lock(f".reconcile_{slug}"))
             locks.enter_context(store.store_lock(slug))
+            if not locks.enter_context(store.evidence_publication_lock(repo_path, exclusive=True)):
+                return False, "Evidence is being published; retry erasure shortly."
             data = store.load_for_update(repo_path)
             graveyard, error = store.read_deleted(repo_path)
             if error:
@@ -95,13 +104,9 @@ def erase_decision(repo_path: str, entry_id: str, *, confirm: bool = False,
                            or (e.get("proposed_revision") or {}).get("team_reconciliation")
                            for e in matches)):
                 return False, "This decision has a known team copy. Erase the team copy there too before local erasure."
-            snapshots = {}
-            for path in store.store_dir().rglob("*"):
-                if path.is_file() and not path.is_symlink() and not path.name.endswith(".lock"):
-                    snapshots[path] = path.read_bytes()
             markers = store.sidecar_path("shared_markers")
-            if markers in snapshots:
-                for line in snapshots[markers].splitlines():
+            if markers.exists():
+                for line in markers.read_bytes().splitlines():
                     if not line.strip():
                         continue
                     shared = json.loads(line)
@@ -109,6 +114,19 @@ def erase_decision(repo_path: str, entry_id: str, *, confirm: bool = False,
                         raise ValueError("Shared markers are unreadable; refusing erasure")
                     if shared["id"] == decision_id:
                         return False, "This decision was shared. Erase the team copy there too before local erasure."
+            selected_paths = []
+            for path in store.store_dir().rglob("*"):
+                if not path.is_file() or path.is_symlink() or path.name.endswith(".lock"):
+                    continue
+                relative = path.relative_to(store.store_dir())
+                if relative.parts[0] == "evidence" and len(relative.parts) > 1 and relative.parts[1] != slug:
+                    continue
+                kind = next((kind for kind in sidecars.KINDS if fnmatch.fnmatch(path.name, kind.glob)), None) if len(relative.parts) == 1 else None
+                if kind and "{slug}" in kind.template and slug not in path.name:
+                    continue
+                if path.name in {"config.toml", sidecars.filename("console_state"), sidecars.filename("console_log")} or (kind and kind.name in {"team_creds", "repo_pointer"}):
+                    continue
+                selected_paths.append(path)
 
             fragments: set[str] = set()
             identities = {decision_id}
@@ -152,6 +170,11 @@ def erase_decision(repo_path: str, entry_id: str, *, confirm: bool = False,
                            ("id", "decision_id", "local_decision_id", "event_id", "target_decision_id")
                            if isinstance(value.get(key), str)):
                         return removed
+                    # Another decision is authoritative data, even when its prose overlaps.
+                    if (value.get("type") in {"decision", "erasure"} and value.get("id")) or any(
+                            value.get(key) and value.get(key) not in identities
+                            for key in ("id", "decision_id", "local_decision_id", "target_decision_id")):
+                        return value
                     result = {}
                     for key, item in value.items():
                         if key in identities:
@@ -167,8 +190,8 @@ def erase_decision(repo_path: str, entry_id: str, *, confirm: bool = False,
                         value = value.replace(fragment, "[erased]")
                 return value
 
-            publications = {}
-            for path, raw in snapshots.items():
+            for path in selected_paths:
+                raw = path.read_bytes()
                 # The two authoritative files are published last, with a safe audit record.
                 if path in {store.sidecar_path("store", slug=slug), store.sidecar_path("deleted", slug=slug)}:
                     continue
@@ -182,28 +205,27 @@ def erase_decision(repo_path: str, entry_id: str, *, confirm: bool = False,
                                         json.dumps(fragment, ensure_ascii=False)[1:-1]):
                             clean = clean.replace(variant.encode(), b"[erased]")
                     if clean != raw:
-                        publications[path] = clean.decode("utf-8")
+                        store.atomic_write(path, clean.decode("utf-8"), durable=True)
                 else:
                     clean = scrub(parsed)
                     if clean is removed:
-                        publications[path] = None
+                        store.atomic_write(path, "{}", durable=True)
                     elif clean != parsed:
-                        publications[path] = json.dumps(clean, ensure_ascii=False)
-            for path, clean in publications.items():
-                if clean is None:
-                    path.unlink()
-                else:
-                    store.atomic_write(path, clean)
+                        store.atomic_write(path, json.dumps(clean, ensure_ascii=False), durable=True)
             data = scrub(data)
             graveyard = scrub(graveyard)
             now = datetime.now(timezone.utc).isoformat()
             graveyard["entries"].append({"type": "erasure", "id": decision_id,
                 "timestamp": matches[0].get("timestamp", ""), "deleted_at": now,
-                "deleted_by": actor, "reason": "erased"})
-            store._save_deleted(repo_path, graveyard)
-            store.save(repo_path, data)
+                "deleted_by": actor, "reason": "erased",
+                "content_digests": sorted({erasure_digest(r["content"])
+                    for entry in matches for r in [entry, *(entry.get("revisions") or []),
+                                                   entry.get("proposed_revision") or {}]
+                    if r.get("content")})})
+            store._save_deleted(repo_path, graveyard, durable=True)
+            store.save(repo_path, data, durable=True)
             return True, f"Erased {decision_id[:8]}; content cannot be restored."
-    except (OSError, ValueError, BlockingIOError):
+    except (OSError, ValueError, BlockingIOError, share_policy.SidecarDataError):
         return False, "Erasure did not complete. Resolve unreadable files or busy sharing, then retry."
 
 LIFECYCLE_ACTIONS = ("retire",)
