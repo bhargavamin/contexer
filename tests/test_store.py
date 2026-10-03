@@ -5737,7 +5737,7 @@ class TestFileRoute:
         assert "[Contexer] Related stored decisions" not in result
         assert "Discount calculations" not in result
 
-    def test_file_hit_leads_and_bm25_fills_remaining_slots(self, tmp_repo):
+    def test_unrelated_file_anchor_is_named_after_task_match(self, tmp_repo):
         store.update_decision(tmp_repo,
             "JWT refresh tokens expire after fifteen minutes and live in httpOnly cookies",
             RV1_SESSION, "architecture")
@@ -5746,13 +5746,15 @@ class TestFileRoute:
             RV1_SESSION, "pattern")
         store.update_decision(tmp_repo,
             "Settings load from a TOML config file validated at startup before anything "
-            "else runs", RV1_SESSION, "convention", source_files=["contexer/config.py"])
+            "else runs", RV1_SESSION, "convention", source_files=["contexer/config.py"],
+            title="Settings load")
 
         result = store.get_context_for_prompt(
             tmp_repo, "why does contexer/config.py break the jwt refresh cookie flow?")
-        # File-route hit (config.py, anchored -> STRONG) renders BEFORE the BM25-ranked hit
-        # (jwt) — "ahead of BM25 scores", not just present somewhere in a merged/deduped set.
-        assert 0 <= result.find("Settings load") < result.find("JWT refresh tokens")
+        assert "JWT refresh tokens" in result
+        assert "Settings load" in result.split("not shown:", 1)[1]
+        assert "validated at startup" not in result
+
 
     def test_working_set_dedup_applies_to_anchor_hits(self, tmp_repo):
         store.update_decision(
@@ -5760,10 +5762,10 @@ class TestFileRoute:
             RV1_SESSION, "architecture", source_files=["guard_engine.py"])
         sid = "sess-file-ws"
         first = store.get_context_for_prompt(
-            tmp_repo, "fix the pairing bug in guard_engine.py", sid)
+            tmp_repo, "fix staged files pairing in guard_engine.py", sid)
         assert first.startswith("[Contexer: auto-fetched for this question]")
         second = store.get_context_for_prompt(
-            tmp_repo, "fix the pairing bug in guard_engine.py", sid)
+            tmp_repo, "fix staged files pairing in guard_engine.py", sid)
         assert second == ""   # already in the working set — no re-injection, no fallback
 
     def test_mention_pointer_not_working_set_deduped(self, tmp_repo):
@@ -5871,7 +5873,7 @@ class TestFileRoute:
             RV1_SESSION, "architecture", source_files=["guard_engine.py"])
         text, meta = store.get_context_for_prompt_with_meta(
             tmp_repo, "fix the bug in guard_engine.py")
-        assert meta["kind"] == "strong"
+        assert meta["kind"] == "pointer"
         assert meta["count"] == 1
 
     def test_meta_reflects_mention_hit(self, tmp_repo):

@@ -28,7 +28,7 @@ from contexer import retrieval, revisions, store, working_set  # noqa: E402
 from contexer.adapters import claude, cursor, gemini  # noqa: E402
 
 SCHEMA_VERSION = 1
-RUNNER_VERSION = "3"
+RUNNER_VERSION = "4"
 FIXTURE_PATH = Path(__file__).with_name("relevance_cases.json")
 TIERS = {"standing_title", "standing_full", "prompt_full", "pointer", "tool_result", "team_delta"}
 FULL_TIERS = {"standing_full", "prompt_full", "tool_result", "team_delta"}
@@ -241,6 +241,16 @@ def _observations_from_text(
             _runtime_marker_identity(repo, item, marker, proposal_marker=False)
             if marker and marker in text else None
         )
+        if identity is None:
+            entry = _runtime_entry(repo, item)
+            # A named overflow pointer exposes identity/title, never the controlled body
+            # marker. Record that weaker delivery independently of any full block beside it.
+            if entry and any(line.startswith("[Contexer]") and "not shown:" in line
+                             and f"(id={str(entry['id'])[:8]})" in line
+                             for line in text.splitlines()):
+                current = revisions.current_revision(entry) or {}
+                identity = (current.get("revision_id"), None)
+                item_tier = "pointer"
         if identity:
             found = True
             observations.append({
@@ -600,6 +610,7 @@ def _evaluate_assertion(
         matching = [o for o in observations if o["action_id"] == assertion["action_id"]
                     and o["status"] == assertion.get("status", "observed")
                     and (not assertion.get("stage") or o["stage"] == assertion["stage"])
+                    and (not assertion.get("tier") or o["tier"] == assertion["tier"])
                     and (not assertion.get("decision_only") or o.get("decision_id"))]
         count = len(matching)
         passed = count >= assertion.get("minimum", count) and count <= assertion.get("maximum", count)
