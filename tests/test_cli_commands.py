@@ -2532,6 +2532,7 @@ class TestCommandTable:
         "review": ("review", False),
         "retire": ("_lifecycle_cmd", True),
         "restore": ("_lifecycle_cmd", True),
+        "export": ("export_cmd", True),
         "ui": ("ui_cmd", True),
         "status": ("status", True),
         "pull": ("pull", True),
@@ -2631,7 +2632,7 @@ class TestCommandTable:
         """Pinned as a set, not per row: this is the rule the old `cmd not in (...)` line
         held, and it is the one a new row is most likely to get wrong by default."""
         quiet = {c.names[0] for c in cli.COMMANDS if not c.backstop}
-        assert quiet == {"guard", "upgrade", "status"}
+        assert quiet == {"guard", "upgrade", "status", "export"}
 
     @pytest.mark.parametrize("name", sorted(HANDLERS))
     def test_a_guarded_command_turns_a_permission_error_into_advice(self, name, monkeypatch,
@@ -2656,7 +2657,7 @@ class TestCommandTable:
         """`_run_guarded` exists to explain a root-owned config file. A command that only
         reads has nothing to explain, and wrapping it would swallow a real error."""
         unguarded = {c.names[0] for c in cli.COMMANDS if not c.guarded}
-        assert unguarded == {"version", "help", "review", "status", "guard"}
+        assert unguarded == {"version", "help", "review", "status", "guard", "export"}
 
     # ── help text and dispatchable set agree, in both directions ──
 

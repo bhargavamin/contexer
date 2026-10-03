@@ -250,3 +250,5 @@ MIT. See [LICENSE](LICENSE) for full terms.
 The Contexer name and logo are trademarks of Contexer.ai. The MIT license does not grant rights to use the Contexer name, logo, or brand in any way that implies official affiliation.
 
 The local data directory is private to its owner (mode `0700`); existing group or world permissions are removed on next use.
+
+Export current decisions with `contexer export --format md --out decisions/`, or use `--format adr` for one architecture decision record per decision. Exports redact secrets by default; `--include-retired` includes retired history and replacement links.

@@ -311,3 +311,7 @@ What exists today: the **open-source (OSS)** version, **Personal Cloud**, and **
 - **Cursor parity is partial.** Cursor's hooks can't inject per-prompt context or restore after compaction; Cursor steering rides on the session-start nudge plus an always-apply rule file. See [integrations](integrations.md).
 - **Gemini compression is deferred.** Gemini CLI restores stored context on the next turn after compression, not immediately.
 - **Contexer steers, it doesn't enforce.** Agents are told your rules before writing code; your CI and PR gates still verify. The one opt-in exception is the [commit-time guard](#commit-time-guard): a decision you explicitly `guard arm` blocks the commit it violates — but only that decision, only on the machine where it was armed, and `git commit --no-verify` still skips it, so it's a local nudge, not a replacement for CI.
+
+## Export decisions
+
+Run `contexer export --format md --out decisions/` for a Markdown document grouped by decision type, or `contexer export --format adr --out docs/adr/` for one ADR per decision. Both formats include titles, current decision text, status, dates and file applicability. `--include-retired` includes retired/superseded decisions and replacement links. Pending decisions and proposed revisions are excluded. Filenames and ordering are stable. Exports are redacted by default even when sharing redaction is disabled. Use `--verbatim` only for an explicit local copy with secrets preserved; the command warns when selected. Export does not change decisions or existing repository documentation.
