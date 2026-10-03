@@ -66,12 +66,8 @@ def ensure_store_dir() -> Path:
     path that must fail loudly, so swallowing here would hide an unwritable home from the
     one layer that knows whether that is fatal.
     """
-    target = store_dir()
-    target.mkdir(mode=0o700, exist_ok=True)
-    mode = target.stat().st_mode & 0o7777
-    if mode & 0o077:
-        target.chmod(mode & ~0o077)
-    return target
+    from contexer.permissions import ensure_private_directory
+    return ensure_private_directory(store_dir())
 
 
 def sidecar_path(kind: str, **fields: str) -> Path:

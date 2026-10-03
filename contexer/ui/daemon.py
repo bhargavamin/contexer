@@ -80,7 +80,8 @@ def write_state(state: UiState) -> None:
 
     Same guarantee as store.atomic_write (readers never see a torn file), hand-rolled because
     `tempfile` pulls in shutil and is outside this module's import budget."""
-    STATE_PATH.parent.mkdir(mode=0o700, exist_ok=True)
+    from contexer.permissions import ensure_private_directory
+    ensure_private_directory(STATE_PATH.parent)
     tmp = STATE_PATH.with_name(f"{STATE_PATH.name}.{os.getpid()}.tmp")
     try:
         fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
@@ -281,7 +282,8 @@ def _claim_state(port: int, version: str, token: str | None) -> tuple[UiState, b
     """Create the statefile if absent; returns (state, minted). O_EXCL makes the creator the
     only process that ever mints a token, so two SessionStart hooks firing together cannot
     print two different credentials for one daemon."""
-    STATE_PATH.parent.mkdir(mode=0o700, exist_ok=True)
+    from contexer.permissions import ensure_private_directory
+    ensure_private_directory(STATE_PATH.parent)
     state = UiState(pid=0, port=port, token=token or secrets.token_urlsafe(32),
                     started_at=_now_iso(), version=version)
     try:
@@ -315,7 +317,8 @@ def _spawn(port: int) -> int:
     `-P` keeps the child off the cwd: `-m` prepends it to sys.path, so a daemon started
     from a checked-out contexer repo would import that source tree instead of the
     installed package (see team_context._spawn_refresh)."""
-    LOG_PATH.parent.mkdir(mode=0o700, exist_ok=True)
+    from contexer.permissions import ensure_private_directory
+    ensure_private_directory(LOG_PATH.parent)
     with open(LOG_PATH, "a", encoding="utf-8") as log:
         child = subprocess.Popen(
             [sys.executable, "-P", "-m", SPAWN_TARGET, "--port", str(port)],
@@ -350,7 +353,8 @@ def _now_iso() -> str:
 def _log(message: str) -> None:
     """Append one line to ui.log. Never the token, never decision content."""
     try:
-        LOG_PATH.parent.mkdir(mode=0o700, exist_ok=True)
+        from contexer.permissions import ensure_private_directory
+        ensure_private_directory(LOG_PATH.parent)
         with open(LOG_PATH, "a", encoding="utf-8") as log:
             log.write(f"{_now_iso()} daemon: {message}\n")
     except OSError:
