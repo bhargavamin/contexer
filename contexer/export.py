@@ -88,18 +88,23 @@ def write(repo_path: str, out: Path, **options) -> list[Path]:
     finally:
         os.close(descriptor)
     manifest = out / ".contexer-export.json"
+    if manifest.is_symlink():
+        raise ValueError("Export manifest must not be a symlink")
     previous = json.loads(manifest.read_text(encoding="utf-8")) if manifest.exists() else {}
     if not isinstance(previous, dict) or any(not isinstance(name, str) or Path(name).name != name
             or not (name == "decisions.md" or (name.startswith("adr-") and name.endswith(".md")))
             for name in previous):
         raise ValueError("Unreadable export manifest; refusing output changes")
     stale = []
-    for name, digest in previous.items():
+    for name in previous.keys() | documents.keys():
         path = out / name
-        if name not in documents and path.exists():
-            if path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+        if path.exists() or path.is_symlink():
+            if name not in previous:
+                raise ValueError("Existing output is not owned by this export; preserve it first")
+            if path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest() != previous[name]:
                 raise ValueError("A previous export was edited; preserve it before re-exporting")
-            stale.append(path)
+            if name not in documents:
+                stale.append(path)
     paths = []
     hashes = {}
     for name, content in documents.items():

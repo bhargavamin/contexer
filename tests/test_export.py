@@ -136,3 +136,30 @@ def test_cli_outside_repo_never_uses_last_repo_pointer(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "resolve_repo", lambda path: "/different/repo")
     with pytest.raises(SystemExit):
         cli.export_cmd(["--out", str(tmp_path)])
+
+
+@pytest.mark.parametrize("format", ["md", "adr"])
+@pytest.mark.parametrize("owned", [False, True])
+def test_refresh_refuses_edited_or_unowned_current_outputs(tmp_repo, tmp_path, format, owned):
+    store.update_decision(tmp_repo, "Use Postgres for the database.", "s", "convention")
+    out = tmp_path / "export"
+    if owned:
+        [path] = export.write(tmp_repo, out, format=format)
+    else:
+        out.mkdir()
+        path = out / next(iter(export.render(tmp_repo, format=format)))
+    path.write_text("My manually edited decision", encoding="utf-8")
+    before = {p.name: p.read_bytes() for p in out.iterdir()}
+    with pytest.raises(ValueError, match="edited|not owned"):
+        export.write(tmp_repo, out, format=format)
+    assert {p.name: p.read_bytes() for p in out.iterdir()} == before
+
+
+@pytest.mark.parametrize("format", ["md", "adr"])
+def test_default_preserves_auth_policy_words_while_scrubbing_password(tmp_repo, format):
+    entry = store._new_decision_entry("Use auth: required and token = short-lived; password=monkey.",
+                                    "s", "constraint", status="approved")
+    store.save(tmp_repo, {"entries": [entry]})
+    result = "\n".join(export.render(tmp_repo, format=format).values())
+    assert "auth: required" in result and "token = short-lived" in result
+    assert "monkey" not in result
