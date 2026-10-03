@@ -387,13 +387,18 @@ def _capture_state(condition: str, work: Path, home: Path, patterns: list,
     if condition in _CONTEXER_CONDITIONS:
         decisions = []
         for path in (home / ".contexer").glob("*.json"):
-            if path.name.startswith("_") or path.name.endswith(".deleted.json"):
+            # pathlib's glob also returns dot-file sidecars (indexes, outbox, ui state); only
+            # repository stores and the global store hold decisions. Global rules reach every
+            # repository, so they count.
+            if path.name.startswith(".") or path.name.endswith(".deleted.json"):
                 continue
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 continue
-            decisions += [e for e in data.get("entries", [])
+            if not isinstance(data, dict) or not isinstance(data.get("entries"), list):
+                continue
+            decisions += [e for e in data["entries"]
                           if isinstance(e, dict) and e.get("type") == "decision"]
         hits = [e for e in decisions
                 if _matches(patterns, f"{e.get('title', '')} {e.get('content', '')}", noise)]

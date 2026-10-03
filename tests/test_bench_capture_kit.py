@@ -141,12 +141,18 @@ def test_capture_state_reads_the_contexer_store(tmp_path):
                {"id": "b2", "type": "decision", "status": "pending_approval",
                 "content": "Unrelated rule about naming."}]
     (store / "repo-abc.json").write_text(json.dumps({"entries": entries}))
-    (store / "_global.json").write_text(json.dumps({"entries": [
-        {"id": "g", "type": "decision", "content": "amount_cents everywhere"}]}))
+    # Sidecars that aren't stores must be skipped, whatever their JSON shape (a list once
+    # crashed this read mid-campaign and skipped the code revert for that chain).
+    (store / ".outbox.json").write_text(json.dumps([{"entries": "x"}]))
+    (store / ".retrieval_index_repo-abc.json").write_text(json.dumps({"docs": {}}))
+    (store / "odd.json").write_text(json.dumps(["not", "a", "store"]))
     state = run._capture_state("with", tmp_path, tmp_path, [r"amount_cents"])
     assert state == {"captured": True, "capture_status": "suggested",
                      "decisions_stored": 2, "decisions_pending": 1}
-    assert run._capture_state("with", tmp_path, tmp_path, [r"rec_"])["captured"] is False
+    # A rule recorded globally reaches every repository, so it counts as captured.
+    (store / "_global.json").write_text(json.dumps({"entries": [
+        {"id": "g", "type": "decision", "status": "approved", "content": "Use rec_ prefixes"}]}))
+    assert run._capture_state("with", tmp_path, tmp_path, [r"rec_"])["captured"] is True
 
 
 def test_capture_state_reads_only_the_maintained_decisions_section(tmp_path):
