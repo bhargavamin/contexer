@@ -163,3 +163,37 @@ def test_default_preserves_auth_policy_words_while_scrubbing_password(tmp_repo, 
     result = "\n".join(export.render(tmp_repo, format=format).values())
     assert "auth: required" in result and "token = short-lived" in result
     assert "monkey" not in result
+
+
+@pytest.mark.parametrize("format", ["md", "adr"])
+def test_default_redacts_short_lowercase_tokens(tmp_repo, format):
+    entry = store._new_decision_entry("Use token=admin and auth=abc; password=monkey.", "s", "constraint", status="approved")
+    store.save(tmp_repo, {"entries": [entry]})
+    output = "\n".join(export.render(tmp_repo, format=format).values())
+    assert "admin" not in output and "abc" not in output and "monkey" not in output
+
+
+def test_interrupted_export_resumes_without_overwriting_user_edits(tmp_repo, tmp_path, monkeypatch):
+    entry = store._new_decision_entry("Use durable records.", "s", "constraint", status="approved")
+    store.save(tmp_repo, {"entries": [entry]})
+    out = tmp_path / "output"
+    export.write(tmp_repo, out)
+    revisions.append_revision(entry, "Use revised durable records.", source="human", normalize=False)
+    store.save(tmp_repo, {"entries": [entry]})
+    original = store.atomic_write
+    calls = []
+    def interrupted(path, content, **kwargs):
+        calls.append(path.name)
+        if len(calls) == 3:
+            raise OSError("interrupted before final manifest")
+        return original(path, content, **kwargs)
+    monkeypatch.setattr(store, "atomic_write", interrupted)
+    with pytest.raises(OSError, match="interrupted"):
+        export.write(tmp_repo, out)
+    assert "revised durable records" in (out / "decisions.md").read_text()
+    monkeypatch.setattr(store, "atomic_write", original)
+    export.write(tmp_repo, out)
+    assert not any(isinstance(v, list) for v in json.loads((out / ".contexer-export.json").read_text()).values())
+    (out / "decisions.md").write_text("My own edit")
+    with pytest.raises(ValueError, match="edited"):
+        export.write(tmp_repo, out)

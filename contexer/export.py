@@ -93,7 +93,11 @@ def write(repo_path: str, out: Path, **options) -> list[Path]:
     previous = json.loads(manifest.read_text(encoding="utf-8")) if manifest.exists() else {}
     if not isinstance(previous, dict) or any(not isinstance(name, str) or Path(name).name != name
             or not (name == "decisions.md" or (name.startswith("adr-") and name.endswith(".md")))
-            for name in previous):
+            for name in previous) or any(
+                not isinstance(values, (str, list)) or not (values if isinstance(values, list) else [values])
+                or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+                       for value in (values if isinstance(values, list) else [values]))
+                for values in previous.values()):
         raise ValueError("Unreadable export manifest; refusing output changes")
     stale = []
     for name in previous.keys() | documents.keys():
@@ -101,12 +105,19 @@ def write(repo_path: str, out: Path, **options) -> list[Path]:
         if path.exists() or path.is_symlink():
             if name not in previous:
                 raise ValueError("Existing output is not owned by this export; preserve it first")
-            if path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest() != previous[name]:
+            accepted = previous[name] if isinstance(previous[name], list) else [previous[name]]
+            if path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest() not in accepted:
                 raise ValueError("A previous export was edited; preserve it before re-exporting")
             if name not in documents:
                 stale.append(path)
     paths = []
-    hashes = {}
+    hashes = {name: hashlib.sha256(content.encode()).hexdigest() for name, content in documents.items()}
+    pending = {name: (value if isinstance(value, list) else [value]) for name, value in previous.items()}
+    for name, digest in hashes.items():
+        pending[name] = sorted(set(pending.get(name, []) + [digest]))
+    # Publish ownership of old and intended bytes before any document replacement. A crash
+    # can then resume without treating our own partially updated output as a user's edit.
+    store.atomic_write(manifest, json.dumps(pending, sort_keys=True))
     for name, content in documents.items():
         path = out / name
         store.atomic_write(path, content)

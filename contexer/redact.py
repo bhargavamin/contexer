@@ -126,8 +126,10 @@ def scrub(text: str, *, strict_assignments: bool = False) -> tuple[str, int]:
             nonlocal total
             quote = m.group(3)                       # the quote char, or None for a bare value
             value = m.group(4) if quote else m.group(5)
-            strict_credential = strict_assignments and m.group(1).lower() not in {"auth", "token"}
-            inspected = value.rstrip(".,;") if strict_assignments and not strict_credential else value
+            prose = not quote and (m.group(1).lower(), value.rstrip(".,;")) in {
+                ("auth", "required"), ("auth", "bearer"), ("token", "short-lived")}
+            strict_credential = strict_assignments and not prose
+            inspected = value.rstrip(".,;") if prose else value
             if _is_placeholder(value) or (not strict_credential and not _looks_secretlike(inspected)):
                 return m.group(0)
             total += 1
