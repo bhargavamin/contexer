@@ -862,6 +862,40 @@ def test_runner_scores_k7c_by_clarification(tmp_path, patch, clarified):
     assert row["clarified"] is clarified and row["success"] is clarified
 
 
+@pytest.mark.parametrize("task", [t for t in TASKS if t["class"] == "K7c"], ids=lambda t: t["id"])
+def test_k7c_sides_are_stored_at_the_same_status(task):
+    # A K7c pair has no recorded winner. If the store queued one side for approval (seeding then
+    # approves it) and left the other suggested, Contexer would correctly show a winner the task
+    # says doesn't exist: "instead of raising" once did exactly that to the tombstone rule.
+    from contexer import store
+    levels = {store._classify_level(task["seed_decisions"][i]["content"],
+                                    task["seed_decisions"][i]["subtype"], "ai")
+              for i in task["conflict_decisions"]}
+    assert len(levels) == 1, levels
+
+
+def test_the_150_decision_file_keeps_every_task_and_points_at_the_same_decisions():
+    # The larger store changes only the decisions around each task: prompts and checks are
+    # identical, and every remapped index still names the decision it named before.
+    big = json.loads((TASKS_FILE.parent / "adoption_tasks_150.json").read_text())
+    assert [t["id"] for t in big] == [t["id"] for t in TASKS]
+    for small, large in zip(TASKS, big):
+        for key in ("prompt", "check_cmd", "functional_cmd", "class", "fixture_files",
+                    "clarification"):
+            assert small.get(key) == large.get(key), (small["id"], key)
+        assert len(large["seed_decisions"]) == 150
+        for key in ("needed_decision", "secondary_decisions", "conflict_decisions"):
+            a, b = small.get(key), large.get(key)
+            a = [] if a is None else a if isinstance(a, list) else [a]
+            b = [] if b is None else b if isinstance(b, list) else [b]
+            assert [small["seed_decisions"][i] for i in a] == \
+                [large["seed_decisions"][i] for i in b], (small["id"], key)
+        task_file = "app/svc_{seed}_core.py"
+        extra = [d for d in large["seed_decisions"] if d not in small["seed_decisions"]]
+        assert not any(task_file in d.get("source_files", []) or "app/" in d.get("source_files", [])
+                       for d in extra), small["id"]
+
+
 def test_a_broken_overlay_stops_the_campaign_before_any_session(tmp_path):
     tasks = json.loads(TASKS_FILE.read_text())
     broken = next(t for t in tasks if t["fixture_files"])

@@ -77,3 +77,18 @@ uv run python -m benchmarks.run --tasks-file benchmarks/adoption_tasks.json --st
 
 Three reps show each needed decision once in each author style. Use a new `--out` directory per
 task-file version.
+
+## Larger store
+
+`benchmarks/adoption_tasks_150.json` holds the same 38 tasks and checks over a 150-decision
+store: the 34 decisions above plus 116 synthetic decisions about other components (gateway,
+export and import jobs, sibling services, web app, CI, deploy, warehouse, security, on-call,
+docs), in a new recorded order. None is anchored to the task module or touches a graded topic,
+but they share its vocabulary, so they compete in retrieval the way a real store's neighbours
+do. Every task's needed, secondary and conflict indices point to the same decision text as in
+`adoption_tasks.json` (pinned by the kit test). Run it the same way with
+`--tasks-file benchmarks/adoption_tasks_150.json`; the `without` arm doesn't read the store, so
+its results carry over from a run on the smaller file.
+
+At this size the SessionStart block exceeds Claude Code's inline limit for hook output and
+arrives as a short preview (#365); report results with that in mind until it is fixed.

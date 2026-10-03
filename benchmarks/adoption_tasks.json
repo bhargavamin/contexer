@@ -64,8 +64,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -73,7 +73,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -202,7 +202,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -602,8 +602,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -611,7 +611,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -740,7 +740,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -1140,8 +1140,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -1149,7 +1149,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -1278,7 +1278,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -1674,8 +1674,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -1683,7 +1683,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -1812,7 +1812,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -2211,8 +2211,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -2220,7 +2220,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -2349,7 +2349,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -2749,8 +2749,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -2758,7 +2758,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -2887,7 +2887,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -3283,8 +3283,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -3292,7 +3292,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -3421,7 +3421,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -3819,8 +3819,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -3828,7 +3828,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -3957,7 +3957,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -4358,8 +4358,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -4367,7 +4367,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -4496,7 +4496,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -4894,8 +4894,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -4903,7 +4903,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -5032,7 +5032,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -5430,8 +5430,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -5439,7 +5439,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -5568,7 +5568,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -5967,8 +5967,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -5976,7 +5976,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -6105,7 +6105,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -6504,8 +6504,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -6513,7 +6513,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -6642,7 +6642,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -7036,8 +7036,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -7045,7 +7045,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -7174,7 +7174,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -7568,8 +7568,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -7577,7 +7577,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -7706,7 +7706,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -8105,8 +8105,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -8114,7 +8114,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -8243,7 +8243,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -8642,8 +8642,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -8651,7 +8651,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -8780,7 +8780,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -9181,8 +9181,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -9190,7 +9190,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -9319,7 +9319,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -9713,8 +9713,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -9722,7 +9722,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -9851,7 +9851,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -10245,8 +10245,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -10254,7 +10254,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -10383,7 +10383,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -10788,8 +10788,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -10797,7 +10797,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -10926,7 +10926,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -11322,8 +11322,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -11331,7 +11331,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -11460,7 +11460,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -11853,8 +11853,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -11862,7 +11862,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -11991,7 +11991,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -12384,8 +12384,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -12393,7 +12393,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -12522,7 +12522,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -12915,8 +12915,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -12924,7 +12924,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -13053,7 +13053,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -13447,8 +13447,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -13456,7 +13456,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -13585,7 +13585,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -13986,8 +13986,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -13995,7 +13995,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -14124,7 +14124,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -14518,8 +14518,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -14527,7 +14527,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -14656,7 +14656,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -15055,8 +15055,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -15064,7 +15064,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -15193,7 +15193,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -15604,8 +15604,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -15613,7 +15613,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -15742,7 +15742,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -16158,8 +16158,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -16167,7 +16167,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -16296,7 +16296,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -16709,8 +16709,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -16718,7 +16718,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -16847,7 +16847,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -17263,8 +17263,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -17272,7 +17272,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -17401,7 +17401,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -17795,8 +17795,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -17804,7 +17804,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -17933,7 +17933,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -18327,8 +18327,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -18336,7 +18336,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -18465,7 +18465,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -18858,8 +18858,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -18867,7 +18867,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -18996,7 +18996,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -19389,8 +19389,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -19398,7 +19398,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -19527,7 +19527,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
@@ -19920,8 +19920,8 @@
         "source_files": [
           "app/svc_{seed}_core.py"
         ],
-        "title": "Show slot identifiers like SLOT_07",
-        "content": "Slot identifiers shown to operators use the SLOT_07 form (upper case, underscore), matching the keys the ops runbook uses for alerts."
+        "title": "Label slots like SLOT_07",
+        "content": "The team labels a slot in the SLOT_07 form (upper case, underscore, two digits) everywhere a label appears, matching the keys the ops runbook uses for alerts."
       },
       {
         "subtype": "convention",
@@ -19929,7 +19929,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Label slots like slot-07",
-        "content": "Label slots in lowercase with a dash and two digits, like slot-07, because the dashboard builds its page URLs from the label."
+        "content": "The team labels a slot in lowercase with a dash and two digits, like slot-07, everywhere a label appears, because the dashboard builds its page URLs from the label."
       },
       {
         "subtype": "convention",
@@ -20058,7 +20058,7 @@
           "app/svc_{seed}_core.py"
         ],
         "title": "Return a tombstone for deleted records",
-        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records instead of raising, because the export job counts tombstones to reconcile deletions."
+        "content": "Return a tombstone, {'id': record_id, 'deleted': True}, for deleted records and don't raise, because the export job counts tombstones to reconcile deletions."
       },
       {
         "subtype": "convention",
