@@ -117,3 +117,5 @@ A git `pre-commit` hook - install with `contexer guard --install-hook` (never wi
 Anchor truncation (a decision governing more files than the cap allows) is recorded explicitly rather than silently dropped, so the developer can see and correct a partial anchor. A decision governing a subsystem should instead use one trailing-slash directory prefix (`contexer/`); assisted backfill proposes a parent prefix when at least three mined file candidates are siblings. Anchors can optionally be included when a decision is pushed to the optional remote team service, subject to the same length/count bounds enforced on capture.
 
 Directory tightening uses an opened directory descriptor, refuses symlinks and unexpected owners, and removes only non-owner permissions. Installation, evidence spool reuse, console state/log creation and existing-directory status inspection apply the same check.
+
+Private directory tightening uses metadata/search descriptors and preserves write/search-only modes such as 0300. Already-private directories keep every owner bit unchanged; status reports an unsafe directory without reading through it.

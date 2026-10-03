@@ -1019,7 +1019,16 @@ def status(rest: list | None = None) -> None:
     store_dir = home / ".contexer"
     if store_dir.exists():
         from contexer.permissions import ensure_private_directory
-        ensure_private_directory(store_dir)
+        try:
+            ensure_private_directory(store_dir)
+        except OSError as exc:
+            print(f"contexer {_version()}")
+            print(f"  binary:       {bin_path}")
+            for adapter in targets:
+                for line in adapter.status_lines(home):
+                    print(line)
+            print(f"  store dir:    {store_dir} (unavailable: {exc})")
+            return
     swept = 0
     if store_dir.exists():
         # Sweep temp files leaked by interrupted atomic writes (hard crash between

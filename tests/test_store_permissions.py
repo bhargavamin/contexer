@@ -19,7 +19,7 @@ def test_fresh_install_is_private_under_normal_umask(tmp_path, monkeypatch):
     assert target.stat().st_mode & 0o777 == 0o700
 
 
-@pytest.mark.parametrize("initial,expected", [(0o755, 0o700), (0o750, 0o700), (0o500, 0o500), (0o700, 0o700), (0o2700, 0o2700)])
+@pytest.mark.parametrize("initial,expected", [(0o755, 0o700), (0o750, 0o700), (0o500, 0o500), (0o700, 0o700), (0o2700, 0o2700), (0o300, 0o300), (0o307, 0o300), (0o400, 0o400), (0o200, 0o200), (0o000, 0o000)])
 def test_next_use_only_removes_non_owner_permissions(tmp_path, monkeypatch, initial, expected):
     target = tmp_path / ".contexer"
     target.mkdir()
@@ -27,6 +27,19 @@ def test_next_use_only_removes_non_owner_permissions(tmp_path, monkeypatch, init
     monkeypatch.setattr(store, "store_dir", lambda: target)
     assert store.ensure_store_dir() == target
     assert target.stat().st_mode & 0o7777 == expected
+    target.chmod(0o700)  # Permit fixture cleanup for deliberately unreadable modes.
+
+
+def test_status_reports_unsafe_directory_without_reading_target(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "shared"
+    target.mkdir(mode=0o755)
+    (tmp_path / ".contexer").symlink_to(target, target_is_directory=True)
+    monkeypatch.setattr(cli.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_resolve_targets", lambda rest: [])
+    cli.status([])
+    text = capsys.readouterr().out
+    assert "contexer " in text and "unavailable" in text and "symlink" in text
+    assert target.stat().st_mode & 0o777 == 0o755
 
 
 @pytest.mark.parametrize("surface", ["store", "install"])
