@@ -94,3 +94,45 @@ def test_real_retirement_links_to_replacement(tmp_repo, format):
     text = "\n".join(export.render(tmp_repo, format=format, include_retired=True).values())
     assert f"Replaced by: [{new}]" in text
     assert "Status: superseded" in text
+
+
+@pytest.mark.parametrize("format", ["md", "adr"])
+def test_default_scrubs_subtype_and_plain_password(tmp_repo, format):
+    secret = "ghp_" + "a" * 36
+    entry = store._new_decision_entry("Use password: monkey for testing.", "s", secret, status="approved")
+    store.save(tmp_repo, {"entries": [entry]})
+    result = "\n".join(export.render(tmp_repo, format=format).values())
+    assert "monkey" not in result and secret not in result
+
+
+def test_export_refresh_removes_only_owned_unedited_adr_files(tmp_repo, tmp_path):
+    _, did = store.update_decision(tmp_repo, "Use Postgres for the database.", "s", "convention")
+    out = tmp_path / "export"
+    [path] = export.write(tmp_repo, out, format="adr", verbatim=True)
+    other = out / "adr-personal-note.md"
+    other.write_text("Keep this user document")
+    lifecycle.retire_decision(tmp_repo, did, "obsolete")
+    export.write(tmp_repo, out, format="adr")
+    assert not path.exists() and other.read_text() == "Keep this user document"
+
+
+def test_restored_decision_has_no_stale_replacement(tmp_repo):
+    _, first = store.update_decision(tmp_repo, "Use Postgres for the database.", "s", "convention")
+    _, second = store.update_decision(tmp_repo, "Use Redis for the cache.", "s", "convention")
+    lifecycle.retire_decision(tmp_repo, first, "replaced", replacement_id=second)
+    lifecycle.restore_decision(tmp_repo, first)
+    result = "\n".join(export.render(tmp_repo).values())
+    assert "superseded" not in result and "Replaced by" not in result
+
+
+def test_ignored_decision_is_not_retired_history(tmp_repo):
+    entry = store._new_decision_entry("Withheld bootstrap convention", "s", "convention", status="ignored")
+    store.save(tmp_repo, {"entries": [entry]})
+    assert "Withheld bootstrap" not in "\n".join(export.render(tmp_repo, include_retired=True).values())
+
+
+def test_cli_outside_repo_never_uses_last_repo_pointer(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "git_root", lambda path: None)
+    monkeypatch.setattr(store, "resolve_repo", lambda path: "/different/repo")
+    with pytest.raises(SystemExit):
+        cli.export_cmd(["--out", str(tmp_path)])

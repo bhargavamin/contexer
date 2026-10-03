@@ -222,7 +222,7 @@ def export_cmd(rest: list | None = None) -> None:
     parser.add_argument("--include-retired", action="store_true")
     parser.add_argument("--verbatim", action="store_true")
     args = parser.parse_args(rest or [])
-    repo = store.git_root(os.getcwd()) or store.resolve_repo("")
+    repo = store.git_root(os.getcwd())
     if not repo:
         parser.error("run inside a repository")
     if args.verbatim:

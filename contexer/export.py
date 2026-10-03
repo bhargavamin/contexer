@@ -1,5 +1,7 @@
 """Read-only deterministic Markdown and ADR projections of current decisions."""
 import hashlib
+import json
+import os
 import re
 from pathlib import Path
 
@@ -14,7 +16,7 @@ def render(repo_path: str, *, format: str = "md", include_retired: bool = False,
     data = store.load_for_update(repo_path)
     entries = {e["id"]: e for e in data["entries"] if e.get("type") == "decision"
                and e.get("id") and store.entry_status(e) in
-               ({"approved", "suggested", "ignored"} if include_retired else {"approved", "suggested"})}
+               {"approved", "suggested"}}
     if include_retired:
         deleted, error = store.read_deleted(repo_path)
         if error:
@@ -25,7 +27,7 @@ def render(repo_path: str, *, format: str = "md", include_retired: bool = False,
     ordered = sorted(entries.values(), key=lambda e: (e.get("subtype", ""), e.get("timestamp", ""), e["id"]))
 
     def text(value: str) -> str:
-        return value if verbatim else redact.scrub_text(value)
+        return value if verbatim else redact.scrub_text(value, strict_assignments=True)
 
     def metadata(entry: dict) -> list[str]:
         status = "retired" if entry.get("deleted_at") else store.entry_status(entry)
@@ -33,6 +35,8 @@ def render(repo_path: str, *, format: str = "md", include_retired: bool = False,
         replacement = entry.get("superseded_by") or next(
             (r.get("replacement_decision_id") or r.get("replacement_id")
              for r in reversed(lifecycle) if r.get("replacement_decision_id") or r.get("replacement_id")), "")
+        if not entry.get("deleted_at"):
+            replacement = ""
         if replacement:
             status = "superseded"
         rows = [f"Status: {status}", f"ID: {entry['id']}",
@@ -42,7 +46,8 @@ def render(repo_path: str, *, format: str = "md", include_retired: bool = False,
             rows.append("Applies to files: " + ", ".join(entry["source_files"]))
         if replacement:
             target = filename(str(replacement)) if format == "adr" else f"#decision-{replacement}"
-            rows.append(f"Replaced by: [{replacement}]({target})")
+            rows.append(f"Replaced by: [{replacement}]({target})" if replacement in entries
+                        else f"Replaced by: {replacement} (not included in this export)")
         return [text(row) for row in rows]
 
     def filename(decision_id: str) -> str:
@@ -65,7 +70,7 @@ def render(repo_path: str, *, format: str = "md", include_retired: bool = False,
     for entry in ordered:
         if entry.get("subtype", "") != subtype:
             subtype = entry.get("subtype", "")
-            lines.extend([f"## {subtype or 'Unclassified'}", ""])
+            lines.extend([f"## {text(subtype or 'Unclassified')}", ""])
         lines.extend([f'<a id="decision-{entry["id"]}"></a>',
                       f"### {text(entry.get('title') or revisions.derive_title(revisions.current_content(entry)))}", "",
                       *metadata(entry), "", text(revisions.current_content(entry)), ""])
@@ -75,9 +80,34 @@ def render(repo_path: str, *, format: str = "md", include_retired: bool = False,
 def write(repo_path: str, out: Path, **options) -> list[Path]:
     documents = render(repo_path, **options)
     out.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if out.is_symlink():
+        raise OSError("Export directory must not be a symlink")
+    descriptor = os.open(out, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        os.fchmod(descriptor, os.fstat(descriptor).st_mode & 0o7700)
+    finally:
+        os.close(descriptor)
+    manifest = out / ".contexer-export.json"
+    previous = json.loads(manifest.read_text(encoding="utf-8")) if manifest.exists() else {}
+    if not isinstance(previous, dict) or any(not isinstance(name, str) or Path(name).name != name
+            or not (name == "decisions.md" or (name.startswith("adr-") and name.endswith(".md")))
+            for name in previous):
+        raise ValueError("Unreadable export manifest; refusing output changes")
+    stale = []
+    for name, digest in previous.items():
+        path = out / name
+        if name not in documents and path.exists():
+            if path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                raise ValueError("A previous export was edited; preserve it before re-exporting")
+            stale.append(path)
     paths = []
+    hashes = {}
     for name, content in documents.items():
         path = out / name
         store.atomic_write(path, content)
         paths.append(path)
+        hashes[name] = hashlib.sha256(content.encode()).hexdigest()
+    for path in stale:
+        path.unlink()
+    store.atomic_write(manifest, json.dumps(hashes, sort_keys=True))
     return paths
