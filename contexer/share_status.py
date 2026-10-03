@@ -171,7 +171,13 @@ _OK_OUTCOMES = frozenset({
 def describe(status: ShareStatus | ReconcileStatus) -> str:
     """Render one outcome as the sentence a person reads. The only prose in this area."""
     result = _describe_reconcile(status) if isinstance(status, ReconcileStatus) else _describe_share(status)
-    return _REDACTION_DISABLED_WARNING + "\n" + result if status.redaction_disabled else result
+    if status.redaction_disabled:
+        result = result.replace("it will retry automatically at the next session start",
+                                "retry is paused until redact_secrets is enabled")
+        result = result.replace("to retry automatically at the next session start",
+                                "with retry paused until redact_secrets is enabled")
+        return _REDACTION_DISABLED_WARNING + "\n" + result
+    return result
 
 
 def _short_ids(unknown_ids: tuple[str, ...]) -> str:

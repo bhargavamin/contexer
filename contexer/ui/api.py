@@ -403,7 +403,7 @@ def _logout(body: object) -> tuple[int, object]:
 
 
 def _share(repo_path: str, body: object) -> tuple[int, object]:
-    ids = _body(body, "ids").get("ids")
+    ids = _body(body, "ids", "confirm").get("ids")
     if not isinstance(ids, list) or not ids:
         raise ApiError(400, "ids must be a non-empty list")
     if len(ids) > MAX_SHARE_IDS:
@@ -411,8 +411,12 @@ def _share(repo_path: str, body: object) -> tuple[int, object]:
     for value in ids:
         if not isinstance(value, str) or not value or len(value) > MAX_WORD:
             raise ApiError(400, "every id must be a non-empty string")
+    profile = config.load_profile()
+    if not profile.redact_secrets and body.get("confirm") is not True:
+        return 200, {"ok": False, "outcome": "confirmation_required", "confirmation_required": True,
+                     "preview": store.format_share_preview(repo_path, ",".join(ids), profile=profile)}
     try:
-        status = share.share_ids(repo_path, ids)
+        status = share.share_ids(repo_path, ids, profile=profile)
     except Exception as exc:
         # share_ids already swallows cloud failures (it queues them); anything left is local
         # and must still reach the console as text, never as a 500. `outcome`/`ok` are present

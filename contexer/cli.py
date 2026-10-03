@@ -1569,7 +1569,7 @@ def reconcile_cmd(rest: list | None = None) -> None:
         sys.exit(1)
     profile = config.load_profile()
     if not profile.redact_secrets:
-        print(store.format_share_preview(repo, ids[0], profile=profile))
+        print(store.format_share_preview(repo, ids[0], profile=profile, purpose="reconcile"))
         try:
             answer = input("Send this unredacted decision for server preview? [y/N] ").strip().lower()
         except (EOFError, KeyboardInterrupt):

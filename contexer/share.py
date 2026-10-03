@@ -728,6 +728,15 @@ def _dec_push_kwargs(dec: dict, key) -> dict:
         revision_id=dec.get("revision_id"), lifecycle=dec.get("lifecycle"))
 
 
+def _settle_queued_base(decision_ids: set) -> None:
+    """A newer explicit push supersedes older base retries, retaining lifecycle deltas."""
+    rows = _load_outbox()
+    kept = [row for row in rows if row.get("decision_id") not in decision_ids
+            or row.get("stage") == _LIFECYCLE_PENDING]
+    if kept != rows:
+        _save_outbox(kept)
+
+
 def _finish_share(dec: dict, key, server_id,
                   endpoint: str | None = None) -> share_status.ShareStatus:
     """Turn one push outcome into a :class:`share_status.ShareStatus` (share + share_async).
@@ -744,6 +753,7 @@ def _finish_share(dec: dict, key, server_id,
             # must not claim a retry that was never recorded, hence NOT_QUEUED, not QUEUED.
             return share_status.ShareStatus(share_status.NOT_QUEUED, lost=1, total=1)
         return share_status.ShareStatus(share_status.QUEUED, queued=1, total=1)
+    _settle_queued_base({dec.get("id")})
     _mark_shared([dec.get("id")], endpoint)
     return share_status.ShareStatus(
         share_status.SYNCED, sent=1, total=1, server_id=str(server_id))
@@ -968,7 +978,9 @@ def _mark_batch_saved(chunk: list[dict], skipped: list[dict], endpoint: str | No
     all (transient capacity skip or permanent invalid alike are excluded; a re-queued capacity
     skip may still sync later, but it hasn't yet, so it must not show as shared)."""
     skipped_ids = {s.get("decision_id") for s in skipped}
-    _mark_shared([d["id"] for d in chunk if d["id"] not in skipped_ids], endpoint)
+    saved_ids = {d["id"] for d in chunk if d["id"] not in skipped_ids}
+    _settle_queued_base(saved_ids)
+    _mark_shared(list(saved_ids), endpoint)
 
 
 def _push_batch(remote: RemoteStore, decs: list[dict], key,

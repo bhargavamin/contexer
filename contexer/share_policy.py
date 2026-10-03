@@ -1114,7 +1114,7 @@ def append_attention(item: dict) -> None:
 
 
 _PAUSING_DRAIN_REASONS = frozenset({
-    "unsupported_protocol", "account_mismatch", "policy_mismatch", "repo_mismatch", "redaction_disabled", "team_mismatch",
+    "unsupported_protocol", "account_mismatch", "policy_mismatch", "repo_mismatch", "team_mismatch",
     "not_member", "not_authorized", "trial_expired",
 })
 _SUCCESSFUL_DRAIN_STATES = frozenset({"submitted", "already_pending", "unchanged"})

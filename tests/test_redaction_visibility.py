@@ -107,3 +107,43 @@ def test_auto_proposals_require_attention_when_redaction_off(monkeypatch):
     result = share_policy._drain_intent({}, OFF, "owner", queue_depth=1)
     assert result.reason_code == "redaction_disabled"
     assert outcomes == ["redaction_disabled"]
+
+
+def test_console_requires_preview_before_unredacted_egress(tmp_repo, monkeypatch):
+    from contexer.ui import api
+    _, did = store.update_decision(tmp_repo, "Use PostgreSQL for the database", "s", "convention")
+    monkeypatch.setattr(config, "load_profile", lambda: OFF)
+    calls = []
+    monkeypatch.setattr(share, "share_ids", lambda *a, **kw: calls.append(a) or share_status.ShareStatus(share_status.SYNCED))
+    code, result = api._share(tmp_repo, {"ids": [did]})
+    assert code == 200 and result["confirmation_required"]
+    assert "redaction is OFF" in result["preview"] and calls == []
+    api._share(tmp_repo, {"ids": [did], "confirm": "true"})
+    assert calls == []
+    api._share(tmp_repo, {"ids": [did], "confirm": True})
+    assert len(calls) == 1
+
+
+def test_redaction_attention_does_not_pause_destination_policy():
+    assert "redaction_disabled" not in share_policy._PAUSING_DRAIN_REASONS
+
+
+def test_unredacted_failure_reports_paused_retry():
+    text = share_status.describe(share_status.ShareStatus(share_status.QUEUED, redaction_disabled=True))
+    assert "retry is paused" in text and "retry automatically" not in text
+
+
+def test_unredacted_preview_does_not_offer_ineffective_bypass(tmp_repo):
+    store.update_decision(tmp_repo, "Use PostgreSQL for the database", "s", "convention")
+    assert "Stop asking" not in store.format_share_preview(tmp_repo, profile=OFF)
+    preview = store.format_share_preview(tmp_repo, profile=OFF, purpose="reconcile")
+    assert "PERSONAL" not in preview and "share_decision(" not in preview
+
+
+def test_new_explicit_share_settles_old_queued_base(tmp_repo, monkeypatch):
+    _, did = store.update_decision(tmp_repo, "Use PostgreSQL for the database", "s", "convention")
+    share._enqueue({"decision_id": did, "content": "old body", "repo": "r"})
+    _fake(monkeypatch)
+    status = share.share(tmp_repo, did, profile=OFF)
+    assert status.outcome == share_status.SYNCED
+    assert not any(row.get("decision_id") == did for row in share._load_outbox())
