@@ -28,6 +28,8 @@ def seed_items(task: dict, seed: int, rep: int = 0) -> list[dict]:
             "source_files": [f.replace("{seed}", str(seed))
                              for f in item.get("source_files") or []],
             "date": item.get("date", ""),
+            **({"applies_when": picked.get("applies_when", item.get("applies_when"))}
+               if picked.get("applies_when", item.get("applies_when")) is not None else {}),
             "history": [{"content": h["content"].replace("{seed}", str(seed)),
                          "title": h.get("title", "").replace("{seed}", str(seed)),
                          "date": h.get("date", "")} for h in item.get("history") or []],
@@ -51,7 +53,8 @@ def seed_script(repo: str, items: list[dict]) -> str:
         lines.append(
             f"_r = server.update_context({first['content']!r}, repo_path={repo!r}, "
             f"subtype={item['subtype']!r}, created_by='ai', title={first['title']!r}, "
-            f"source_files={item['source_files'] or None!r})\n"
+            f"source_files={item['source_files'] or None!r}"
+            + (f", applies_when={first['applies_when']!r}" if "applies_when" in first else "") + ")\n"
             "_m = re.search(r'\\bid=([0-9a-f-]{8,})', _r)\n"
             f"assert _m, {'seed not stored: ' + first['content'][:60]!r} + ' -> ' + _r[:300]\n"
             f"_e = next(e for e in store.load({repo!r})['entries'] "
@@ -67,7 +70,8 @@ def seed_script(repo: str, items: list[dict]) -> str:
             lines.append(
                 f"_r = server.update_context({revision['content']!r}, repo_path={repo!r}, "
                 f"subtype={item['subtype']!r}, created_by='ai', title={revision['title']!r}, "
-                f"source_files={item['source_files'] or None!r}, replace_id=_m.group(1))\n"
+                f"source_files={item['source_files'] or None!r}, replace_id=_m.group(1)"
+                + (f", applies_when={revision['applies_when']!r}" if "applies_when" in revision else "") + ")\n"
                 f"_e = next(e for e in store.load({repo!r})['entries'] "
                 "if str(e.get('id', '')).startswith(_m.group(1)))\n"
                 "if _e.get('proposed_revision'):\n"

@@ -76,7 +76,8 @@ mcp = FastMCP("contexer", instructions=_INSTRUCTIONS, log_level="WARNING")
 @mcp.tool()
 def update_context(content: str, repo_path: str = "", subtype: str = "",
                    created_by: str = "ai", replace_id: str = "", title: str = "",
-                   source_files: list[str] | None = None) -> str:
+                   source_files: list[str] | None = None,
+                   applies_when: list[str] | None = None) -> str:
     """Called when Claude Code makes a significant decision mid-task. The server filters before storing.
 
     A synthesized understanding of how a subsystem works - produced by exploring or reading the
@@ -117,6 +118,11 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
            when you can't summarize better than the content itself; the store then derives one
            from `content`.
 
+    applies_when: up to eight specific task phrases (2+ words, <=100 characters each)
+    describing situations that need this decision. Use task vocabulary, for example
+    ["slow upstream reads", "making fetches faster"]. They aid deterministic retrieval;
+    they grant no approval or file authority. Omit when unknown.
+
     If this returns a 'pending review' notice, the decision is recorded but NOT yet trusted and
     does not block your work - keep going. Surface it to the developer for approval at a natural
     point (call approve_decision when they respond, or they can run `contexer review`); never
@@ -150,7 +156,7 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
     stored, entry_id, meta = store.update_decision_with_meta(
         resolved, content, SESSION_ID, subtype, created_by=created_by,
         replace_id=replace_id, title=title, source_files=source_files,
-        repo_source=repo_source)
+        repo_source=repo_source, applies_when=applies_when)
     if not stored:
         return "Filtered - did not meet storage criteria."
     if meta.get("refusal_ack"):

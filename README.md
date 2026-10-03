@@ -250,3 +250,5 @@ MIT. See [LICENSE](LICENSE) for full terms.
 The Contexer name and logo are trademarks of Contexer.ai. The MIT license does not grant rights to use the Contexer name, logo, or brand in any way that implies official affiliation.
 
 The local data directory is private to its owner (mode `0700`); existing group or world permissions are removed on next use.
+
+When saving a decision, the agent can include concrete situations where it applies, such as “slow upstream reads.” These help later tasks find the rule even when the task uses different words from the decision. File-specific decisions remain discoverable through lookup pointers when their subject does not fit the current task.
