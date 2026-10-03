@@ -73,3 +73,54 @@ def test_real_adoption_store_has_exactly_one_conflict_pair(tmp_repo, filename):
     group = context.split("## Conflicting current decisions:", 1)[1].split("## Project rules", 1)[0]
     assert all(d["id"][:8] in group and d["content"] in group for d in pairs[0])
     assert context.count("CONFLICT:") == 1
+
+
+
+def test_pending_update_is_visible_but_untrusted_in_pair(tmp_repo):
+    left, right = pair()
+    left["proposed_revision"] = {"content": "Use bare semantic versions for every release.", "source": "ai"}
+    store.save(tmp_repo, {"entries": [left, right]})
+    text = store.session_start_payload(tmp_repo)["context"]
+    assert "[Pending update — not approved] Use bare semantic versions" in text
+    assert "Prefix version strings with a lowercase v" in text
+
+
+def test_mixed_compatible_prescriptions_are_not_false_conflicts():
+    left, right = pair()
+    left["content"] = "Publish versions with a lowercase v for Git tags; use bare semantic versions for the package index."
+    left["revisions"][0]["content"] = left["content"]
+    assert conflicts.current_pairs([left, right]) == []
+
+
+def test_negated_alternative_does_not_change_bare_classification():
+    left, right = pair()
+    right["content"] = "Publish bare semantic versions; do not use versions with v."
+    right["revisions"][0]["content"] = right["content"]
+    assert len(conflicts.current_pairs([left, right])) == 1
+
+
+def test_malformed_legacy_anchors_do_not_crash():
+    left, right = pair()
+    left["source_files"] = [{"path": "cli.py"}]
+    assert len(conflicts.current_pairs([left, right])) == 1
+
+
+def test_shared_pair_member_is_rendered_once(tmp_repo):
+    left, right = pair()
+    third = store._new_decision_entry("Use bare semantic versions to match the package index.", "s", "convention", status="suggested")
+    store.save(tmp_repo, {"entries": [left, right, third]})
+    context = store.session_start_payload(tmp_repo)["context"]
+    assert context.count("CONFLICT:") == 1
+    assert context.count(left["content"]) == 1
+
+
+@pytest.mark.parametrize("choice,expected", [("update", "update was picked"), ("standing", "update was declined")])
+def test_pair_retains_valid_pending_resolution_memo(tmp_repo, choice, expected):
+    left, right = pair()
+    left["proposed_revision"] = {"content": "Use bare semantic versions for every release.", "source": "ai"}
+    left["conflict_memo"] = {"pair": conflicts._conflict_pair_key(left), "choice": choice,
+                             "created_at": "2026-10-03T12:00:00+00:00"}
+    store.save(tmp_repo, {"entries": [left, right]})
+    text = store.session_start_payload(tmp_repo)["context"]
+    assert expected in text
+    assert "Pending update — not approved" in text

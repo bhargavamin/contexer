@@ -61,18 +61,21 @@ def current_pairs(entries: list[dict]) -> list[tuple[dict, dict]]:
                 or entry.get("bootstrap") or entry.get("superseded_by")):
             continue
         text = revisions.current_content(entry).lower()
-        if re.match(r"(?:prefix|publish|use)\b", text) and re.search(
-                r"\bversions? (?:strings? )?with (?:a )?(?:lowercase )?v\b", text):
-            prefixed.append(entry)
-        elif re.match(r"(?:publish|use|return)\b", text) and re.search(
-                r"\b(?:bare|unprefixed) (?:semantic )?versions?\b", text):
-            bare.append(entry)
+        clauses = [part.strip() for part in re.split(r";|\.\s", text)]
+        prefix_rule = r"^(?:prefix|publish|use) versions? (?:strings? )?with (?:a )?(?:lowercase )?v\b"
+        bare_rule = r"^(?:publish|use|return) (?:versions? as )?(?:bare|unprefixed) (?:semantic )?versions?\b"
+        forms = {form for clause in clauses for form, pattern in
+                 (("prefixed", prefix_rule), ("bare", bare_rule)) if re.match(pattern, clause)}
+        # Mixed prescriptions can govern different outputs (Git tags versus package versions).
+        if len(forms) != 1:
+            continue
+        (prefixed if "prefixed" in forms else bare).append(entry)
     pairs = []
     for left in prefixed:
         for right in bare:
             if left.get("id") == right.get("id"):
                 continue
-            lfiles, rfiles = set(left.get("source_files") or []), set(right.get("source_files") or [])
+            lfiles, rfiles = {path for path in left.get("source_files") or [] if isinstance(path, str)}, {path for path in right.get("source_files") or [] if isinstance(path, str)}
             if (lfiles and rfiles and not policy.source_anchor_hits(lfiles, rfiles)
                     and not policy.source_anchor_hits(rfiles, lfiles)):
                 continue
@@ -80,14 +83,26 @@ def current_pairs(entries: list[dict]) -> list[tuple[dict, dict]]:
     return pairs
 
 
-def render_current_pair(left: dict, right: dict) -> list[str]:
-    lines = [_CURRENT_CONFLICT_GUIDE]
+def render_current_pair(left: dict, right: dict, *, seen: set | None = None) -> list[str]:
+    seen = set() if seen is None else seen
+    lines = [] if seen else [_CURRENT_CONFLICT_GUIDE]
     for entry in (left, right):
+        if entry.get("id") in seen:
+            continue
+        seen.add(entry.get("id"))
         status = store.entry_status(entry)
         date = (entry.get("updated_at") or entry.get("timestamp") or "")[:10]
         text = " ".join(revisions.current_content(entry).split())
         lines.append(f"- [{status}, {date}] {entry.get('title') or revisions.derive_title(text)} "
                      f"(id={entry.get('id', '')[:8]})\n    {text}")
+        proposal = entry.get("proposed_revision") or {}
+        if proposal:
+            pending = " ".join(proposal.get("content", "").split())
+            lines.append(f"    [Pending update — not approved] {pending}")
+            if proposal.get("applies_when") is not None:
+                lines.append("    Proposed applicability: " + "; ".join(proposal["applies_when"]))
+            steer = memo_steer_line(entry)
+            lines.append("    " + (steer or "Review the pending update with the developer before treating it as operative."))
     return lines
 
 

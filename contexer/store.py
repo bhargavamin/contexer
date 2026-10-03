@@ -5362,8 +5362,9 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     paired_ids = {d.get("id") for pair in paired for d in pair}
     if paired:
         sys_parts.append("## Conflicting current decisions:")
+        rendered_pair_ids: set[str] = set()
         for left, right in paired:
-            sys_parts.extend(conflicts.render_current_pair(left, right))
+            sys_parts.extend(conflicts.render_current_pair(left, right, seen=rendered_pair_ids))
         full_local.extend(d for d in pre_loaded if d.get("id") in paired_ids)
         pre_loaded = [d for d in pre_loaded if d.get("id") not in paired_ids]
 

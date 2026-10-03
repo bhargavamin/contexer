@@ -125,3 +125,5 @@ Private-directory tightening uses an owner-readable descriptor when possible, so
 ### Incompatible current decisions
 
 `conflicts.current_pairs` detects explicit active prescriptions for prefixed versus bare semantic version strings, excluding historical, retired and disjoint file scopes. Startup renders each pair with both full current bodies and a clarification instruction; prompt retrieval brings the sibling alongside either selected member. This conservative supported class does not use similarity as proof of arbitrary contradictions and does not grant approval or choose a winner.
+
+Operative first-clause version prescriptions exclude negated alternatives and mixed tag/package rules. Malformed anchors are ignored. Startup renders each conflicting identity once and keeps pending updates explicitly unapproved beside the current rule.
