@@ -189,3 +189,51 @@ def test_durable_write_failure_preserves_previous_bytes(tmp_path, monkeypatch):
         store.atomic_write(target, "replacement", durable=True)
     assert target.read_text() == "previous"
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_erasure_audit_cannot_test_plaintext_guesses_without_private_key(tmp_repo):
+    import hashlib
+    text = "Use PIN 1234 for the local fixture."
+    entry = store._new_decision_entry(text, "s", "constraint", status="approved")
+    store.save(tmp_repo, {"entries": [entry]})
+    assert lifecycle.erase_decision(tmp_repo, entry["id"], confirm=True)[0]
+    [audit] = store.list_deleted(tmp_repo)
+    plain = hashlib.sha256(" ".join(text.casefold().split()).encode()).hexdigest()
+    assert plain not in audit["content_digests"]
+    key = lifecycle.erasure_key()
+    assert lifecycle.erasure_digest(text, key=key) in audit["content_digests"]
+    assert lifecycle.erasure_digest(text, key=b"x" * 32) not in audit["content_digests"]
+    assert key.hex() not in json.dumps(audit)
+    assert store.sidecar_path("erasure_key").stat().st_mode & 0o777 == 0o600
+    assert text not in "\n".join(p.read_text(errors="ignore") for p in store.store_dir().rglob("*") if p.is_file())
+
+
+@pytest.mark.parametrize("damaged", [None, "invalid-key"])
+def test_missing_or_corrupt_matcher_key_refuses_recapture(tmp_repo, damaged):
+    did = seeded(tmp_repo)
+    text = store.load(tmp_repo)["entries"][0]["content"]
+    assert lifecycle.erase_decision(tmp_repo, did, confirm=True)[0]
+    path = store.sidecar_path("erasure_key")
+    if damaged is None:
+        path.unlink()
+    else:
+        path.write_text(damaged, encoding="utf-8")
+    with pytest.raises(ValueError, match="refusing write"):
+        store.update_decision(tmp_repo, text, "next", "architecture")
+    assert not store.load(tmp_repo)["entries"]
+
+
+def test_missing_key_cannot_be_recreated_by_erasing_another_repository(tmp_repo, tmp_path):
+    first = seeded(tmp_repo)
+    assert lifecycle.erase_decision(tmp_repo, first, confirm=True)[0]
+    store.sidecar_path("erasure_key").unlink()
+    other = str(tmp_path / "another-repository")
+    entry = store._new_decision_entry("Use another independent decision.", "s", "constraint", status="approved")
+    store.save(other, {"entries": [entry]})
+    before = store._store_path(other).read_bytes()
+    ok, message = lifecycle.erase_decision(other, entry["id"], confirm=True)
+    assert not ok and "did not complete" in message
+    with pytest.raises(ValueError, match="matcher key is missing"):
+        lifecycle.erasure_key(create=True)
+    assert not store.sidecar_path("erasure_key").exists()
+    assert store._store_path(other).read_bytes() == before

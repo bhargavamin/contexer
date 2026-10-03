@@ -4112,10 +4112,16 @@ def _tombstoned_match(repo_path: str, content: str) -> dict | None:
     never costs more than the tombstones it had already lost."""
     from contexer import lifecycle
     deleted = _load_deleted(repo_path).get("entries", [])
-    digest = lifecycle.erasure_digest(content)
-    erased = next((e for e in deleted if e.get("type") == "erasure"
-                   and digest in e.get("content_digests", [])), None)
-    return erased or _find_match(content, deleted)
+    fingerprints = [e for e in deleted if e.get("type") == "erasure" and e.get("content_digests")]
+    if fingerprints:
+        key = lifecycle.erasure_key()
+        if key is None:
+            raise ValueError("Erasure matcher key is missing; refusing write")
+        digest = lifecycle.erasure_digest(content, key=key)
+        erased = next((e for e in fingerprints if digest in e["content_digests"]), None)
+        if erased:
+            return erased
+    return _find_match(content, deleted)
 
 
 def _keep_recent_tombstones(entries: list) -> list:

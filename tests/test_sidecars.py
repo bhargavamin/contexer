@@ -21,6 +21,7 @@ class TestClassification:
         "Users_me_proj.deleted.json",     # tombstones
         "Users_me_proj.json.migrated",    # a folded worktree stray
         "repo-1.lock",
+        ".erasure_match_key",
         ".current_repo", ".outbox.json", ".reconcile-outbox.json", ".shared.jsonl",
         ".team_auth.json",                # credentials
         ".guard_dismissed_x.json",        # explicit human dismissals
@@ -105,6 +106,7 @@ class TestClassification:
     # `None` for the builder means "no function in the package builds this name", which must
     # be a DELIBERATE, listed exception rather than an omission.
     PRODUCERS = {
+        "erasure_key": (None, {}),
         "evidence_publication_lock": (None, {"slug": None}),
         "store":            ("store._store_path", {"slug": None}),
         "deleted":          ("store._deleted_path", {"slug": None}),

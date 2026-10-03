@@ -41,6 +41,8 @@ Two rules carry the lane and neither is negotiable:
 
 import contextlib
 import hashlib
+import hmac
+import secrets
 import fnmatch
 import json
 import re
@@ -51,9 +53,33 @@ from contexer import revisions
 from contexer import store          # module object, not `from`-imports: see docstring above
 
 
-def erasure_digest(content: str) -> str:
-    """Content-free exact replay suppression, insensitive to whitespace and case."""
-    return hashlib.sha256(" ".join(content.casefold().split()).encode()).hexdigest()
+def erasure_key(*, create: bool = False) -> bytes | None:
+    """Private machine-local matcher key; never part of an erasure audit or MCP result."""
+    path = store.sidecar_path("erasure_key")
+    if create:
+        with store.store_lock(".erasure_key"):
+            if not path.exists():
+                from contexer import sidecars
+                for audit_path in store.store_dir().glob(sidecars.glob_for("deleted")):
+                    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+                    if (not isinstance(audit, dict) or not isinstance(audit.get("entries"), list)
+                            or any(not isinstance(entry, dict) for entry in audit["entries"])):
+                        raise ValueError("Erasure audits are unreadable; refusing matcher key initialization")
+                    if any(entry.get("type") == "erasure" and entry.get("content_digests")
+                           for entry in audit["entries"]):
+                        raise ValueError("Erasure matcher key is missing; refusing to replace existing fingerprints")
+                store.atomic_write(path, secrets.token_hex(32), durable=True)
+    if not path.exists():
+        return None
+    value = path.read_text(encoding="utf-8")
+    if not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise ValueError("Erasure matcher key is unreadable; refusing write")
+    return bytes.fromhex(value)
+
+
+def erasure_digest(content: str, *, key: bytes) -> str:
+    """Opaque exact-replay fingerprint: an audit alone cannot test guessed plaintext."""
+    return hmac.new(key, " ".join(content.casefold().split()).encode(), hashlib.sha256).hexdigest()
 
 
 def erase_decision(repo_path: str, entry_id: str, *, confirm: bool = False,
@@ -114,6 +140,7 @@ def erase_decision(repo_path: str, entry_id: str, *, confirm: bool = False,
                         raise ValueError("Shared markers are unreadable; refusing erasure")
                     if shared["id"] == decision_id:
                         return False, "This decision was shared. Erase the team copy there too before local erasure."
+            matcher_key = erasure_key(create=True)
             selected_paths = []
             for path in store.store_dir().rglob("*"):
                 if not path.is_file() or path.is_symlink() or path.name.endswith(".lock"):
@@ -124,7 +151,7 @@ def erase_decision(repo_path: str, entry_id: str, *, confirm: bool = False,
                 kind = next((kind for kind in sidecars.KINDS if fnmatch.fnmatch(path.name, kind.glob)), None) if len(relative.parts) == 1 else None
                 if kind and "{slug}" in kind.template and slug not in path.name:
                     continue
-                if path.name in {"config.toml", sidecars.filename("console_state"), sidecars.filename("console_log")} or (kind and kind.name in {"team_creds", "repo_pointer"}):
+                if path.name in {"config.toml", sidecars.filename("console_state"), sidecars.filename("console_log")} or (kind and kind.name in {"team_creds", "repo_pointer", "erasure_key"}):
                     continue
                 selected_paths.append(path)
 
@@ -218,7 +245,7 @@ def erase_decision(repo_path: str, entry_id: str, *, confirm: bool = False,
             graveyard["entries"].append({"type": "erasure", "id": decision_id,
                 "timestamp": matches[0].get("timestamp", ""), "deleted_at": now,
                 "deleted_by": actor, "reason": "erased",
-                "content_digests": sorted({erasure_digest(r["content"])
+                "content_digests": sorted({erasure_digest(r["content"], key=matcher_key)
                     for entry in matches for r in [entry, *(entry.get("revisions") or []),
                                                    entry.get("proposed_revision") or {}]
                     if r.get("content")})})

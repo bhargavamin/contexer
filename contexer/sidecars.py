@@ -75,6 +75,7 @@ class Kind(NamedTuple):
 
 
 KINDS: tuple[Kind, ...] = (
+    Kind("erasure_key", ".erasure_match_key", DURABLE, "private HMAC key for opaque erased-content replay suppression"),
     Kind("evidence_publication_lock", ".evidence_publication_{slug}.lock", DURABLE, "shared publication gate; exclusive for human erasure"),
     # ── durable: the developer's own data and queued work ──────────────────────────────
     Kind("store",            "{slug}.json",                DURABLE,   "a decision store; _global.json is "
