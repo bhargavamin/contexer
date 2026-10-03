@@ -4678,6 +4678,9 @@ def format_share_preview(repo_path: str, decision_id: str = "", profile=None) ->
     ids_csv = ",".join((p.get("id") or "")[:8] for p in projs)
     lines = [f"Ready to push {_pl(len(projs), 'decision')} to your PERSONAL cloud ({endpoint}). "
              f"{_SHARE_SECRETS_HINT}:\n"]
+    if not prof.redact_secrets:
+        from contexer import share_status
+        lines.append(share_status._REDACTION_DISABLED_WARNING)
     for p in projs:
         lines.append(_share_item_line(p))
         session_id = p.get("session_id")

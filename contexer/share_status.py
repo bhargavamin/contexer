@@ -73,6 +73,8 @@ RATE_LIMITED_NOT_QUEUED = "rate_limited_not_queued"
 COMPAT_SYNC_FAILED = "compat_sync_failed"          # `share` carries the personal-push outcome
 COMPAT_SUBMIT_FAILED = "compat_submit_failed"      # personal sync landed, team submit did not
 
+_REDACTION_DISABLED_WARNING = "Warning: secret redaction is OFF; this share can send credentials and personal data verbatim."
+
 _NOT_TEAM_MODE_TEXT = ("Not in team mode. Set mode='team' + endpoint + token in "
                        "~/.contexer/config.toml to share.")
 _RATE_LIMIT_QUEUED_TEXT = "The service rate limit was reached; the confirmed submission is queued."
@@ -115,6 +117,7 @@ class ShareStatus:
     unknown_ids: tuple[str, ...] = ()
     server_id: str = ""
     scope: str = "repo"      # "repo" | "global" - which store was asked for
+    redaction_disabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -135,6 +138,7 @@ class ReconcileStatus:
     detail: str = ""             # the service's own reason, or the team the caller asked for
     teams: tuple[str, ...] = ()  # "Name (id)" rows, for the pick-a-team outcomes
     share: ShareStatus | None = None
+    redaction_disabled: bool = False
 
 
 def with_unknown(status: ShareStatus, unknown_ids) -> ShareStatus:
@@ -166,9 +170,8 @@ _OK_OUTCOMES = frozenset({
 
 def describe(status: ShareStatus | ReconcileStatus) -> str:
     """Render one outcome as the sentence a person reads. The only prose in this area."""
-    if isinstance(status, ReconcileStatus):
-        return _describe_reconcile(status)
-    return _describe_share(status)
+    result = _describe_reconcile(status) if isinstance(status, ReconcileStatus) else _describe_share(status)
+    return _REDACTION_DISABLED_WARNING + "\n" + result if status.redaction_disabled else result
 
 
 def _short_ids(unknown_ids: tuple[str, ...]) -> str:

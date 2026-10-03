@@ -1057,6 +1057,8 @@ def _drain_outbox_unlocked(profile: Profile | None = None) -> int:
     if not all_entries:
         return 0
     profile = profile or load_profile()
+    if not profile.redact_secrets:
+        return 0
     remote = RemoteStore.from_profile(profile)
     if remote is None:
         return 0
@@ -1090,6 +1092,8 @@ def _drain_outbox_unlocked(profile: Profile | None = None) -> int:
 
 def _drain_reconciliation_outbox_unlocked(profile: Profile) -> int:
     """Retry confirmed atomic writes verbatim; stale heads become attention, never retries."""
+    if not profile.redact_secrets:
+        return 0
     entries, error = _read_reconcile_outbox()
     if error is not None:
         return 0
@@ -1172,6 +1176,8 @@ async def _adrain_outbox_unlocked(profile: Profile | None = None) -> int:
     if not all_entries:
         return 0
     profile = profile or load_profile()
+    if not profile.redact_secrets:
+        return 0
     remote = RemoteStore.from_profile(profile)
     if remote is None:
         return 0
@@ -1214,7 +1220,9 @@ def _payload(dec: dict, key) -> dict:
 
 def share_all(repo_path: str, *, profile: Profile | None = None) -> share_status.ShareStatus:
     with outbox_lock():
-        return _share_all_unlocked(repo_path, profile=profile)
+        profile = profile or load_profile()
+        return replace(_share_all_unlocked(repo_path, profile=profile),
+                       redaction_disabled=not profile.redact_secrets)
 
 
 def _share_all_unlocked(repo_path: str, *,
@@ -1241,7 +1249,9 @@ def _share_all_unlocked(repo_path: str, *,
 
 def share_global(*, profile: Profile | None = None) -> share_status.ShareStatus:
     with outbox_lock():
-        return _share_global_unlocked(profile=profile)
+        profile = profile or load_profile()
+        return replace(_share_global_unlocked(profile=profile),
+                       redaction_disabled=not profile.redact_secrets)
 
 
 def _share_global_unlocked(*,
@@ -1276,7 +1286,9 @@ def _share_global_unlocked(*,
 def share(repo_path: str, decision_id: str = "", *,
           profile: Profile | None = None) -> share_status.ShareStatus:
     with outbox_lock():
-        return _share_unlocked(repo_path, decision_id, profile=profile)
+        profile = profile or load_profile()
+        return replace(_share_unlocked(repo_path, decision_id, profile=profile),
+                       redaction_disabled=not profile.redact_secrets)
 
 
 def _share_unlocked(repo_path: str, decision_id: str = "", *,
@@ -1310,7 +1322,9 @@ def _share_unlocked(repo_path: str, decision_id: str = "", *,
 def share_ids(repo_path: str, decision_ids: list, *,
               profile: Profile | None = None) -> share_status.ShareStatus:
     with outbox_lock():
-        return _share_ids_unlocked(repo_path, decision_ids, profile=profile)
+        profile = profile or load_profile()
+        return replace(_share_ids_unlocked(repo_path, decision_ids, profile=profile),
+                       redaction_disabled=not profile.redact_secrets)
 
 
 def reconcile(repo_path: str, decision_id: str, team: str = "", *,
@@ -1320,9 +1334,10 @@ def reconcile(repo_path: str, decision_id: str, team: str = "", *,
     The CLI calls :func:`prepare_reconciliation` itself so it can show the authoritative server
     preview before asking. This convenience entry point remains useful to API callers and tests.
     """
+    profile = profile or load_profile()
     plan, why = prepare_reconciliation(repo_path, decision_id, team, profile=profile)
     if plan is None:
-        return why
+        return replace(why, redaction_disabled=not profile.redact_secrets)
     return submit_reconciliation(plan, profile=profile)
 
 
@@ -1571,6 +1586,13 @@ def submit_reconciliation(plan: ReconciliationPlan, *,
                           profile: Profile | None = None) -> share_status.ReconcileStatus:
     """Submit a previously previewed plan. Only confirmed atomic operations may be queued."""
     profile = profile or load_profile()
+    return replace(_submit_reconciliation(plan, profile=profile),
+                   redaction_disabled=not profile.redact_secrets)
+
+
+def _submit_reconciliation(plan: ReconciliationPlan, *,
+                           profile: Profile | None = None) -> share_status.ReconcileStatus:
+    profile = profile or load_profile()
     dec, target = plan.decision, plan.target
     if plan.atomic:
         operation = _reconciliation_operation(plan)
@@ -1651,7 +1673,9 @@ def _share_ids_unlocked(repo_path: str, decision_ids: list, *,
 async def share_async(repo_path: str, decision_id: str = "", *,
                       profile: Profile | None = None) -> share_status.ShareStatus:
     async with async_outbox_lock():
-        return await _share_async_unlocked(repo_path, decision_id, profile=profile)
+        profile = profile or load_profile()
+        status = await _share_async_unlocked(repo_path, decision_id, profile=profile)
+        return replace(status, redaction_disabled=not profile.redact_secrets)
 
 
 async def _share_async_unlocked(repo_path: str, decision_id: str = "", *,
@@ -1689,7 +1713,9 @@ async def _share_async_unlocked(repo_path: str, decision_id: str = "", *,
 async def share_ids_async(repo_path: str, decision_ids: list, *,
                           profile: Profile | None = None) -> share_status.ShareStatus:
     async with async_outbox_lock():
-        return await _share_ids_async_unlocked(repo_path, decision_ids, profile=profile)
+        profile = profile or load_profile()
+        status = await _share_ids_async_unlocked(repo_path, decision_ids, profile=profile)
+        return replace(status, redaction_disabled=not profile.redact_secrets)
 
 
 async def _share_ids_async_unlocked(repo_path: str, decision_ids: list, *,
@@ -1724,12 +1750,22 @@ async def _share_ids_async_unlocked(repo_path: str, decision_ids: list, *,
 
 async def share_decision_flow(repo_path: str, decision_id: str, *, confirm: bool,
                               timeout: float, profile: Profile | None = None) -> str:
+    profile = profile or load_profile()
+    result = await _share_decision_flow(repo_path, decision_id, confirm=confirm,
+                                        timeout=timeout, profile=profile)
+    if not profile.redact_secrets and "redaction is OFF" not in result:
+        result = share_status._REDACTION_DISABLED_WARNING + "\n" + result
+    return result
+
+
+async def _share_decision_flow(repo_path: str, decision_id: str, *, confirm: bool,
+                               timeout: float, profile: Profile | None = None) -> str:
     """Full server.share_decision behavior: preview gate, bounded awaited push, and the
     timeout -> cancel -> best-effort retry-queue fallback. `timeout` and its rationale stay
     owned by the caller (the MCP tool's own round-trip backstop); this is the reusable
     mechanic."""
     profile = profile or load_profile()
-    if not confirm and not profile.skip_confirm and RemoteStore.from_profile(profile) is not None:
+    if not confirm and (not profile.skip_confirm or not profile.redact_secrets) and RemoteStore.from_profile(profile) is not None:
         return store.format_share_preview(repo_path, decision_id, profile=profile)
     ids = [i.strip() for i in decision_id.split(",") if i.strip()]
     try:
