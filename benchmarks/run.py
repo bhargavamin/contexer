@@ -306,14 +306,20 @@ def _blocks(entry: dict) -> list[dict]:
     return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
 
 
-def _contexer_received(home: Path) -> tuple[str, int]:
+def _transcripts(home: Path) -> set:
+    return set((home / ".claude" / "projects").rglob("*.jsonl"))
+
+
+def _contexer_received(home: Path, skip: set = frozenset()) -> tuple[str, int]:
     """(everything Contexer gave the agent, Contexer lookups the agent made), read from the
     session transcript. Only what CONTEXER gave counts: hook context
     (`hook_additional_context` attachments) and results of the agent's own Contexer tool calls,
     so neither an echo nor a file the agent read can. Lookups count the agent's calls to
-    Contexer's get_context tools, the way a pointer is followed up."""
+    Contexer's get_context tools, the way a pointer is followed up. `skip` leaves out earlier
+    sessions' transcripts: chain steps share a HOME, and session 1's capture acknowledgement
+    repeats the rule, which would read as delivery to session 2."""
     entries = []
-    for transcript in (home / ".claude" / "projects").rglob("*.jsonl"):
+    for transcript in _transcripts(home) - set(skip):
         for line in transcript.read_text(errors="ignore").splitlines():
             try:
                 entry = json.loads(line)
@@ -362,17 +368,20 @@ def _run_noise(work: Path, task: dict) -> tuple:
     return tuple(w for w in (str(work), str(work.resolve()), work.name, task.get("chain", "")) if w)
 
 
-def _revert_code_keep_memory(work: Path, base_sha: str) -> None:
-    """Capture loop, between sessions: put the code back where session 1 started, keeping only
-    what an arm uses as memory (CLAUDE.md here; Contexer's store lives in HOME). Session 1's code
-    applies the rule, so leaving it would let session 2 copy the rule from the module and the
-    `without` arm would pass without anything having been remembered."""
+def _revert_code_keep_memory(work: Path, base_sha: str, condition: str) -> None:
+    """Capture loop, between sessions: put the repository back where session 1 started, keeping
+    only the arm's own memory (the maintained CLAUDE.md; Contexer's store lives in HOME). Session
+    1's code applies the rule, and any note it left (a CLAUDE.md it created in another arm, a
+    stray file) would hand the rule to session 2 through a channel that arm isn't meant to have.
+    Raises when git fails, so a chain never continues on an unreverted tree."""
     claude_md = work / "CLAUDE.md"
-    kept = claude_md.read_text(errors="replace") if claude_md.exists() else None
-    subprocess.run(["git", "-C", str(work), "reset", "-q", "--hard", base_sha],
-                   capture_output=True, timeout=60)
-    subprocess.run(["git", "-C", str(work), "clean", "-fdq", "--", "app", "tests"],
-                   capture_output=True, timeout=60)
+    keep = condition == "claudemd_maintained" and claude_md.exists()
+    kept = claude_md.read_text(errors="replace") if keep else None
+    for cmd in (["reset", "-q", "--hard", base_sha], ["clean", "-fdq", "-e", ".venv"]):
+        done = subprocess.run(["git", "-C", str(work), *cmd], capture_output=True, text=True,
+                              timeout=60)
+        if done.returncode != 0:
+            raise RuntimeError(f"capture revert failed: git {cmd[0]}: {done.stderr.strip()[:200]}")
     if kept is not None:
         claude_md.write_text(kept)
 
@@ -511,6 +520,10 @@ def run_campaign(out_dir: Path, reps: int = 3, task_ids=None, claude_cmd: str = 
                                            claude_cmd, seed, model, rx, contexer_sources, wait_for_otel,
                                            steady_state)
                             _append(out, row)
+                            if row["error"]:
+                                # Later steps would run on an unknown state (a failed session or
+                                # revert); leave them missing so validation flags the chain.
+                                break
                         _discard(work, home)
     finally:
         rx.stop()
@@ -597,6 +610,7 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
         # from a live `git diff HEAD` — score against where the repo started.
         base_sha = subprocess.run(["git", "-C", str(work), "rev-parse", "HEAD"],
                                   capture_output=True, text=True).stdout.strip() or "HEAD"
+        earlier = _transcripts(home)
         res = _run_session(str(work), prompt, claude_cmd,
                            _session_env(home, rx.port), model)
         if res.get("_error"):
@@ -625,7 +639,7 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
         row["result_snippet"] = str(res.get("result", ""))[:300]
         if task.get("capture_terms") and condition in _CONTEXER_CONDITIONS and task["step"] > 1:
             # Capture loop, session 2: did the rule session 1 recorded reach this agent?
-            text, row["contexer_lookups"] = _contexer_received(home)
+            text, row["contexer_lookups"] = _contexer_received(home, earlier)
             row["needed_delivery"] = ("full" if _matches(task["capture_terms"], text,
                                                          _run_noise(work, task)) else "none")
         if needed:
@@ -665,7 +679,7 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
         if task.get("capture_terms") and task["step"] == 1:
             row.update(_capture_state(condition, work, home, task["capture_terms"],
                                       _run_noise(work, task)))
-            _revert_code_keep_memory(work, base_sha)
+            _revert_code_keep_memory(work, base_sha, condition)
         if task["chain"]:
             # Snapshot the worktree so the next step scores ONLY its own work —
             # otherwise an untracked file left by step 1 is re-counted by steps 2-3

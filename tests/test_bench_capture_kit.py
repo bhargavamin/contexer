@@ -218,7 +218,7 @@ REVIEW_CASES = [
      "    return record_ids[offset:offset + min(page_size, 50)]\n", False, True),   # wrong cap
     ("paging", "def list_recent_ids(record_ids, offset=0, page_size=25):\n"
      "    return {'items': record_ids[offset:offset + min(page_size, 100)], 'next_offset': offset + page_size}\n",
-     False, True),    # a page object works but isn't the team's raw list
+     True, True),     # a page object honouring offset, default and cap follows the rule
     ("millis", "def backoff_delay(attempt):\n    d = 0.5 * 2 ** (attempt - 1)\n"
      "    return {'delay_seconds': d, 'delay_ms': int(d * 1000)}\n", False, True),  # seconds decoy
     ("errdict", "def parse_record_number(text):\n    if text.startswith('R-') and text[2:].isdigit():\n"
@@ -227,13 +227,21 @@ REVIEW_CASES = [
      False, True),    # not a short code
     ("errdict", "def parse_record_number(text):\n    if text.startswith('R-') and text[2:].isdigit():\n"
      "        return {'ok': True, 'result': {'number': int(text[2:])}}\n"
-     "    return {'ok': False, 'error': 'bad_record'}\n", False, True),  # nested success: rule wants 42 at top
+     "    return {'ok': False, 'error': 'bad_record'}\n", True, True),   # nested success payload is allowed
     ("cents", "def refund_amount(total_cents, percent):\n    return {'refund': {'cents': total_cents * percent // 100}}\n",
      False, True),    # nested working result
     ("recprefix", "def link_records(parent_id, child_id):\n    return {'link': [f'rec_{parent_id}', f'rec_{child_id}']}\n",
      True, True),     # one key, still a working link
-    ("ynflags", "def slot_status(slot):\n    return {'slot': slot, 'valid': 1 if 0 <= slot <= 24 else 0, 'reserved': 0}\n",
+    ("ynflags", "def slot_status(slot):\n"
+     "    return {'slot': slot, 'valid': 1 if 0 <= slot <= 24 else 0, 'reserved': 1 if slot == 0 else 0}\n",
      False, True),    # 0/1 flags work but aren't Y/N
+    ("ynflags", "def slot_status(slot):\n    return {'arbitrary_a': 'Y', 'arbitrary_b': 'N', 'slot': slot}\n",
+     False, False),   # decoy Y/N values report neither flag
+    ("ynflags", "def slot_status(slot):\n    return {'slot': slot, 'valid': 'Y', 'reserved': 'N'}\n",
+     False, False),   # Y/N, but the wrong answers
+    ("recprefix", "def link_records(parent_id, child_id):\n"
+     "    return {f'rec_{parent_id}': parent_id, f'rec_{child_id}': child_id}\n",
+     False, True),    # prefixed keys, integer values: the outbound ids are still unprefixed
 ]
 
 
@@ -282,3 +290,95 @@ def test_validator_accepts_two_step_chains_and_flags_a_missing_step():
     validate._check_chains([r for r in rows if not (r["condition"] == "with" and r["step"] == 2)],
                            failures)
     assert failures == ["chain 'cap-x' condition 'with' missing step(s): [2]"]
+
+
+def test_session_two_delivery_ignores_session_ones_transcript(tmp_path):
+    # Chain steps share a HOME; session 1's capture acknowledgement repeats the rule.
+    projects = tmp_path / ".claude" / "projects" / "p"
+    projects.mkdir(parents=True)
+    ack = {"attachment": {"type": "hook_additional_context",
+                          "content": "Auto-stored as constraint: money is amount_cents"}}
+    (projects / "session1.jsonl").write_text(json.dumps(ack) + "\n")
+    earlier = run._transcripts(tmp_path)
+    (projects / "session2.jsonl").write_text(json.dumps({"type": "user"}) + "\n")
+    text, _ = run._contexer_received(tmp_path, earlier)
+    assert "amount_cents" not in text
+    assert "amount_cents" in run._contexer_received(tmp_path)[0]
+
+
+def _git(work, *args):
+    subprocess.run(["git", "-C", str(work), *args], check=True, capture_output=True)
+
+
+@pytest.mark.parametrize("condition", ["without", "with", "claudemd_maintained"])
+def test_revert_keeps_only_the_arms_own_memory(golden, tmp_path, condition):
+    work = tmp_path / "w"
+    shutil.copytree(golden, work)
+    base = subprocess.run(["git", "-C", str(work), "rev-parse", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+    if condition == "claudemd_maintained":
+        run._maintained_setup(work)
+    (work / "app" / f"svc_{SEED}_core.py").write_text("amount_cents = 1\n")
+    (work / "CLAUDE.md").write_text((work / "CLAUDE.md").read_text() + "- amount_cents\n"
+                                    if (work / "CLAUDE.md").exists() else "- amount_cents\n")
+    (work / "NOTES.md").write_text("amount_cents\n")
+    (work / ".venv").mkdir(exist_ok=True)
+    (work / ".venv" / "marker").write_text("keep")
+    _git(work, "add", "app")
+    run._revert_code_keep_memory(work, base, condition)
+    assert "amount_cents" not in (work / "app" / f"svc_{SEED}_core.py").read_text()
+    assert not (work / "NOTES.md").exists()
+    assert (work / ".venv" / "marker").exists()
+    kept = (work / "CLAUDE.md").read_text() if (work / "CLAUDE.md").exists() else ""
+    assert ("amount_cents" in kept) is (condition == "claudemd_maintained")
+
+
+def test_a_failed_revert_raises(golden, tmp_path):
+    work = tmp_path / "w"
+    shutil.copytree(golden, work)
+    with pytest.raises(RuntimeError, match="capture revert failed"):
+        run._revert_code_keep_memory(work, "0" * 40, "without")
+
+
+def test_capture_report_counts_each_arm_and_stage():
+    from benchmarks import capture_report
+
+    def row(cond, step, **extra):
+        return {"kind": "capture", "chain": "cap-x", "condition": cond, "rep": 0, "step": step,
+                "error": "", **extra}
+    rows = [row("without", 1), row("without", 2, success=False),
+            row("claudemd_maintained", 1, captured=True),
+            row("claudemd_maintained", 2, success=True),
+            row("with", 1, captured=True, capture_status="pending_approval"),
+            row("with", 2, success=False, needed_delivery="none")]
+    s = capture_report.summarize(rows)
+    assert s["arms"]["without"] == {"runs": 1, "captured": None, "success": 0}
+    assert s["arms"]["claudemd_maintained"] == {"runs": 1, "captured": 1, "success": 1}
+    assert s["funnel"] == {("captured, pending review", False): 1}
+    assert "| with | 1 | 1/1 | 0/1 |" in capture_report.render(s)
+
+
+def test_validator_requires_capture_measurements_and_task_file_length(tmp_path):
+    from benchmarks import validate
+    failures = []
+    validate._check_capture_fields([{"kind": "capture", "task_id": "cap-x-1", "step": 1,
+                                     "condition": "with", "rep": 0}], failures)
+    assert failures == ["capture row without 'captured': cap-x-1 with rep 0"]
+    # A final step missing from every arm is caught when the task file says the chain has two.
+    tasks = tmp_path / "tasks.json"
+    tasks.write_text(json.dumps([{"chain": "cap-x", "step": 1}, {"chain": "cap-x", "step": 2}]))
+    failures = []
+    validate._check_chains([{"chain": "cap-x", "step": 1, "condition": "with"}], failures,
+                           validate._chain_lengths({"tasks_file": str(tasks)}))
+    assert failures == ["chain 'cap-x' condition 'with' missing step(s): [2]"]
+
+
+def test_an_errored_step_stops_its_chain(tmp_path):
+    stub = tmp_path / "claude"
+    stub.write_text("#!/bin/sh\necho 'not json'\n")
+    stub.chmod(0o755)
+    out = run.run_campaign(tmp_path / "camp", reps=1, task_ids=["cap-cents-1", "cap-cents-2"],
+                           claude_cmd=str(stub), seed=SEED, model="stub-model",
+                           conditions=("without",), wait_for_otel=False, tasks_file=TASKS_FILE)
+    rows = [json.loads(line) for line in out.read_text().splitlines()]
+    assert [r["step"] for r in rows] == [1] and rows[0]["error"]

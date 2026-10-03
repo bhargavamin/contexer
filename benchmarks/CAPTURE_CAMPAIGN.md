@@ -62,6 +62,19 @@ output repeats (a work directory named after the cents chain once matched the ce
 Report each chain's drop-off separately: not captured, captured but pending, captured but not
 delivered, delivered but not applied. Each points to a different fix.
 
+## Report
+
+```bash
+uv run python benchmarks/capture_report.py benchmarks/artifacts/<dir>
+uv run python benchmarks/validate.py benchmarks/artifacts/<dir>
+```
+
+The report gives each arm's capture and session-2 success and Contexer's drop-off by stage. The
+validator fails a campaign whose capture rows lack their measurements or whose chains are missing
+a step (expected steps come from the task file). Session-2 delivery is read only from session 2's
+own transcript: chain steps share a HOME, and session 1's capture acknowledgement repeats the
+rule. A step that errors stops its chain, so a broken revert can't contaminate session 2.
+
 ## Free steps
 
 ```bash
