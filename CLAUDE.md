@@ -95,7 +95,7 @@ A small package (`contexer/`), intentionally minimal. Each module is a cohesive 
 - **`guard_engine.py`** - commit-time guard engine and `decisions_for_files`; re-exported lazily by `store`.
 - **`anchors.py`** - anchor verification: rename correction, retirement proposals on loss.
 - **`lifecycle.py`** - retirement/restoration and the lifecycle and reconsideration review lanes.
-- **`conflicts.py`** - open-conflict rendering and advisory resolution memos.
+- **`conflicts.py`** - open-conflict rendering, explicit incompatible current version-format pairs, and advisory resolution memos.
 - **`review_impact.py`** - read-only approval-impact preview shared by MCP, CLI and console.
 - **`decision_impact.py`** - opt-in, diagnostics-only decision-impact pilot sidecar.
 - **`console_api.py`** - read projections for the `contexer ui` console (`ui/api.py` -> `console_api` -> `store`).

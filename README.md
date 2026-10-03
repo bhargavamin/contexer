@@ -250,3 +250,5 @@ MIT. See [LICENSE](LICENSE) for full terms.
 The Contexer name and logo are trademarks of Contexer.ai. The MIT license does not grant rights to use the Contexer name, logo, or brand in any way that implies official affiliation.
 
 The local data directory is private to its owner (mode `0700`); existing group or world permissions are removed on next use.
+
+When current decisions prescribe incompatible version formats, Contexer shows both together and asks you to resolve the conflict before an agent chooses a format.

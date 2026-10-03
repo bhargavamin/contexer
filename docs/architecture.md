@@ -121,3 +121,7 @@ Directory tightening uses an opened directory descriptor, refuses symlinks and u
 Private directory tightening uses metadata/search descriptors and preserves write/search-only modes such as 0300. Already-private directories keep every owner bit unchanged; status reports an unsafe directory without reading through it.
 
 Private-directory tightening uses an owner-readable descriptor when possible, so readable Linux directories do not require procfs. Write/search-only Linux directories require the verified O_PATH procfs route; if it is unavailable, access refuses without loosening permissions. An unsafe store directory still allows status to report guard and installation diagnostics; update diagnostics explicitly report unavailable rather than reading or writing through that directory.
+
+### Incompatible current decisions
+
+`conflicts.current_pairs` detects explicit active prescriptions for prefixed versus bare semantic version strings, excluding historical, retired and disjoint file scopes. Startup renders each pair with both full current bodies and a clarification instruction; prompt retrieval brings the sibling alongside either selected member. This conservative supported class does not use similarity as proof of arbitrary contradictions and does not grant approval or choose a winner.

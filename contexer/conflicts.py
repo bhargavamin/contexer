@@ -19,6 +19,7 @@ documents at its own top: they're looked up at call time, so anything a test mon
 """
 
 import hashlib
+import re
 from datetime import datetime, timezone
 
 from contexer import revisions      # pure stdlib leaf (no cycle): revision lifecycle
@@ -36,6 +37,58 @@ _CONFLICT_GUIDE = (
     "which version is current is not resolving it — report both, naming the update as the "
     "latest stated direction and flagging it as unreviewed."
 )
+
+
+_CURRENT_CONFLICT_GUIDE = (
+    "CONFLICT: these current decisions prescribe incompatible version formats. "
+    "Ask the developer which applies to this task before implementing either. "
+    "Their status is unchanged; this marker does not approve or retire a decision."
+)
+
+
+def current_pairs(entries: list[dict]) -> list[tuple[dict, dict]]:
+    """Conservative explicit version-format conflicts, never inferred from similarity alone.
+
+    Match an operative prescription, not a historical example or a rationale mentioning
+    an alternative. Other contradiction classes stay undetected until they have evidence
+    and a specific grammar; lexical overlap is not proof of incompatible guidance.
+    """
+    from contexer import policy
+
+    prefixed, bare = [], []
+    for entry in entries:
+        if (entry.get("type") != "decision" or store.entry_status(entry) not in {"approved", "suggested"}
+                or entry.get("bootstrap") or entry.get("superseded_by")):
+            continue
+        text = revisions.current_content(entry).lower()
+        if re.match(r"(?:prefix|publish|use)\b", text) and re.search(
+                r"\bversions? (?:strings? )?with (?:a )?(?:lowercase )?v\b", text):
+            prefixed.append(entry)
+        elif re.match(r"(?:publish|use|return)\b", text) and re.search(
+                r"\b(?:bare|unprefixed) (?:semantic )?versions?\b", text):
+            bare.append(entry)
+    pairs = []
+    for left in prefixed:
+        for right in bare:
+            if left.get("id") == right.get("id"):
+                continue
+            lfiles, rfiles = set(left.get("source_files") or []), set(right.get("source_files") or [])
+            if (lfiles and rfiles and not policy.source_anchor_hits(lfiles, rfiles)
+                    and not policy.source_anchor_hits(rfiles, lfiles)):
+                continue
+            pairs.append((left, right))
+    return pairs
+
+
+def render_current_pair(left: dict, right: dict) -> list[str]:
+    lines = [_CURRENT_CONFLICT_GUIDE]
+    for entry in (left, right):
+        status = store.entry_status(entry)
+        date = (entry.get("updated_at") or entry.get("timestamp") or "")[:10]
+        text = " ".join(revisions.current_content(entry).split())
+        lines.append(f"- [{status}, {date}] {entry.get('title') or revisions.derive_title(text)} "
+                     f"(id={entry.get('id', '')[:8]})\n    {text}")
+    return lines
 
 
 def _conflict_pair_key(entry: dict) -> str:
