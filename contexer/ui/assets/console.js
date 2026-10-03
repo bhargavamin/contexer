@@ -409,9 +409,9 @@
   async function act(path, method, body, okMessage, onOk) {
     try {
       let out = await mutate(path, method, body);
-      if (out && out.confirmation_required) {
+      while (out && out.confirmation_required) {
         if (!window.confirm(out.preview + "\n\nSend this unredacted payload?")) return false;
-        out = await mutate(path, method, { ...body, confirm: true });
+        out = await mutate(path, method, { ...body, confirm: true, confirmation_digest: out.confirmation_digest });
       }
       // A 200 carrying `error` is the daemon refusing in prose. It is a failure, so nothing the
       // caller staged on success may run.

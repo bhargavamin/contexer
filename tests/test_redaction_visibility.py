@@ -121,6 +121,8 @@ def test_console_requires_preview_before_unredacted_egress(tmp_repo, monkeypatch
     api._share(tmp_repo, {"ids": [did], "confirm": "true"})
     assert calls == []
     api._share(tmp_repo, {"ids": [did], "confirm": True})
+    assert calls == []
+    api._share(tmp_repo, {"ids": [did], "confirm": True, "confirmation_digest": result["confirmation_digest"]})
     assert len(calls) == 1
 
 
@@ -147,3 +149,78 @@ def test_new_explicit_share_settles_old_queued_base(tmp_repo, monkeypatch):
     status = share.share(tmp_repo, did, profile=OFF)
     assert status.outcome == share_status.SYNCED
     assert not any(row.get("decision_id") == did for row in share._load_outbox())
+
+
+def test_console_refuses_changed_unredacted_payload(tmp_repo, monkeypatch):
+    from contexer.ui import api
+    _, did = store.update_decision(tmp_repo, "Use PostgreSQL for the database", "s", "convention")
+    monkeypatch.setattr(config, "load_profile", lambda: OFF)
+    fake = _fake(monkeypatch)
+    _, preview = api._share(tmp_repo, {"ids": [did]})
+    store.update_decision(tmp_repo, "Use SQLite for the database", "s", "convention", replace_id=did)
+    _, result = api._share(tmp_repo, {"ids": [did], "confirm": True,
+                                     "confirmation_digest": preview["confirmation_digest"]})
+    assert not result["ok"] and "changed" in result["error"]
+    assert not fake.calls and not fake.batches
+    _, fresh = api._share(tmp_repo, {"ids": [did]})
+    assert fresh["confirmation_digest"] != preview["confirmation_digest"]
+    _, result = api._share(tmp_repo, {"ids": [did], "confirm": True,
+                                     "confirmation_digest": fresh["confirmation_digest"]})
+    assert result["ok"] and fake.batches
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_remote_success_survives_outbox_cleanup_failure(tmp_repo, monkeypatch, batch):
+    _, did = store.update_decision(tmp_repo, "Use PostgreSQL for the database", "s", "convention")
+    share._enqueue({"decision_id": did, "content": "old body", "repo": "r"})
+    fake = _fake(monkeypatch)
+    monkeypatch.setattr(share, "_save_outbox", lambda rows: (_ for _ in ()).throw(OSError("disk failed")))
+    result = share.share_ids(tmp_repo, [did], profile=OFF) if batch else share.share(tmp_repo, did, profile=OFF)
+    assert share_status.is_ok(result) and result.sent == 1
+    assert result.retry_cleanup_failed == 1
+    assert "older payloads may remain queued" in share_status.describe(result)
+    assert fake.calls or fake.batches
+
+
+def test_unredacted_reconciliation_reports_paused_retry():
+    result = share_status.ReconcileStatus(share_status.UNREACHABLE_QUEUED, redaction_disabled=True)
+    text = share_status.describe(result)
+    assert "retry paused until" in text and "for automatic retry" not in text
+
+
+def test_legacy_preview_confirmation_is_stable_without_migration_write(tmp_repo, monkeypatch):
+    import json
+    from contexer.ui import api
+    entry = store._new_decision_entry("Use PostgreSQL for the database", "s", "convention")
+    for key in ("revisions", "current_revision_id"):
+        entry.pop(key, None)
+    path = store._store_path(tmp_repo)
+    path.write_text(json.dumps({"entries": [entry]}), encoding="utf-8")
+    before = path.read_bytes()
+    monkeypatch.setattr(config, "load_profile", lambda: OFF)
+    fake = _fake(monkeypatch)
+    _, preview = api._share(tmp_repo, {"ids": [entry["id"]]})
+    assert path.read_bytes() == before
+    _, result = api._share(tmp_repo, {"ids": [entry["id"]], "confirm": True,
+                                     "confirmation_digest": preview["confirmation_digest"]})
+    assert result["ok"] and fake.batches
+    assert path.read_bytes() == before
+
+
+def test_confirmed_share_reuses_checked_repository_destination(tmp_repo, monkeypatch):
+    _, did = store.update_decision(tmp_repo, "Use PostgreSQL for the database", "s", "convention")
+    monkeypatch.setattr(config, "load_profile", lambda: OFF)
+    original = store.run_git
+    reads = []
+    def origin(path, *args):
+        if args == ("remote", "get-url", "origin"):
+            reads.append(args)
+            return "git@github.com:owner/first.git" if len(reads) == 1 else "git@github.com:owner/changed.git"
+        return original(path, *args)
+    monkeypatch.setattr(store, "run_git", origin)
+    digest = share.selection_digest(tmp_repo, [did], profile=OFF)
+    reads.clear()
+    fake = _fake(monkeypatch)
+    result = share.share_ids(tmp_repo, [did], profile=OFF, expected_digest=digest)
+    assert share_status.is_ok(result) and len(reads) == 1
+    assert fake.batches[0][0]["repo"] == "github.com/owner/first"

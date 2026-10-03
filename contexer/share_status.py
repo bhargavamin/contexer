@@ -113,6 +113,7 @@ class ShareStatus:
     lost: int = 0
     lifecycle_pending: int = 0
     lifecycle_lost: int = 0
+    retry_cleanup_failed: int = 0
     total: int = 0
     unknown_ids: tuple[str, ...] = ()
     server_id: str = ""
@@ -176,6 +177,8 @@ def describe(status: ShareStatus | ReconcileStatus) -> str:
                                 "retry is paused until redact_secrets is enabled")
         result = result.replace("to retry automatically at the next session start",
                                 "with retry paused until redact_secrets is enabled")
+        result = result.replace("for automatic retry", "with retry paused until redact_secrets is enabled")
+        result = result.replace("Automatic retry", "Retry (paused until redact_secrets is enabled)")
         return _REDACTION_DISABLED_WARNING + "\n" + result
     return result
 
@@ -212,6 +215,9 @@ def _shortfall(s: ShareStatus) -> str:
                 "against another decision, and were skipped - nothing of them was saved")
     if s.lost:
         out += f"; {s.lost} could NOT be queued (outbox write failed) and are unsaved"
+    if s.retry_cleanup_failed:
+        out += (f"; cleanup of {s.retry_cleanup_failed} saved decision retry(s) failed; older payloads "
+                "may remain queued - repair local storage and re-share before allowing retries")
     if s.lifecycle_pending:
         out += (f"; {s.lifecycle_pending} lifecycle update(s) were refused and remain queued "
                 "until the server protocol changes")
