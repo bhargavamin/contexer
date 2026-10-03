@@ -13,7 +13,6 @@ def test_budget_keeps_constraints_before_large_title_list():
     assert len(result.encode("utf-8")) <= claude.SESSION_CONTEXT_BYTES
     assert len(json.dumps(result).encode()) <= claude.SESSION_CONTEXT_BYTES
     assert constraint in result
-    assert result.index(constraint) < result.index("Convention")
     assert "get_context" in result
     assert "aaaaaaaa" not in dropped
     assert dropped
@@ -49,12 +48,96 @@ def test_large_store_credits_only_delivered_rules_and_other_hosts_keep_full_cont
     assert len(envelope["hookSpecificOutput"]["additionalContext"].encode()) > claude.SESSION_CONTEXT_BYTES
 
 
-def test_conflict_pair_is_kept_with_both_sides_and_guide():
-    group = ("## Conflicting current decisions:\nCONFLICT: Ask the developer which applies.\n"
-             "- [suggested] Prefix versions (id=aaaaaaaa)\n    Use v1.2.3.\n"
-             "- [suggested] Bare versions (id=bbbbbbbb)\n    Use 1.2.3.")
-    context = "## Project rules:\n" + "\n".join(
-        f"- [convention] Unrelated {i}: " + "long text " * 30 for i in range(150))
-    result, dropped = claude.budget_session_context(context + "\n" + group)
-    assert group in result
-    assert not {"aaaaaaaa", "bbbbbbbb"} & dropped
+def test_real_pending_conflict_keeps_resolution_guide_under_pressure(tmp_repo):
+    from contexer import conflicts
+    entry = store._new_decision_entry("Use PostgreSQL for durable database records.", "s", "constraint", status="approved")
+    store.save(tmp_repo, {"entries": [entry]})
+    store.update_decision(tmp_repo, "Use SQLite for durable database records.", "s", "constraint", replace_id=entry["id"])
+    data = store.load(tmp_repo)
+    assert data["entries"][0].get("proposed_revision")
+    data["entries"].extend(store._new_decision_entry("Unrelated rule " + str(i), "s", "convention",
+        title="Long convention " + "x" * 90, status="suggested") for i in range(150))
+    store.save(tmp_repo, data)
+    text = store.session_start_payload(tmp_repo, "startup", "conflicted", "claude")["context"]
+    assert "Use PostgreSQL" in text and "Use SQLite" in text
+    assert conflicts._CONFLICT_GUIDE in text
+    assert "If the current task conflicts" in text
+    assert len(json.dumps(text).encode()) <= claude.SESSION_CONTEXT_BYTES
+
+
+def test_budget_preserves_section_scope_and_authority():
+    context = ("## Global rules (apply to ALL repos):\n- [convention] Global rule (id=aaaaaaaa)\n"
+               "## Project rules - apply to ALL tasks in this repo:\n"
+               "- [constraint] Project constraint (id=bbbbbbbb)\n"
+               "- [convention] Project convention (id=cccccccc)\n"
+               "## Observed / AI-inferred context (not human-approved policy):\n"
+               "- Observation (id=dddddddd)\n## Team context (synced)\n"
+               "- [scope=team] [constraint] Team constraint (id=eeeeeeee)\n")
+    context += "\n".join(f"- [scope=team] Other {i} " + "x" * 150 for i in range(100))
+    text, _ = claude.budget_session_context(context)
+    project = text.split("## Project rules", 1)[1].split("## Observed", 1)[0]
+    assert "Project constraint" in project and "Project convention" in project
+    assert text.index("## Team context") < text.index("Team constraint")
+    assert text.count("## Project rules") == 1
+
+
+def test_team_multiline_exception_is_one_budget_block(tmp_repo, monkeypatch):
+    from contexer import team_context
+    cache = {"decisions": [{"id": "aaaaaaaa", "type": "constraint", "scope": "team",
+              "title": "Keep retries bounded", "content": "Always retry requests.\n- Except non-idempotent writes."}]}
+    monkeypatch.setattr(team_context, "_load_cache", lambda repo: cache)
+    team = team_context.format_team_section(tmp_repo)
+    assert "\n- Except" not in team and "Except non-idempotent writes." in team
+    text, dropped = claude.budget_session_context(team + "\n" + "\n".join(
+        f"- [scope=team] Other {i} " + "x" * 200 for i in range(100)))
+    assert "aaaaaaaa" not in dropped
+    assert "Always retry requests." in text and "Except non-idempotent writes." in text
+
+
+def test_active_bootstrap_survives_large_global_store(tmp_repo):
+    entries = [store._new_decision_entry("Global rule " + str(i), "s", "constraint",
+               title="Global rule " + "x" * 90, status="approved") for i in range(150)]
+    store.save_global({"entries": entries})
+    text = store.session_start_payload(tmp_repo, "startup", "new-project", "claude")["context"]
+    assert "bootstrap_context" in text and "interpretation" in text.lower()
+    assert len(json.dumps(text).encode()) <= claude.SESSION_CONTEXT_BYTES
+
+
+def test_legacy_claude_envelope_does_not_claim_claude_capture(tmp_repo, monkeypatch):
+    from contexer import reconcile
+    seen = []
+    credited = []
+    original = working_set.record_deliveries
+    def record(repo, session, records):
+        credited.append(records)
+        return original(repo, session, records)
+    monkeypatch.setattr(working_set, "record_deliveries", record)
+    monkeypatch.setattr(reconcile, "reconcile_session", lambda *a, **kw: seen.append(kw["host"]) or {})
+    store.save(tmp_repo, {"entries": [store._new_decision_entry("Rule " + str(i) + " " + "detail " * 80, "s", "constraint",
+               title="Constraint " + "x" * 100, status="approved") for i in range(150)]})
+    envelope = store.get_session_start_context(tmp_repo, "startup", "legacy")
+    text = envelope["hookSpecificOutput"]["additionalContext"]
+    assert seen == [""]
+    assert len(json.dumps(text).encode()) <= claude.SESSION_CONTEXT_BYTES
+    assert len(credited) == 1 and credited[0]
+    assert len(credited[0]) < 150
+    assert all(r["id"][:8] in text for r in credited[0])
+    assert all(r["id"][:8] in text for r in working_set.records(tmp_repo, "legacy"))
+
+
+def test_rehydrated_task_context_precedes_title_overflow():
+    text = "## Project rules:\n" + "\n".join(
+        f"- [convention] Other {i} " + "x" * 140 for i in range(150))
+    text += "\n## Rehydrated working context:\n- [architecture] Current task (id=aaaaaaaa)\n    Full current reasoning."
+    rendered, dropped = claude.budget_session_context(text)
+    assert "Full current reasoning." in rendered and "aaaaaaaa" not in dropped
+
+
+def test_team_shown_count_uses_budgeted_output(tmp_repo, monkeypatch):
+    monkeypatch.setattr(store, "_local_session_start_payload", lambda *a, **kw: {"status": "loaded", "context": ""})
+    team = "## Team context\n" + "\n".join(f"- [scope=team] Rule {i} " + "x" * 200 for i in range(50))
+    monkeypatch.setattr(store, "_team_section_with_counts", lambda repo: (team, 50, 0))
+    payload = store.session_start_payload(tmp_repo, host="claude")
+    shown = sum(line.startswith("- [scope=team]") for line in payload["context"].splitlines())
+    assert 0 < shown < 50
+    assert f"team: 50 synced ({shown} shown)" in payload["status"]

@@ -78,7 +78,7 @@ The model is **embedded**, not normalized into a second collection: each decisio
 
 ## Session behaviour (hooks)
 
-Claude's SessionStart payload has an 8,000-byte budget including conservative JSON escaping, applied after local and team context are combined. The adapter keeps complete approved constraint blocks first, then global rules, pending-update guidance and other project context. Omitted blocks are summarized by one `get_context` pointer and are excluded from working-set delivery credit. Under-budget output is unchanged; Cursor, Codex and Gemini are not assigned Claude's observed cutoff.
+Claude's SessionStart payload has an 8,000-byte budget including conservative JSON escaping, applied after local and team context are combined. The adapter reserves bootstrap and retrieval instructions, then selects complete approved constraints and pending-conflict blocks before other rules. Selection priority never changes section order or authority headings. Pending-conflict blocks travel with their resolution guide; multiline rules stay whole. Rehydrated task context is selected ahead of title-only overflow, and the team shown-count is recalculated from budgeted output. The legacy Claude-shaped entrypoint also applies the budget but leaves an unspecified capture host unspecified. Omitted blocks are summarized by one `get_context` pointer and are excluded from working-set delivery credit. Under-budget output is unchanged; Cursor, Codex and Gemini are not assigned Claude's observed cutoff.
 
 
 `~/.claude/settings.json` wires up hooks globally (applies to every repo):
