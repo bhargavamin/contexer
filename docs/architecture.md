@@ -54,6 +54,8 @@ The new-release notice is bounded by TWO rules, not one: a given release is anno
 
 ## Storage
 
+All repository read-modify-write paths use `store.load_for_update`; global guard management uses `load_global_for_update`. Unreadable or malformed files raise a refusal before any mutation and remain in place for recovery. Rendering retains the fail-soft `load` / `load_global` readers.
+
 Context is stored at `~/.contexer/<repo_slug>.json` - one file per repo, plus `_global.json` for cross-repo decisions. The slug is the repo path with non-alphanumeric characters replaced by underscores. Each file holds a flat list of entries. Writes are atomic (unique temp file + `os.replace`, mode `0o600`) so readers never see a torn file; a corrupt file is read as empty on RENDER paths, but any write path that could destroy queued data (e.g. the share outbox) must read through a reader that raises on corruption rather than silently treating "unreadable" as "empty" - the two are not the same thing, and collapsing them on a write path risks overwriting data that was actually still there.
 
 **Every store-owned sidecar path goes through one reader and one builder.** `store.store_dir()` is the only place the store-owned code reads the directory, `store.sidecar_path(kind, **fields)` the only function that joins a declared sidecar name onto it, `sidecars.glob_for(kind)` the only one that renders a family's pattern, and `store.ensure_store_dir()` the only one that creates it (mode `0o700`) and tightens existing group/world permissions without adding owner permissions. Production reads the `STORE_DIR` constant nowhere; `sidecars.py` owns what a file is CALLED and how long it lives, `store` owns where it lives, and neither knows the other's half.
@@ -135,6 +137,8 @@ Review shows current and proposed applicability explicitly; applicability-only u
 
 Prompt slot ordering gives eligible approved constraints priority over unapproved candidates after subject admission. Global anchor ranking uses an in-memory current-store index when the global sidecar is missing or outdated; it never writes that fallback from a prompt. Pointer counts use distinct scoped decision identities across topic and anchor pointers.
 
+Reconciliation snapshots use strict live/tombstone reads before disposition so unreadable stores cannot dismiss held evidence. Global guard management may still use a healthy global store when the local store is corrupt; local failure is re-raised when no global id matches.
+
 ### Incompatible current decisions
 
 `conflicts.current_pairs` detects explicit active prescriptions for prefixed versus bare semantic version strings, excluding historical, retired and disjoint file scopes. Startup renders each pair with both full current bodies and a clarification instruction; prompt retrieval brings the sibling alongside either selected member. This conservative supported class does not use similarity as proof of arbitrary contradictions and does not grant approval or choose a winner.
@@ -148,6 +152,7 @@ The compatibility `redact_secrets=false` opt-out is preserved, but personal shar
 The authenticated console returns a local preview before disabled-redaction sharing and requires boolean confirmation before egress. Redaction attention does not pause the destination policy, so retries remain possible after re-enabling redaction. Successful explicit sends remove older queued base versions while retaining lifecycle deltas. Disabled-redaction failures describe paused retries and previews omit the ineffective skip-confirm bypass.
 
 Unredacted console confirmation binds previewed content, metadata, destination and a local credential-generation fingerprint to one checked outgoing snapshot. Same-endpoint account changes or token refreshes invalidate the preview; the confirmed outgoing client cannot reactively switch credentials during transmission. Changed selections are refused; read-only legacy previews remain stable despite synthesized revision UUIDs. Successful remote writes stay successful when retry cleanup fails and report the possible older queued payloads. Reconciliation retry descriptions also name the redaction pause.
+
 ### Privacy erasure
 
 `lifecycle.erase_decision` is called only by the human CLI and authenticated console; it is absent from MCP. It preflights strict live/tombstone reads, acquires sharing/reconciliation/store locks, and refuses known shared copies. Related queued records and copied payloads are removed or scrubbed across the store directory, including derived indexes and evidence that is linked to the decision (held candidates by `entry_id`) or that contains its text or recognizable fragments. A pending, unlinked event that only paraphrases the decision has no identity or shared text to match and is not found; this is a stated limit, not a guarantee. Cleanup publishes before removing the live entry so failures remain retryable. The existing tombstone sidecar retains only type `erasure`, id, dates, actor and fixed reason; restoration explicitly refuses it.

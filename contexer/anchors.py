@@ -246,7 +246,7 @@ def verify_anchors(repo_path: str, force: bool = False) -> dict:
     a no-op {"reanchored": 0, "proposed": 0} rather than raising out of session start."""
     try:
         with store.store_lock(store.repo_slug(repo_path)):
-            data = store.load(repo_path)
+            data = store.load_for_update(repo_path)
             entries = data.get("entries") or []
             participants = [
                 e for e in entries
