@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "fixture_version": "1.1.3",
+  "fixture_version": "1.1.4",
   "reference_revision": "5676247f358dc6a0c099d8eb8eb94623bad04bb0",
   "cases": [
     {
@@ -1939,7 +1939,8 @@
           "action_id": "task",
           "stage": "emitted",
           "decision_only": true,
-          "maximum": 3
+          "maximum": 3,
+          "tier": "prompt_full"
         },
         {
           "key": "authority-not-pending",
@@ -2234,9 +2235,7 @@
           "action_id": "task",
           "decision_id": "r21-deterministic",
           "revision_id": "rev-r21-deterministic-a",
-          "tier": "prompt_full",
-          "known_gap": "anchor-tier-outranks-task-match",
-          "owner": "bhargavamin/contexer#349"
+          "tier": "prompt_full"
         }
       ],
       "forbidden_outputs": [],

@@ -903,7 +903,7 @@ class TestStartupDeliveryCredit:
         credited = {(r["scope"], r["id"]) for r in working_set.records(tmp_repo, sid)
                     if r["fingerprint"]}
         assert credited == {("personal", constraint), ("global", gid)}
-        prompt = store.get_context_for_prompt(tmp_repo, "fix the bug in billing.py", sid)
+        prompt = store.get_context_for_prompt(tmp_repo, "fix invoice job prefix naming in billing.py", sid)
         assert "Never round invoice totals" not in prompt
         assert "silently drops out of the billing view" in prompt
 
@@ -968,7 +968,7 @@ class TestStartupDeliveryCredit:
         sid = "compact-twice"
         store.session_start_payload(tmp_repo, "startup", sid, "claude")
         assert "checkout reservation leases" in store.get_context_for_prompt(
-            tmp_repo, "fix the bug in checkout.py", sid)
+            tmp_repo, "fix the checkout reservation lease bug in checkout.py", sid)
 
         for _ in range(2):
             payload = store.session_start_payload(tmp_repo, "compact", sid, "claude")
@@ -989,7 +989,7 @@ class TestStartupDeliveryCredit:
                            source_files=["checkout.py"])
         sid = "ledger-cap"
         store.session_start_payload(tmp_repo, "startup", sid, "claude")
-        store.get_context_for_prompt(tmp_repo, "fix the bug in checkout.py", sid)
+        store.get_context_for_prompt(tmp_repo, "fix the checkout reservation lease bug in checkout.py", sid)
         monkeypatch.setattr(store, "MAX_ENTRIES", 5)   # fewer ledger rows than startup credits
 
         for _ in range(2):
@@ -1023,6 +1023,22 @@ class TestAnchorOverflow:
             repo, content, SESSION, subtype, created_by="human", title=title,
             source_files=["src/outbox.py"])[1]
 
+    def test_overflow_names_the_most_relevant_anchors_first(self, tmp_repo):
+        """The pointer lists five titles; a relevant anchor stored after six unrelated ones
+        must not fall into the "+N more" tail."""
+        for i in range(6):
+            self._anchor(tmp_repo, f"Widget{i} gizmo{i} handling is synchronous", f"Widget{i} gizmo{i} rule")
+        for content in ("Batch failure accounting counts each batch once, never per row",
+                        "Failure accounting for a batch logs the batch size beside the error",
+                        "Accounting of batch failures emits one metric named outbox_failed"):
+            self._anchor(tmp_repo, content, content[:40])
+        self._anchor(tmp_repo, "Batch failure accounting retries a failed batch with backoff",
+                     "Retry failed batches")
+        text = store.get_context_for_prompt(
+            tmp_repo, "Refactor batch failure accounting in src/outbox.py", "overflow-order")
+        named = text.split("not shown:", 1)[1].split("(+", 1)[0]
+        assert named.count("Widget") < 5, text   # a relevant leftover outranks the unrelated ones
+
     def test_relevant_anchor_wins_a_slot_and_the_rest_are_named(self, tmp_repo):
         titles = ["Store outbox rows in arrival order", "Serialize outbox payloads as JSON",
                   "Keep outbox files under the user cache", "Expire outbox rows after a week"]
@@ -1035,15 +1051,19 @@ class TestAnchorOverflow:
             tmp_repo, "Refactor the batch failure accounting in src/outbox.py", "overflow")
 
         assert "Count failed batches once per batch" in text
-        assert text.count("because the sync worker relies on it") == 2
+        assert text.count("because the sync worker relies on it") == 0
         assert all(title in text for title in titles)
-        assert "2 more decisions anchored to files in this prompt not shown" in text
+        assert "4 more decisions anchored to files in this prompt not shown" in text
         # #353: the path's bare basename is matched on but not listed a second time.
         assert "call get_context(files=['src/outbox.py']) if relevant." in text
 
-    def test_anchored_constraint_leads_even_when_the_prompt_words_differ(self, tmp_repo):
-        for title in ("Add credit notes as separate documents", "Number credit notes in sequence",
-                      "Store credit notes with the invoice"):
+    def test_approved_constraint_on_the_named_file_is_injected_whatever_the_task(self, tmp_repo):
+        """Owner decision on #380 (keep #341): a "never X" rule on the named file reaches the
+        agent in full even when the task's wording is about something else; agents rarely
+        follow a one-line pointer (#361). Task-relevant guidance keeps the remaining slots."""
+        titles = ("Add credit notes as separate documents", "Number credit notes in sequence",
+                  "Store credit notes with the invoice")
+        for title in titles:
             self._anchor(tmp_repo, f"{title} for credit note support", title)
         self._anchor(tmp_repo, "Round totals once, after tax is applied",
                      "Round totals once after tax", subtype="constraint")
@@ -1051,7 +1071,10 @@ class TestAnchorOverflow:
         text = store.get_context_for_prompt(
             tmp_repo, "Add credit note support to src/outbox.py", "constraint-first")
 
-        assert "Round totals once, after tax is applied" in text
+        shown, overflow = text.split("not shown:", 1)
+        assert "Round totals once, after tax is applied" in shown
+        assert sum(f"{title} for credit note support" in shown for title in titles) == 2
+        assert sum(title in overflow for title in titles) == 1
 
     def test_pending_constraints_do_not_displace_the_needed_decision(self, tmp_repo):
         self._anchor(tmp_repo, "Count failed batches once per batch, not per row",
@@ -1069,7 +1092,7 @@ class TestAnchorOverflow:
 
         assert "Count failed batches once per batch" in text
         # Overflow names keep their status, so an unreviewed rule never reads as policy.
-        assert text.count("[pending] (id=") == 1
+        assert text.count("[pending] (id=") == 3
 
 
 class TestPointerFiles:

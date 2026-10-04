@@ -116,6 +116,8 @@ Cover:
 
 Use `tmp_path` / `tmp_path_factory` for all file I/O - never write to the real `~/.contexer/` in tests. Monkeypatch `store.STORE_DIR` at the function scope (not module scope) when each test needs an isolated directory.
 
+The shared console path sandbox stays active until the worker process exits. Do not restore home-derived console paths during session teardown: handler threads can outlive that teardown while other workers are still checking for leaks. Tests that spawn real console processes must also give the child a temporary `HOME`. A test that starts an in-process `ConsoleServer` must request the `console_handlers` fixture, so every request handler finishes before those paths are restored.
+
 Run the full suite before submitting a PR:
 
 ```bash

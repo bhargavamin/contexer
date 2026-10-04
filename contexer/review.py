@@ -70,7 +70,7 @@ def refusal_ack(entry: dict) -> str:
 
 def build_proposal(target: dict, content: str, subtype: str, session_id: str, now: str,
                    source: str = "ai", title: str = "", source_files=None,
-                   preserve_case: bool = False) -> dict:
+                   preserve_case: bool = False, applies_when: list[str] | None = None) -> dict:
     """A Suggested Update (pending revision) attached to a live decision: the detected new
     value, its confidence/evidence, and provenance. The live decision is NOT modified - this
     proposal waits for developer approval, at which point it is promoted to a new revision.
@@ -99,6 +99,10 @@ def build_proposal(target: dict, content: str, subtype: str, session_id: str, no
         "confidence_factors": factors,
     }
     proposal["title"] = revisions.normalize_title(title) or revisions.derive_title(normalized_content)
+    if applies_when is None:
+        applies_when = (revisions.current_revision(target) or target).get("applies_when")
+    if applies_when is not None:
+        proposal["applies_when"] = revisions.normalize_applies_when(applies_when)
     if source_files:
         proposal["source_files"] = source_files
     if preserve_case:

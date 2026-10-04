@@ -254,7 +254,12 @@ The local data directory is private to its owner (mode `0700`); existing group o
 
 Export current decisions with `contexer export --format md --out decisions/`, or use `--format adr` for one architecture decision record per decision. Exports redact secrets by default; `--include-retired` includes retired history and replacement links.
 
+When saving a decision, the agent can include concrete situations where it applies, such as “slow upstream reads.” These help later tasks find the rule even when the task uses different words from the decision. File-specific decisions remain discoverable through lookup pointers when their subject does not fit the current task.
+
+If a repository’s saved context becomes unreadable, captures and edits refuse to replace it. Preserve the file and recover it before retrying. Context display still degrades gracefully.
+
 When current decisions prescribe incompatible version formats, Contexer shows both together and asks you to resolve the conflict before an agent chooses a format.
 
 If `redact_secrets = false`, sharing always shows a warning and requires preview/confirmation, including when `skip_confirm` is enabled. Background sharing retries and automatic proposals pause until redaction is enabled again. Local capture remains verbatim.
+
 Large Claude sessions keep approved constraints first and summarize additional stored context with a lookup pointer, so a long rule list stays readable in the session.

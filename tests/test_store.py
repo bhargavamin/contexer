@@ -1799,13 +1799,15 @@ class TestCorruptionRecovery:
         result = store.get_context(tmp_repo)
         assert "No context stored" in result
 
-    def test_capture_after_corruption_rewrites_valid_store(self, tmp_repo):
-        self._corrupt(store._store_path(tmp_repo))
-        ok, _ = store.update_decision(
-            tmp_repo, "decided to use JWT instead of sessions — stateless auth", "sess-1")
-        assert ok
-        data = json.loads(store._store_path(tmp_repo).read_text())  # valid JSON again
-        assert len(data["entries"]) == 1
+    def test_capture_after_corruption_preserves_original(self, tmp_repo):
+        path = store._store_path(tmp_repo)
+        self._corrupt(path)
+        original = path.read_bytes()
+        with pytest.raises(ValueError, match="refusing write"):
+            store.update_decision(
+                tmp_repo, "decided to use JWT instead of sessions — stateless auth", "sess-1")
+        assert path.read_bytes() == original
+
 
 
 class TestSessionFromHookStdin:
@@ -1922,8 +1924,10 @@ class TestNonDictStoreRecovery:
         store._store_path(tmp_repo).write_text("[]", encoding="utf-8")
         # Any of these would raise TypeError/AttributeError on a list/None payload.
         assert store.get_context(tmp_repo) == "No context stored for this repository."
-        ok, _ = store.update_decision(tmp_repo, "use postgres over mysql for jsonb support", "s1")
-        assert ok is True
+        original = store._store_path(tmp_repo).read_bytes()
+        with pytest.raises(ValueError, match="refusing write"):
+            store.update_decision(tmp_repo, "use postgres over mysql for jsonb support", "s1")
+        assert store._store_path(tmp_repo).read_bytes() == original
 
     def test_entries_wrong_type_reads_as_empty(self, tmp_repo):
         store._store_path(tmp_repo).write_text('{"entries": "oops"}', encoding="utf-8")
@@ -1944,8 +1948,10 @@ class TestNonDictStoreRecovery:
             json.dumps({"repo_path": tmp_repo, "entries": ["oops"]}), encoding="utf-8")
 
         assert store.load(tmp_repo)["entries"] == []
-        ok, _ = store.update_decision(tmp_repo, "use postgres over mysql for jsonb support", "s1")
-        assert ok is True
+        original = store._store_path(tmp_repo).read_bytes()
+        with pytest.raises(ValueError, match="refusing write"):
+            store.update_decision(tmp_repo, "use postgres over mysql for jsonb support", "s1")
+        assert store._store_path(tmp_repo).read_bytes() == original
 
     def test_a_non_object_entry_reads_as_unreadable_not_empty(self, tmp_repo):
         store._store_path(tmp_repo).write_text(
@@ -5737,7 +5743,7 @@ class TestFileRoute:
         assert "[Contexer] Related stored decisions" not in result
         assert "Discount calculations" not in result
 
-    def test_file_hit_leads_and_bm25_fills_remaining_slots(self, tmp_repo):
+    def test_unrelated_file_anchor_is_named_after_task_match(self, tmp_repo):
         store.update_decision(tmp_repo,
             "JWT refresh tokens expire after fifteen minutes and live in httpOnly cookies",
             RV1_SESSION, "architecture")
@@ -5746,13 +5752,15 @@ class TestFileRoute:
             RV1_SESSION, "pattern")
         store.update_decision(tmp_repo,
             "Settings load from a TOML config file validated at startup before anything "
-            "else runs", RV1_SESSION, "convention", source_files=["contexer/config.py"])
+            "else runs", RV1_SESSION, "convention", source_files=["contexer/config.py"],
+            title="Settings load")
 
         result = store.get_context_for_prompt(
             tmp_repo, "why does contexer/config.py break the jwt refresh cookie flow?")
-        # File-route hit (config.py, anchored -> STRONG) renders BEFORE the BM25-ranked hit
-        # (jwt) — "ahead of BM25 scores", not just present somewhere in a merged/deduped set.
-        assert 0 <= result.find("Settings load") < result.find("JWT refresh tokens")
+        assert "JWT refresh tokens" in result
+        assert "Settings load" in result.split("not shown:", 1)[1]
+        assert "validated at startup" not in result
+
 
     def test_working_set_dedup_applies_to_anchor_hits(self, tmp_repo):
         store.update_decision(
@@ -5760,10 +5768,10 @@ class TestFileRoute:
             RV1_SESSION, "architecture", source_files=["guard_engine.py"])
         sid = "sess-file-ws"
         first = store.get_context_for_prompt(
-            tmp_repo, "fix the pairing bug in guard_engine.py", sid)
+            tmp_repo, "fix staged files pairing in guard_engine.py", sid)
         assert first.startswith("[Contexer: auto-fetched for this question]")
         second = store.get_context_for_prompt(
-            tmp_repo, "fix the pairing bug in guard_engine.py", sid)
+            tmp_repo, "fix staged files pairing in guard_engine.py", sid)
         assert second == ""   # already in the working set — no re-injection, no fallback
 
     def test_mention_pointer_not_working_set_deduped(self, tmp_repo):
@@ -5871,7 +5879,7 @@ class TestFileRoute:
             RV1_SESSION, "architecture", source_files=["guard_engine.py"])
         text, meta = store.get_context_for_prompt_with_meta(
             tmp_repo, "fix the bug in guard_engine.py")
-        assert meta["kind"] == "strong"
+        assert meta["kind"] == "pointer"
         assert meta["count"] == 1
 
     def test_meta_reflects_mention_hit(self, tmp_repo):

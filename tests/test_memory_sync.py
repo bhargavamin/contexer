@@ -278,3 +278,16 @@ class TestAdapterSync:
         monkeypatch.setenv("HOME", str(tmp_path))
         redirect_store_dir(monkeypatch, tmp_path / ".contexer")
         assert claude.sync_memory(str(tmp_path / "repo")) == 0
+
+
+def test_memory_import_is_skipped_while_the_tombstone_sidecar_is_unreadable(tmp_path, monkeypatch):
+    # A retired decision whose tombstone can't be read would otherwise come straight back from
+    # the memory tool at the next session start. The import waits for a readable sidecar.
+    redirect_store_dir(monkeypatch, tmp_path / ".contexer")
+    repo = str(tmp_path / "repo")
+    store._deleted_path(repo).write_text("{ not json")
+    fact = "Use uv for every dependency and script command in this project."
+    assert store.upsert_memory_batch(repo, [(fact, "s1", "convention", "k1")]) == 0
+    assert not any(fact in e.get("content", "") for e in store.load(repo)["entries"])
+    store._deleted_path(repo).write_text(json.dumps({"repo_path": repo, "entries": []}))
+    assert store.upsert_memory_batch(repo, [(fact, "s1", "convention", "k1")]) == 1

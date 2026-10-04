@@ -375,7 +375,7 @@ def propose_lifecycle(repo_path: str, entry_id: str, action: str, reason: str, *
         return {"ok": False, "proposal": None,
                 "message": "A lifecycle proposal needs a reason - it becomes permanent history."}
     with store.store_lock(store.repo_slug(repo_path)):
-        data = store.load(repo_path)
+        data = store.load_for_update(repo_path)
         entry = store.entry_by_id([e for e in data["entries"] if e.get("type") == "decision"],
                                   entry_id)
         if entry is None:
@@ -405,7 +405,7 @@ def dismiss_lifecycle(repo_path: str, entry_id: str) -> tuple[bool, str]:
     anchor-loss withdrawal) re-proposes on its next TTL cycle, which is the same semantics its
     `proposed_revision` dismissal had."""
     with store.store_lock(store.repo_slug(repo_path)):
-        data = store.load(repo_path)
+        data = store.load_for_update(repo_path)
         entry = store.entry_by_id([e for e in data["entries"] if e.get("type") == "decision"],
                                   entry_id)
         if entry is None:
@@ -438,7 +438,7 @@ def tombstone_entry(repo_path: str, entry_id: str, *, reason: str, replacement_i
     An unresolved `proposed_revision` is ARCHIVED onto the tombstone rather than dropped: it is
     unreviewed content nobody ever ruled on, and a retirement is not a ruling on it."""
     with store.store_lock(store.repo_slug(repo_path)):
-        data = store.load(repo_path)
+        data = store.load_for_update(repo_path)
         entry = store.entry_by_id([e for e in data["entries"] if e.get("type") == "decision"],
                                   entry_id)
         if entry is None:
@@ -550,7 +550,7 @@ def _restore_unlocked(repo_path: str, entry_id: str, reason: str = "",
         return False, f"Deleted decision {entry_id!r} not found.", None
     if entry.get("type") == "erasure":
         return False, "Erased content cannot be restored.", None
-    data = store.load(repo_path)
+    data = store.load_for_update(repo_path)
     # Full id, never the caller's prefix: this asks "is THIS entry already live".
     live = store.entry_by_id(data["entries"], entry["id"])
     if live is not None:
@@ -714,7 +714,7 @@ def _locate_inactive(repo_path: str, entry_id: str) -> tuple:
     dropped and the stamp popped, which is the same rule `_restore_unlocked` states for the
     same window and the reason that branch exists at all.
     """
-    data = store.load(repo_path)
+    data = store.load_for_update(repo_path)
     entry = store.entry_by_id([e for e in data["entries"] if e.get("type") == "decision"],
                               entry_id)
     if entry is not None:

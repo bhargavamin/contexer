@@ -34,8 +34,10 @@ REVISION_KEYS = {"version_number", "content", "title", "source", "created_at", "
 
 
 @pytest.fixture
-def console(tmp_path, monkeypatch):
-    """A console daemon on an ephemeral port over an isolated ~/.contexer. Never the real one."""
+def console(tmp_path, monkeypatch, console_handlers):
+    """A console daemon on an ephemeral port over an isolated ~/.contexer. Never the real one.
+
+    `console_handlers` waits out every request handler before these paths are restored."""
     home = tmp_path / ".contexer"
     home.mkdir()
     redirect_store_dir(monkeypatch, home)

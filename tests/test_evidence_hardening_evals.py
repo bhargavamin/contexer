@@ -746,7 +746,7 @@ def test_reconciliation_survives_a_corrupt_live_store_and_tombstone_sidecar(tmp_
     `.gap` and the held manifest are already covered (`test_spool.py`, scenario 17). These two
     are the sidecars reconciliation reads that nothing pinned: the live store it classifies
     against, and the tombstone sidecar the reconsideration lane looks an inactive decision up
-    in. Both read fail-soft as empty, so the pass must complete without losing the evidence -
+    in. The strict writer refuses the pass and holds the evidence for recovery -
     an unreadable store is not a licence to delete a pending event.
     """
     _spool(tmp_repo, [_event("corrupt-directive", "user_directive",
@@ -757,11 +757,12 @@ def test_reconciliation_survives_a_corrupt_live_store_and_tombstone_sidecar(tmp_
 
     receipt = reconcile.reconcile_session(tmp_repo)
 
-    assert receipt["incomplete"] is False
-    assert receipt["proposed"] == 1
+    assert receipt["incomplete"] is True
+    assert receipt["proposed"] == 0
     assert (spool.evidence_diagnostics(tmp_repo)["gap"] or {}).get("drops", 0) == 0
-    entries = store.load(tmp_repo)["entries"]
-    assert [e["status"] for e in entries] == ["pending_approval"]
+    assert store._store_path(tmp_repo).read_text() == "{ not json"
+    assert store._deleted_path(tmp_repo).read_text() == "{ also not json"
+    assert len(spool.list_pending_evidence(tmp_repo)) == 1
 
 
 def test_an_armed_old_revision_judges_the_approved_content_not_the_pending_one(tmp_repo):
@@ -1334,3 +1335,34 @@ def _markdown(report: dict) -> str:
     lines += ["", "Asserted by:", ""]
     lines += [f"- `{name}`" for name in teams["asserted_by"]] + [""]
     return "\n".join(lines)
+
+
+def test_corruption_never_dismisses_existing_review_evidence(tmp_repo):
+    _spool(tmp_repo, [_event("held-before-corrupt", "user_directive", "never commit a generated file")])
+    receipt = reconcile.reconcile_session(tmp_repo)
+    assert receipt["proposed"] == 1
+    before = {p: p.read_bytes() for p in store.store_dir().rglob("*") if p.is_file() and not p.name.endswith(".lock")}
+    damaged = b'{"entries": ['
+    store._store_path(tmp_repo).write_bytes(damaged)
+    receipt = reconcile.reconcile_session(tmp_repo)
+    assert receipt["incomplete"]
+    assert spool.evidence_diagnostics(tmp_repo)["held_events"] == 1
+    for p, raw in before.items():
+        if p != store._store_path(tmp_repo):
+            assert p.read_bytes() == raw
+
+
+@pytest.mark.parametrize("damaged", ["live", "tombstones"])
+def test_orphan_sweep_never_dismisses_holds_over_an_unreadable_store(tmp_repo, damaged):
+    """Session-start maintenance judges holds against the store; an unreadable store or
+    tombstone sidecar must not read as "every decision is gone" and dismiss held evidence."""
+    _spool(tmp_repo, [_event("held-then-corrupt", "user_directive", "never commit a generated file")])
+    assert reconcile.reconcile_session(tmp_repo)["proposed"] == 1
+    if damaged == "live":
+        store._store_path(tmp_repo).write_bytes(b'{"entries": [')
+    else:
+        # Only the (unreadable) tombstones could still vouch for the decision.
+        store.save(tmp_repo, {"repo_path": tmp_repo, "entries": []})
+        store._deleted_path(tmp_repo).write_bytes(b'{"entries": [')
+    spool.maintain_spool(tmp_repo, force=True)
+    assert spool.evidence_diagnostics(tmp_repo)["held_events"] == 1
