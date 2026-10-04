@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import hashlib
 import json
 import threading
 import time
@@ -728,6 +729,21 @@ def _dec_push_kwargs(dec: dict, key) -> dict:
         revision_id=dec.get("revision_id"), lifecycle=dec.get("lifecycle"))
 
 
+def _settle_queued_base(decision_ids: set) -> int:
+    """Settle older base retries; report local failures without denying remote success."""
+    if not decision_ids:
+        return 0
+    try:
+        rows = _load_outbox()
+        kept = [row for row in rows if row.get("decision_id") not in decision_ids
+                or row.get("stage") == _LIFECYCLE_PENDING]
+        if kept != rows:
+            _save_outbox(kept)
+        return 0
+    except Exception:
+        return len(decision_ids)
+
+
 def _finish_share(dec: dict, key, server_id,
                   endpoint: str | None = None) -> share_status.ShareStatus:
     """Turn one push outcome into a :class:`share_status.ShareStatus` (share + share_async).
@@ -744,9 +760,10 @@ def _finish_share(dec: dict, key, server_id,
             # must not claim a retry that was never recorded, hence NOT_QUEUED, not QUEUED.
             return share_status.ShareStatus(share_status.NOT_QUEUED, lost=1, total=1)
         return share_status.ShareStatus(share_status.QUEUED, queued=1, total=1)
+    cleanup_failed = _settle_queued_base({dec.get("id")})
     _mark_shared([dec.get("id")], endpoint)
     return share_status.ShareStatus(
-        share_status.SYNCED, sent=1, total=1, server_id=str(server_id))
+        share_status.SYNCED, sent=1, total=1, server_id=str(server_id), retry_cleanup_failed=cleanup_failed)
 
 
 def _finish_share_lifecycle(remote, dec: dict, key) -> dict:
@@ -764,19 +781,38 @@ def _finish_share_lifecycle(remote, dec: dict, key) -> dict:
 # (_apush_batch) forms mirror each other line-for-line except the awaited push, and share every
 # outbox/status helper below so no logic drifts between them.
 
-def _resolve_ids(repo_path: str, decision_ids: list) -> tuple[list[dict], list]:
+def _resolve_ids(repo_path: str, decision_ids: list, *, redact_on: bool | None = None) -> tuple[list[dict], list]:
     """Resolve a multi-pick to (projections, missing_ids). An unknown id is collected in `missing`
     so it can be REPORTED rather than silently dropped."""
     projs: list[dict] = []
     missing: list = []
     for did in decision_ids:
-        proj = store.get_shareable(repo_path, str(did))
+        proj = (store.get_shareable(repo_path, str(did)) if redact_on is None
+                else store.get_shareable(repo_path, str(did), redact_on=redact_on))
         if proj is None:
             missing.append(did)
         else:
             projs.append(proj)
     return projs, missing
 
+
+
+def _selection_digest(projections: list, missing: list, key, profile: Profile) -> str:
+    # Legacy render loads synthesize revision UUIDs; bind the displayed content and metadata
+    # without persisting a migration from a read-only preview. Send the checked snapshot.
+    displayed = [{k: v for k, v in decision.items() if k != "revision_id"} for decision in projections]
+    from contexer import auth
+    payload = {"decisions": displayed, "missing": missing, "repo": key,
+               "endpoint": profile.endpoint, "mode": profile.mode, "redact_secrets": profile.redact_secrets,
+               "credentials": auth.confirmation_binding(profile)}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def selection_digest(repo_path: str, decision_ids: list, *, profile: Profile) -> str:
+    """Bind console confirmation to previewed content, metadata and destination."""
+    projections, missing = _resolve_ids(repo_path, decision_ids, redact_on=profile.redact_secrets)
+    key = canonical_repo_key(store.run_git(repo_path, "remote", "get-url", "origin"))
+    return _selection_digest(projections, missing, key, profile)
 
 def _requeue_skipped(chunk: list[dict], key, skipped_ids: list) -> tuple[int, int]:
     """Re-queue the capacity-skipped rows of a chunk; return (requeued, lost). A failed _enqueue
@@ -812,12 +848,14 @@ class _BatchCounts:
     lost: int = 0
     lifecycle_pending: int = 0
     lifecycle_lost: int = 0
+    retry_cleanup_failed: int = 0
 
     def status(self, outcome: str, total: int, **extra) -> share_status.ShareStatus:
         return share_status.ShareStatus(
             outcome, sent=self.sent, at_capacity=self.at_capacity, invalid=self.invalid,
             contested=self.contested, lost=self.lost,
             lifecycle_pending=self.lifecycle_pending, lifecycle_lost=self.lifecycle_lost,
+            retry_cleanup_failed=self.retry_cleanup_failed,
             total=total, **extra)
 
 
@@ -963,12 +1001,15 @@ def _drain_mark(chunk: list[dict], res: tuple[list[str], list[dict]], sent_ids: 
     return len(chunk) - len(skipped)
 
 
-def _mark_batch_saved(chunk: list[dict], skipped: list[dict], endpoint: str | None) -> None:
+def _mark_batch_saved(chunk: list[dict], skipped: list[dict], endpoint: str | None) -> int:
     """Mark only the chunk rows the server actually SAVED - i.e. NOT present in `skipped` at
     all (transient capacity skip or permanent invalid alike are excluded; a re-queued capacity
     skip may still sync later, but it hasn't yet, so it must not show as shared)."""
     skipped_ids = {s.get("decision_id") for s in skipped}
-    _mark_shared([d["id"] for d in chunk if d["id"] not in skipped_ids], endpoint)
+    saved_ids = {d["id"] for d in chunk if d["id"] not in skipped_ids}
+    cleanup_failed = _settle_queued_base(saved_ids)
+    _mark_shared(list(saved_ids), endpoint)
+    return cleanup_failed
 
 
 def _push_batch(remote: RemoteStore, decs: list[dict], key,
@@ -985,7 +1026,7 @@ def _push_batch(remote: RemoteStore, decs: list[dict], key,
         if res is None:
             return _queue_rest_status(decs, start, key, counts, total)
         _saved, skipped = res
-        _mark_batch_saved(chunk, skipped, endpoint)
+        counts.retry_cleanup_failed += _mark_batch_saved(chunk, skipped, endpoint)
         counts.sent += len(chunk) - len(skipped)
         # The base rows above synced; any lifecycle delta the server refused stays pending here.
         lifecycle_pending, dropped_lifecycle = _queue_blocked_lifecycle(
@@ -1016,7 +1057,7 @@ async def _apush_batch(remote: RemoteStore, decs: list[dict], key,
         if res is None:
             return _queue_rest_status(decs, start, key, counts, total)
         _saved, skipped = res
-        _mark_batch_saved(chunk, skipped, endpoint)
+        counts.retry_cleanup_failed += _mark_batch_saved(chunk, skipped, endpoint)
         counts.sent += len(chunk) - len(skipped)
         # The base rows above synced; any lifecycle delta the server refused stays pending here.
         lifecycle_pending, dropped_lifecycle = _queue_blocked_lifecycle(
@@ -1057,6 +1098,8 @@ def _drain_outbox_unlocked(profile: Profile | None = None) -> int:
     if not all_entries:
         return 0
     profile = profile or load_profile()
+    if not profile.redact_secrets:
+        return 0
     remote = RemoteStore.from_profile(profile)
     if remote is None:
         return 0
@@ -1090,6 +1133,8 @@ def _drain_outbox_unlocked(profile: Profile | None = None) -> int:
 
 def _drain_reconciliation_outbox_unlocked(profile: Profile) -> int:
     """Retry confirmed atomic writes verbatim; stale heads become attention, never retries."""
+    if not profile.redact_secrets:
+        return 0
     entries, error = _read_reconcile_outbox()
     if error is not None:
         return 0
@@ -1172,6 +1217,8 @@ async def _adrain_outbox_unlocked(profile: Profile | None = None) -> int:
     if not all_entries:
         return 0
     profile = profile or load_profile()
+    if not profile.redact_secrets:
+        return 0
     remote = RemoteStore.from_profile(profile)
     if remote is None:
         return 0
@@ -1214,7 +1261,9 @@ def _payload(dec: dict, key) -> dict:
 
 def share_all(repo_path: str, *, profile: Profile | None = None) -> share_status.ShareStatus:
     with outbox_lock():
-        return _share_all_unlocked(repo_path, profile=profile)
+        profile = profile or load_profile()
+        return replace(_share_all_unlocked(repo_path, profile=profile),
+                       redaction_disabled=not profile.redact_secrets)
 
 
 def _share_all_unlocked(repo_path: str, *,
@@ -1241,7 +1290,9 @@ def _share_all_unlocked(repo_path: str, *,
 
 def share_global(*, profile: Profile | None = None) -> share_status.ShareStatus:
     with outbox_lock():
-        return _share_global_unlocked(profile=profile)
+        profile = profile or load_profile()
+        return replace(_share_global_unlocked(profile=profile),
+                       redaction_disabled=not profile.redact_secrets)
 
 
 def _share_global_unlocked(*,
@@ -1276,7 +1327,9 @@ def _share_global_unlocked(*,
 def share(repo_path: str, decision_id: str = "", *,
           profile: Profile | None = None) -> share_status.ShareStatus:
     with outbox_lock():
-        return _share_unlocked(repo_path, decision_id, profile=profile)
+        profile = profile or load_profile()
+        return replace(_share_unlocked(repo_path, decision_id, profile=profile),
+                       redaction_disabled=not profile.redact_secrets)
 
 
 def _share_unlocked(repo_path: str, decision_id: str = "", *,
@@ -1308,9 +1361,11 @@ def _share_unlocked(repo_path: str, decision_id: str = "", *,
 
 
 def share_ids(repo_path: str, decision_ids: list, *,
-              profile: Profile | None = None) -> share_status.ShareStatus:
+              profile: Profile | None = None, expected_digest: str | None = None) -> share_status.ShareStatus:
     with outbox_lock():
-        return _share_ids_unlocked(repo_path, decision_ids, profile=profile)
+        profile = profile or load_profile()
+        return replace(_share_ids_unlocked(repo_path, decision_ids, profile=profile, expected_digest=expected_digest),
+                       redaction_disabled=not profile.redact_secrets)
 
 
 def reconcile(repo_path: str, decision_id: str, team: str = "", *,
@@ -1320,9 +1375,10 @@ def reconcile(repo_path: str, decision_id: str, team: str = "", *,
     The CLI calls :func:`prepare_reconciliation` itself so it can show the authoritative server
     preview before asking. This convenience entry point remains useful to API callers and tests.
     """
+    profile = profile or load_profile()
     plan, why = prepare_reconciliation(repo_path, decision_id, team, profile=profile)
     if plan is None:
-        return why
+        return replace(why, redaction_disabled=not profile.redact_secrets)
     return submit_reconciliation(plan, profile=profile)
 
 
@@ -1571,6 +1627,13 @@ def submit_reconciliation(plan: ReconciliationPlan, *,
                           profile: Profile | None = None) -> share_status.ReconcileStatus:
     """Submit a previously previewed plan. Only confirmed atomic operations may be queued."""
     profile = profile or load_profile()
+    return replace(_submit_reconciliation(plan, profile=profile),
+                   redaction_disabled=not profile.redact_secrets)
+
+
+def _submit_reconciliation(plan: ReconciliationPlan, *,
+                           profile: Profile | None = None) -> share_status.ReconcileStatus:
+    profile = profile or load_profile()
     dec, target = plan.decision, plan.target
     if plan.atomic:
         operation = _reconciliation_operation(plan)
@@ -1618,7 +1681,7 @@ def submit_reconciliation(plan: ReconciliationPlan, *,
 
 
 def _share_ids_unlocked(repo_path: str, decision_ids: list, *,
-                        profile: Profile | None = None) -> share_status.ShareStatus:
+                        profile: Profile | None = None, expected_digest: str | None = None) -> share_status.ShareStatus:
     """Share a selection of decisions (a multi-pick) in ONE batched call, returning a combined
     status. An empty list shares the most recent (delegates to share('')). Outbox + local-first
     guarantees are preserved (a failed chunk is queued); unknown/typo'd ids are REPORTED, not
@@ -1630,14 +1693,24 @@ def _share_ids_unlocked(repo_path: str, decision_ids: list, *,
         _drain_outbox_unlocked(profile)  # queued shares go out first, so ordering is preserved
     except Exception:
         pass
-    projs, missing = _resolve_ids(repo_path, decision_ids)
+    if expected_digest is None:
+        projs, missing = _resolve_ids(repo_path, decision_ids)
+    else:
+        projs, missing = _resolve_ids(repo_path, decision_ids, redact_on=profile.redact_secrets)
+        key = canonical_repo_key(store.run_git(repo_path, "remote", "get-url", "origin"))
+        if _selection_digest(projs, missing, key, profile) != expected_digest:
+            raise ValueError("Share selection changed; review a fresh preview before sending")
     if not projs:
         return share_status.ShareStatus(
             share_status.NO_MATCH, unknown_ids=tuple(str(m) for m in missing))
-    remote = RemoteStore.from_profile(profile)
+    remote = (RemoteStore.from_profile(profile) if expected_digest is None
+              else RemoteStore.from_profile(profile, reactive_refresh=False))
     if remote is None:
         return share_status.ShareStatus(share_status.NOT_TEAM_MODE)
-    key = canonical_repo_key(store.run_git(repo_path, "remote", "get-url", "origin"))
+    if expected_digest is not None and _selection_digest(projs, missing, key, profile) != expected_digest:
+        raise ValueError("Share credentials changed; review a fresh preview before sending")
+    if expected_digest is None:
+        key = canonical_repo_key(store.run_git(repo_path, "remote", "get-url", "origin"))
     return share_status.with_unknown(
         _push_batch(remote, projs, key, profile.endpoint), missing)
 
@@ -1651,7 +1724,9 @@ def _share_ids_unlocked(repo_path: str, decision_ids: list, *,
 async def share_async(repo_path: str, decision_id: str = "", *,
                       profile: Profile | None = None) -> share_status.ShareStatus:
     async with async_outbox_lock():
-        return await _share_async_unlocked(repo_path, decision_id, profile=profile)
+        profile = profile or load_profile()
+        status = await _share_async_unlocked(repo_path, decision_id, profile=profile)
+        return replace(status, redaction_disabled=not profile.redact_secrets)
 
 
 async def _share_async_unlocked(repo_path: str, decision_id: str = "", *,
@@ -1689,7 +1764,9 @@ async def _share_async_unlocked(repo_path: str, decision_id: str = "", *,
 async def share_ids_async(repo_path: str, decision_ids: list, *,
                           profile: Profile | None = None) -> share_status.ShareStatus:
     async with async_outbox_lock():
-        return await _share_ids_async_unlocked(repo_path, decision_ids, profile=profile)
+        profile = profile or load_profile()
+        status = await _share_ids_async_unlocked(repo_path, decision_ids, profile=profile)
+        return replace(status, redaction_disabled=not profile.redact_secrets)
 
 
 async def _share_ids_async_unlocked(repo_path: str, decision_ids: list, *,
@@ -1724,12 +1801,48 @@ async def _share_ids_async_unlocked(repo_path: str, decision_ids: list, *,
 
 async def share_decision_flow(repo_path: str, decision_id: str, *, confirm: bool,
                               timeout: float, profile: Profile | None = None) -> str:
+    profile = profile or load_profile()
+    result = await _share_decision_flow(repo_path, decision_id, confirm=confirm,
+                                        timeout=timeout, profile=profile)
+    if not profile.redact_secrets and "redaction is OFF" not in result:
+        result = share_status._REDACTION_DISABLED_WARNING + "\n" + result
+    return result
+
+
+# Previews shown while redaction is off, by (repo, decision id): digest of the exact preview text
+# and when it was shown. ponytail: process-local, so a server restart needs a fresh preview.
+_UNREDACTED_PREVIEWS: dict = {}
+_UNREDACTED_PREVIEW_TTL = 600.0
+
+
+def _unredacted_preview_matches(repo_path: str, decision_id: str, digest: str) -> bool:
+    """Whether this exact preview was shown for this decision within the TTL. Single use."""
+    seen = _UNREDACTED_PREVIEWS.pop((repo_path, decision_id), None)
+    return bool(seen) and seen[0] == digest and time.monotonic() - seen[1] < _UNREDACTED_PREVIEW_TTL
+
+
+async def _share_decision_flow(repo_path: str, decision_id: str, *, confirm: bool,
+                               timeout: float, profile: Profile | None = None) -> str:
     """Full server.share_decision behavior: preview gate, bounded awaited push, and the
     timeout -> cancel -> best-effort retry-queue fallback. `timeout` and its rationale stay
     owned by the caller (the MCP tool's own round-trip backstop); this is the reusable
     mechanic."""
     profile = profile or load_profile()
-    if not confirm and not profile.skip_confirm and RemoteStore.from_profile(profile) is not None:
+    remote = RemoteStore.from_profile(profile) is not None
+    if remote and not profile.redact_secrets:
+        # With redaction off, confirm=true sends text verbatim, so it is honoured only right
+        # after the developer saw this exact preview (content and destination); a first-call
+        # confirm, or one after the decision changed, gets the preview instead.
+        preview = store.format_share_preview(repo_path, decision_id, profile=profile)
+        digest = hashlib.sha256(preview.encode("utf-8")).hexdigest()
+        if not (confirm and _unredacted_preview_matches(repo_path, decision_id, digest)):
+            _UNREDACTED_PREVIEWS[(repo_path, decision_id)] = (digest, time.monotonic())
+            if not confirm:
+                return preview
+            return ("Not sent - redaction is OFF, so confirm=true is accepted only right after "
+                    "this exact preview. Show it to the developer, then call again with "
+                    "confirm=true.\n" + preview)
+    elif not confirm and not profile.skip_confirm and remote:
         return store.format_share_preview(repo_path, decision_id, profile=profile)
     ids = [i.strip() for i in decision_id.split(",") if i.strip()]
     try:
