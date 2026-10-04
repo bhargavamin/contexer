@@ -18,6 +18,18 @@ def test_budget_keeps_constraints_before_large_title_list():
     assert dropped
 
 
+def test_constraint_outranks_earlier_titles_that_would_fill_the_budget():
+    """Rendered after the titles and too large for the slack they leave, so only priority
+    (not leftover space) can keep it."""
+    context = "## Project rules - apply to ALL tasks in this repo:\n"
+    context += "\n".join(f"- [convention] Convention {i} " + "x" * 120 + f" (id={i:08x})" for i in range(150))
+    constraint = "- [constraint] Keep secrets out of logs (id=aaaaaaaa)\n    " + ("Never log tokens. " * 150).strip()
+    result, dropped = claude.budget_session_context(context + "\n" + constraint)
+    assert constraint in result
+    assert "aaaaaaaa" not in dropped
+    assert len(json.dumps(result).encode()) <= claude.SESSION_CONTEXT_BYTES
+
+
 def test_small_context_is_unchanged():
     assert claude.budget_session_context("Small context") == ("Small context", set())
 
