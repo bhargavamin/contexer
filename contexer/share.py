@@ -1809,6 +1809,18 @@ async def share_decision_flow(repo_path: str, decision_id: str, *, confirm: bool
     return result
 
 
+# Previews shown while redaction is off, by (repo, decision id): digest of the exact preview text
+# and when it was shown. ponytail: process-local, so a server restart needs a fresh preview.
+_UNREDACTED_PREVIEWS: dict = {}
+_UNREDACTED_PREVIEW_TTL = 600.0
+
+
+def _unredacted_preview_matches(repo_path: str, decision_id: str, digest: str) -> bool:
+    """Whether this exact preview was shown for this decision within the TTL. Single use."""
+    seen = _UNREDACTED_PREVIEWS.pop((repo_path, decision_id), None)
+    return bool(seen) and seen[0] == digest and time.monotonic() - seen[1] < _UNREDACTED_PREVIEW_TTL
+
+
 async def _share_decision_flow(repo_path: str, decision_id: str, *, confirm: bool,
                                timeout: float, profile: Profile | None = None) -> str:
     """Full server.share_decision behavior: preview gate, bounded awaited push, and the
@@ -1816,7 +1828,21 @@ async def _share_decision_flow(repo_path: str, decision_id: str, *, confirm: boo
     owned by the caller (the MCP tool's own round-trip backstop); this is the reusable
     mechanic."""
     profile = profile or load_profile()
-    if not confirm and (not profile.skip_confirm or not profile.redact_secrets) and RemoteStore.from_profile(profile) is not None:
+    remote = RemoteStore.from_profile(profile) is not None
+    if remote and not profile.redact_secrets:
+        # With redaction off, confirm=true sends text verbatim, so it is honoured only right
+        # after the developer saw this exact preview (content and destination); a first-call
+        # confirm, or one after the decision changed, gets the preview instead.
+        preview = store.format_share_preview(repo_path, decision_id, profile=profile)
+        digest = hashlib.sha256(preview.encode("utf-8")).hexdigest()
+        if not (confirm and _unredacted_preview_matches(repo_path, decision_id, digest)):
+            _UNREDACTED_PREVIEWS[(repo_path, decision_id)] = (digest, time.monotonic())
+            if not confirm:
+                return preview
+            return ("Not sent - redaction is OFF, so confirm=true is accepted only right after "
+                    "this exact preview. Show it to the developer, then call again with "
+                    "confirm=true.\n" + preview)
+    elif not confirm and not profile.skip_confirm and remote:
         return store.format_share_preview(repo_path, decision_id, profile=profile)
     ids = [i.strip() for i in decision_id.split(",") if i.strip()]
     try:

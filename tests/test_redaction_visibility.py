@@ -259,3 +259,40 @@ def test_oauth_account_change_invalidates_preview_without_network(tmp_repo, monk
     creds["access_token"] = "account-two"
     assert auth.confirmation_binding(profile) != first
     assert "account-one" not in first
+
+
+def test_mcp_first_call_confirm_with_redaction_off_previews_instead_of_sending(tmp_repo, monkeypatch):
+    # confirm=true on the first call used to send verbatim text the developer never saw.
+    share._UNREDACTED_PREVIEWS.clear()
+    store.update_decision(tmp_repo, "Use PostgreSQL for the database", "s", "convention")
+    fake = _afake(monkeypatch)
+    result = asyncio.run(share.share_decision_flow(tmp_repo, "", confirm=True, profile=OFF, timeout=10))
+    assert result.count("Not sent - redaction is OFF") == 1 and "redaction is OFF" in result
+    assert not fake.calls and not fake.batches
+    # The preview just shown is now confirmable once.
+    asyncio.run(share.share_decision_flow(tmp_repo, "", confirm=True, profile=OFF, timeout=10))
+    assert len(fake.calls) == 1
+
+
+def test_mcp_unredacted_confirm_is_bound_to_the_previewed_content(tmp_repo, monkeypatch):
+    share._UNREDACTED_PREVIEWS.clear()
+    entry = store.update_decision(tmp_repo, "Use PostgreSQL for the database", "s", "convention")
+    fake = _afake(monkeypatch)
+    asyncio.run(share.share_decision_flow(tmp_repo, "", confirm=False, profile=OFF, timeout=10))
+    # The decision changes after the preview: the confirm no longer matches what was shown.
+    decision_id = store.load(tmp_repo)["entries"][-1]["id"]
+    ok, _msg, _e = store.edit_decision(tmp_repo, decision_id,
+                                       content="Use PostgreSQL; the password is hunter2")
+    assert ok
+    result = asyncio.run(share.share_decision_flow(tmp_repo, "", confirm=True, profile=OFF, timeout=10))
+    assert "Not sent - redaction is OFF" in result and "hunter2" in result and not fake.calls
+    assert entry is not None
+
+
+def test_share_picker_warns_when_redaction_is_off(tmp_repo, monkeypatch, capsys):
+    store.update_decision(tmp_repo, "Use PostgreSQL for the database", "s", "convention")
+    monkeypatch.setattr("builtins.input", lambda *_a: "q")
+    assert cli._pick_shareable(tmp_repo, OFF) == []
+    assert share_status._REDACTION_DISABLED_WARNING in capsys.readouterr().out
+    cli._pick_shareable(tmp_repo, replace(OFF, redact_secrets=True))
+    assert share_status._REDACTION_DISABLED_WARNING not in capsys.readouterr().out
