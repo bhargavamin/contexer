@@ -1305,7 +1305,7 @@ def share_cmd(rest: list | None = None) -> None:
     # Actual push paths reload the profile under share.py's outbox lock so account switches cannot
     # interleave between this preview decision and the outbound write.
     profile = config.load_profile()
-    bypass = yes or profile.skip_confirm
+    bypass = (yes or profile.skip_confirm) and profile.redact_secrets
 
     if globals_:
         if not bypass:
@@ -1569,12 +1569,23 @@ def reconcile_cmd(rest: list | None = None) -> None:
         print("No git repo detected - run `contexer reconcile` inside a repository.", file=sys.stderr)
         sys.exit(1)
     profile = config.load_profile()
+    if not profile.redact_secrets:
+        print(store.format_share_preview(repo, ids[0], profile=profile, purpose="reconcile"))
+        try:
+            answer = input("Send this unredacted decision for server preview? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        if answer not in ("y", "yes"):
+            print("Cancelled - nothing was sent.")
+            return
     plan, why = share.prepare_reconciliation(repo, ids[0], team, profile=profile)
     if plan is None:
         print(share_status.describe(why))
         return
     print(share.format_reconciliation_preview(plan))
-    if not (yes or profile.skip_confirm):
+    if not profile.redact_secrets:
+        print(share_status._REDACTION_DISABLED_WARNING)
+    if not ((yes or profile.skip_confirm) and profile.redact_secrets):
         try:
             answer = input("Submit for lead review? [y/N] ").strip().lower()
         except (EOFError, KeyboardInterrupt):
@@ -1645,6 +1656,9 @@ def _pick_shareable(repo: str, profile) -> list:
     items = sorted(items, key=lambda it: (it.get("id") or "") in shared)
     print("\nShareable decisions - pushing sends them to your PERSONAL cloud.")
     print(f"{store._SHARE_SECRETS_HINT}:\n")
+    if not profile.redact_secrets:
+        from contexer import share_status
+        print(share_status._REDACTION_DISABLED_WARNING)
 
     page = store._SHARE_PAGE
     shown_from = 0
@@ -1722,6 +1736,9 @@ def _preview_and_ask(items: list, header: str) -> bool:
     from contexer import store
 
     print(f"\n{header} {store._SHARE_SECRETS_HINT}:\n")
+    if not store._redaction_enabled():
+        from contexer import share_status
+        print(share_status._REDACTION_DISABLED_WARNING)
     for it in items[:10]:
         print(store._share_item_block(it))
     if len(items) > 10:

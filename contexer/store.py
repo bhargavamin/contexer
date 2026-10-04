@@ -4706,7 +4706,7 @@ def _share_preview_token(value: str) -> str:
     return "".join(rendered)
 
 
-def format_share_preview(repo_path: str, decision_id: str = "", profile=None) -> str:
+def format_share_preview(repo_path: str, decision_id: str = "", profile=None, *, purpose: str = "share") -> str:
     """Dry-run preview of what a personal-cloud push would send - a pure local read, NO network.
     Safe-by-default gate for share_decision: pushing is an OUTWARD action, so the developer must
     see exactly what would be sent, and to where, before confirming. `decision_id` may be a single
@@ -4727,8 +4727,12 @@ def format_share_preview(repo_path: str, decision_id: str = "", profile=None) ->
         return "Nothing to share - no matching decision found."
     endpoint = prof.endpoint or default_endpoint()
     ids_csv = ",".join((p.get("id") or "")[:8] for p in projs)
-    lines = [f"Ready to push {_pl(len(projs), 'decision')} to your PERSONAL cloud ({endpoint}). "
+    destination = "your PERSONAL cloud" if purpose == "share" else "server reconciliation preview"
+    lines = [f"Ready to push {_pl(len(projs), 'decision')} to {destination} ({endpoint}). "
              f"{_SHARE_SECRETS_HINT}:\n"]
+    if not prof.redact_secrets:
+        from contexer import share_status
+        lines.append(share_status._REDACTION_DISABLED_WARNING)
     for p in projs:
         lines.append(_share_item_line(p))
         session_id = p.get("session_id")
@@ -4745,14 +4749,15 @@ def format_share_preview(repo_path: str, decision_id: str = "", profile=None) ->
     redacted = sum(p.get("redacted", 0) for p in projs)
     if redacted:
         lines.append(f"\n  ({_pl(redacted, 'secret')} redacted before sending)")
-    lines += [
-        "",
-        "Confirm with the developer before sending.",
-        f'  • Proceed:  share_decision(decision_id="{ids_csv}", confirm=true)',
-        "  • Cancel:   do nothing",
-        '  • Stop asking: set `skip_confirm = true` in ~/.contexer/config.toml '
-        '(or the developer says "always share without asking").',
-    ]
+    lines += ["", "Confirm with the developer before sending."]
+    if purpose == "share":
+        lines += [f'  • Proceed:  share_decision(decision_id="{ids_csv}", confirm=true)',
+                  "  • Cancel:   do nothing"]
+        if prof.redact_secrets:
+            lines.append('  • Stop asking: set `skip_confirm = true` in ~/.contexer/config.toml '
+                         '(or the developer says "always share without asking").')
+        else:
+            lines.append("Confirmation is mandatory while redaction is OFF.")
     return "\n".join(lines)
 
 
