@@ -250,3 +250,5 @@ MIT. See [LICENSE](LICENSE) for full terms.
 The Contexer name and logo are trademarks of Contexer.ai. The MIT license does not grant rights to use the Contexer name, logo, or brand in any way that implies official affiliation.
 
 The local data directory is private to its owner (mode `0700`); existing group or world permissions are removed on next use.
+
+Large Claude sessions keep approved constraints first and summarize additional stored context with a lookup pointer, so a long rule list stays readable in the session.
