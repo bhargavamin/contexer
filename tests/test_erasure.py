@@ -237,3 +237,23 @@ def test_missing_key_cannot_be_recreated_by_erasing_another_repository(tmp_repo,
         lifecycle.erasure_key(create=True)
     assert not store.sidecar_path("erasure_key").exists()
     assert store._store_path(other).read_bytes() == before
+
+
+def test_held_evidence_paraphrasing_the_decision_is_erased(tmp_repo):
+    """Held events are linked to the decision only through candidate metadata; a paraphrase
+    shares no exact fragment with the stored text, so scrubbing alone leaves it behind."""
+    from contexer import reconcile, spool
+    from tests.test_evidence_hardening_evals import _event, _spool
+    _spool(tmp_repo, [
+        _event("e1", "user_directive", "never deploy on fridays, Zorbalina is oncall", session="a"),
+        _event("e2", "user_directive", "Never deploy on Fridays because Zorbalina is oncall then", session="b"),
+    ])
+    assert reconcile.reconcile_session(tmp_repo)["proposed"] == 1
+    assert spool.held_candidates(tmp_repo)
+    did = store.load(tmp_repo)["entries"][0]["id"]
+    ok, message = lifecycle.erase_decision(tmp_repo, did, confirm=True, actor="cli")
+    assert ok, message
+    assert not spool.held_candidates(tmp_repo)
+    for path in store.store_dir().rglob("*"):
+        if path.is_file():
+            assert b"Zorbalina" not in path.read_bytes(), path.name

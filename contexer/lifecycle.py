@@ -43,6 +43,7 @@ import contextlib
 import hashlib
 import hmac
 import secrets
+import shutil
 import fnmatch
 import json
 import re
@@ -159,6 +160,14 @@ def erase_decision(repo_path: str, entry_id: str, *, confirm: bool = False,
                     if shared["id"] == decision_id:
                         return False, "This decision was shared. Erase the team copy there too before local erasure."
             matcher_key = erasure_key(create=True)
+            # Held evidence is linked to its decision by candidate metadata, not by any id field
+            # inside the raw events, and its summaries can paraphrase the decision. Remove the
+            # whole held candidate rather than relying on exact-fragment scrubbing.
+            from contexer import spool
+            for candidate_id, meta in spool.held_candidates(repo_path).items():
+                if decision_id in {meta.get(key) for key in
+                                   ("entry_id", "target_decision_id", "replacement_decision_id")}:
+                    shutil.rmtree(spool._held_dir(repo_path, candidate_id))
             selected_paths = []
             for path in store.store_dir().rglob("*"):
                 if not path.is_file() or path.is_symlink() or path.name.endswith(".lock"):
