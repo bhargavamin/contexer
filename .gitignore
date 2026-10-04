@@ -41,6 +41,9 @@ package-lock.json
 node_modules/
 
 .coverage
+# Per-worker data files under xdist; unignored, they change the checkout's untracked set
+# mid-run and break qualification tests on another worker (#386).
+.coverage.*
 # Planning artifacts — never commit specs/plans (kept locally only)
 docs/superpowers/
 docs/internal/

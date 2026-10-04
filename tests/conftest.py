@@ -1,12 +1,17 @@
 """Shared pytest fixtures for the contexer test suite."""
 import os
 import subprocess
+import threading
+import time
 import types
 from pathlib import Path
 
 import pytest
 
 from contexer import remote, store, updates
+
+# `pytester` runs a child pytest against this conftest (tests/test_leak_guard.py).
+pytest_plugins = ("pytester",)
 
 
 def redirect_store_dir(patcher, path) -> Path:
@@ -187,7 +192,8 @@ def _real_config_bytes(real_store_dir: Path) -> bytes | None:
 @pytest.fixture(scope="session", autouse=True)
 def console_paths_never_resolve_the_real_home(tmp_path_factory):
     """Baseline the three import-time `Path.home()` globals somewhere disposable, for the
-    WHOLE session — so undoing a per-test monkeypatch restores a sandbox, not the real one.
+    whole WORKER PROCESS (never restored) — so undoing a per-test monkeypatch restores a
+    sandbox, not the real one.
 
     A per-test `monkeypatch.setattr(daemon, "LOG_PATH", tmp_path / ...)` protects only the
     window in which that test is running. The console is a threaded HTTP server whose handler
@@ -211,6 +217,14 @@ def console_paths_never_resolve_the_real_home(tmp_path_factory):
     chokepoint — after it, no in-process code path can name the real ui.json / ui.log /
     config.toml no matter which thread runs when.
 
+    Keep the baseline until process exit, including AFTER session fixture teardown. xdist
+    workers finish independently: a handler in a finished worker can still log while another
+    worker's leak guard is running. Restoring the real paths here reopened that race after
+    this worker's own guard had already passed.
+
+    This baseline is the backstop, not the fix: between two tests it only decides where a late
+    write lands. `console_handlers` (below) is what stops a handler outliving its test at all.
+
     `no_real_store_writes` keeps its teeth for what this cannot reach: a SUBPROCESS resolves
     `Path.home()` from its own HOME, so a child spawned with an unpatched env still leaks and
     still fails the run."""
@@ -219,12 +233,61 @@ def console_paths_never_resolve_the_real_home(tmp_path_factory):
 
     sandbox = tmp_path_factory.mktemp("home") / ".contexer"
     sandbox.mkdir()
-    saved = (daemon.STATE_PATH, daemon.LOG_PATH, config.CONFIG_PATH)
     daemon.STATE_PATH = sandbox / "ui.json"
     daemon.LOG_PATH = sandbox / "ui.log"
     config.CONFIG_PATH = sandbox / "config.toml"
+
+
+CONSOLE_HANDLER_DRAIN_SECONDS = 10.0
+
+
+@pytest.fixture
+def console_handlers(monkeypatch):
+    """Wait for every console request handler a test started before its patches are undone.
+
+    Production never moves `daemon.LOG_PATH`, so a handler that outlives shutdown (by design:
+    `daemon_threads` + `block_on_close = False`) is harmless there. In the suite each test
+    points it at its own tmp file, and a handler still in flight when the test ends logs into
+    whichever later test's path is current — e.g. the `PUT /api/config 400` line from
+    `test_sigterm_clears_the_statefile_with_a_half_sent_request_open` landing in
+    `test_a_malformed_request_line_logs_exactly_one_line`'s log, which then counts two lines.
+
+    Waiting here, at fixture teardown and so before `monkeypatch` restores anything, keeps each
+    late line in its own test. The server's non-blocking close is untouched: nothing is joined
+    on its shutdown path, only here. A handler still running after the bound fails the test
+    loudly, naming the leak, rather than letting it write into a stranger.
+
+    Each handler is registered on the ACCEPT thread, before its thread is started, so one
+    accepted just before shutdown cannot slip past the wait."""
+    from contexer.ui import server
+
+    finished: dict[object, threading.Event] = {}  # keyed by the accepted socket
+    accept = server.ConsoleServer.process_request
+    handle = server.ConsoleServer.process_request_thread
+
+    def process_request(self, request, client_address):
+        finished[request] = threading.Event()
+        try:
+            accept(self, request, client_address)
+        except BaseException:
+            finished[request].set()  # no thread was started, so nothing else will set it
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            handle(self, request, client_address)
+        finally:
+            finished[request].set()
+
+    monkeypatch.setattr(server.ConsoleServer, "process_request", process_request)
+    monkeypatch.setattr(server.ConsoleServer, "process_request_thread", process_request_thread)
     yield
-    daemon.STATE_PATH, daemon.LOG_PATH, config.CONFIG_PATH = saved
+    deadline = time.monotonic() + CONSOLE_HANDLER_DRAIN_SECONDS
+    stuck = sum(not done.wait(max(deadline - time.monotonic(), 0)) for done in finished.values())
+    if stuck:
+        pytest.fail(f"{stuck} console request handler(s) still running "
+                    f"{CONSOLE_HANDLER_DRAIN_SECONDS:.0f}s after the test; close the client "
+                    "socket so the handler finishes before the test's paths are restored")
 
 
 @pytest.fixture(scope="session", autouse=True)
