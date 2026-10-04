@@ -2664,3 +2664,24 @@ class TestReceiptRendering:
 
     def test_incomplete_is_stated(self):
         assert "incomplete" in reconcile.format_receipt(self._receipt(incomplete=True))
+
+
+class TestMidPassStoreReadsAreStrict:
+    """A store that breaks after a pass's snapshot must stop the pass, not read as empty."""
+
+    def _corrupt(self, tmp_repo):
+        from pathlib import Path
+        Path(store._store_path(tmp_repo)).write_text("{ not json")
+
+    def test_lifecycle_review_check_raises_on_a_corrupt_store(self, tmp_repo):
+        self._corrupt(tmp_repo)
+        with pytest.raises(ValueError):
+            reconcile._lifecycle_awaiting_review(tmp_repo, "abc12345")
+
+    def test_settling_held_duplicates_raises_on_a_corrupt_store(self, tmp_repo):
+        self._corrupt(tmp_repo)
+        writes = {"c1": {"status": "pending", "kind": "duplicate", "entry_id": "abc12345"}}
+        receipt = {"duplicates": 1, "already_pending": 0}
+        with pytest.raises(ValueError):
+            reconcile._settle_write_statuses(tmp_repo, writes, receipt)
+        assert writes["c1"]["status"] == "pending" and receipt["duplicates"] == 1

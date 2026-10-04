@@ -425,7 +425,9 @@ def _lifecycle_awaiting_review(repo_path: str, target: str) -> bool:
     """
     if not target:
         return False
-    entries = [e for e in store.load(repo_path).get("entries", []) if isinstance(e, dict)]
+    # Strict: a store that broke mid-pass must not read as "no proposal pending".
+    entries = [e for e in store.load_for_update(repo_path).get("entries", [])
+               if isinstance(e, dict)]
     entry = store.entry_by_id([e for e in entries if e.get("type") == "decision"], target)
     return bool(entry and entry.get("proposed_lifecycle"))
 
@@ -842,8 +844,10 @@ def _settle_write_statuses(repo_path: str, writes: dict, receipt: dict) -> None:
                    if record.get("status") == "pending" and not record.get("lane")}
     if not pending_ids:
         return
-    by_id = {str(e.get("id") or ""): e for e in store.load(repo_path).get("entries", [])
-             if isinstance(e, dict)}
+    # Strict: if the store broke after this pass's snapshot, an empty read would make every
+    # held duplicate look already-reviewed and dismiss its evidence. Raise instead.
+    by_id = {str(e.get("id") or ""): e
+             for e in store.load_for_update(repo_path).get("entries", []) if isinstance(e, dict)}
     for candidate_id in sorted(pending_ids):
         record = writes[candidate_id]
         entry = by_id.get(str(record.get("entry_id") or ""))

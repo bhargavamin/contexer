@@ -4848,7 +4848,13 @@ def upsert_memory_batch(repo_path: str, items: list[tuple[str, str, str, str]]) 
     with store_lock(repo_slug(repo_path)):
         data = load_for_update(repo_path)
         entries = data["entries"]
-        tombstones = _load_deleted(repo_path).get("entries", [])
+        deleted, deleted_error = read_deleted(repo_path)
+        if deleted_error:
+            # Unlike an interactive capture (which fails open, see `_tombstoned_match`), this
+            # import runs unasked at every session start: skipping it until the sidecar is
+            # readable costs nothing, while importing would resurrect retired decisions.
+            return 0
+        tombstones = deleted.get("entries", [])
         created = touched = 0
         for content, session_id, subtype, memory_key in items:
             status = _apply_memory_upsert(entries, content, session_id, subtype, memory_key,
