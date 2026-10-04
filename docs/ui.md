@@ -325,3 +325,5 @@ content itself is governed on the team side.
 
 Startup problems, port conflicts, expired links, and how to disable the console completely are all
 in [troubleshooting](troubleshooting.md). The daemon's own output is in `~/.contexer/ui.log`.
+
+**Erase content** permanently removes one decision’s local text and history after confirmation. Deleted entries can also be erased. Erasure records show the actor and date without the original content and have no Restore action. A decision already shared to a team is refused with an instruction to erase its team copy too.

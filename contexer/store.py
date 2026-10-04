@@ -439,30 +439,67 @@ def load_for_update(repo_path: str) -> dict:
     return data
 
 
-def atomic_write(path: Path, text: str) -> None:
+@contextlib.contextmanager
+def evidence_publication_lock(repo_path: str, *, exclusive: bool = False, wait: bool = False):
+    """Shared event publication; exclusive only for human privacy erasure.
+
+    Erasure refuses existing publishers. A publisher may wait for an erasure already in
+    progress so an unrelated event is not lost merely because the human is deleting data.
+    """
+    import fcntl
+    ensure_store_dir()
+    fd = os.open(sidecar_path("evidence_publication_lock", slug=repo_slug(repo_path)), os.O_CREAT | os.O_RDWR, 0o600)
+    acquired = False
+    try:
+        try:
+            fcntl.flock(fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+                        | (0 if wait else fcntl.LOCK_NB))
+            acquired = True
+        except BlockingIOError:
+            pass
+        yield acquired
+    finally:
+        if acquired:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def atomic_write(path: Path, text: str, *, durable: bool = False) -> None:
     """Write via a unique temp file + os.replace so readers never see a torn file.
 
     mkstemp creates the temp file with mode 0o600 (umask-independent), so the store
     is never readable by others - not even between creation and the final rename.
-    Deliberate trade-offs: no fsync (atomic, not power-loss durable - acceptable for
-    a context cache), and if `path` is a symlink it is replaced by a regular file."""
+    Normal cache writes omit fsync; privacy erasure selects durable=True to sync the
+    file and its directory publication. A symlink is replaced by a regular file."""
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
+            if durable:
+                f.flush()
+                os.fsync(f.fileno())
         os.replace(tmp, path)
+        if durable:
+            directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
     finally:
         Path(tmp).unlink(missing_ok=True)  # no-op after a successful replace
 
 
-def save(repo_path: str, data: dict) -> None:
+def save(repo_path: str, data: dict, *, durable: bool = False) -> None:
     # Record the CANONICAL repo path so a store written from any linked worktree stops
     # flip-flopping its recorded path between last-writer worktrees. (The global store
     # never routes through here - save_global writes it directly.)
     data["repo_path"] = canonical_store_key(data.get("repo_path") or repo_path)
     path = _store_path(repo_path)
     serializable = {k: v for k, v in data.items() if k != _GUIDANCE_PROVENANCE_KEY}
-    atomic_write(path, json.dumps(serializable, indent=2, ensure_ascii=False))
+    if durable:
+        atomic_write(path, json.dumps(serializable, indent=2, ensure_ascii=False), durable=True)
+    else:
+        atomic_write(path, json.dumps(serializable, indent=2, ensure_ascii=False))
     # Only a successful store publication makes revision UUIDs authoritative.  Legacy
     # migrations synthesize UUIDs in memory, so marking before atomic_write would let a
     # failed save leak an identity that no reader can reproduce.
@@ -4039,9 +4076,12 @@ def deleted_diagnostics(repo_path: str) -> dict:
     return {"ok": error is None, "error": error}
 
 
-def _save_deleted(repo_path: str, data: dict) -> None:
+def _save_deleted(repo_path: str, data: dict, *, durable: bool = False) -> None:
     # atomic_write's mkstemp gives 0600 from creation, same as the live store.
-    atomic_write(_deleted_path(repo_path), json.dumps(data, indent=2, ensure_ascii=False))
+    if durable:
+        atomic_write(_deleted_path(repo_path), json.dumps(data, indent=2, ensure_ascii=False), durable=True)
+    else:
+        atomic_write(_deleted_path(repo_path), json.dumps(data, indent=2, ensure_ascii=False))
 
 
 def entry_by_id(entries: list, entry_id: str) -> dict | None:
@@ -4075,7 +4115,18 @@ def _tombstoned_match(repo_path: str, content: str) -> dict | None:
     handled: `deleted_diagnostics` reports it so the Deleted view says "unreadable", and
     `delete_decision` refuses to write over a sidecar it could not parse, so a corrupt file
     never costs more than the tombstones it had already lost."""
-    return _find_match(content, _load_deleted(repo_path).get("entries", []))
+    from contexer import lifecycle
+    deleted = _load_deleted(repo_path).get("entries", [])
+    fingerprints = [e for e in deleted if e.get("type") == "erasure" and e.get("content_digests")]
+    if fingerprints:
+        key = lifecycle.erasure_key()
+        if key is None:
+            raise ValueError("Erasure matcher key is missing; refusing write")
+        digest = lifecycle.erasure_digest(content, key=key)
+        erased = next((e for e in fingerprints if digest in e["content_digests"]), None)
+        if erased:
+            return erased
+    return _find_match(content, deleted)
 
 
 def _keep_recent_tombstones(entries: list) -> list:

@@ -169,6 +169,7 @@ A local web console shows what Contexer has stored across your projects, not jus
 
 - **Inspect and edit.** Search decisions, read their reasoning and revision history, and correct their content without losing earlier versions.
 - **Review proposed changes.** See pending decisions and before/after diffs for proposed updates.
+- **Erase sensitive content.** Run `contexer erase <id>` or choose **Erase content** in the console to permanently remove one decision’s local content and history. A content-free erasure record remains.
 - **Delete and restore.** Remove unwanted decisions while retaining the option to restore them. Deletion markers prevent the same imported entry from immediately reappearing.
 - **Switch context.** Browse per-repo decisions, global rules, cached team context, deleted entries, and settings.
 
