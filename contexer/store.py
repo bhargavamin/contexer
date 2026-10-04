@@ -60,15 +60,14 @@ def store_dir() -> Path:
 
 
 def ensure_store_dir() -> Path:
-    """`store_dir()`, created with mode 0o700 if it is missing.
+    """Create the store directory privately and remove existing non-owner permissions.
 
     Raises whatever `mkdir` raises. Every caller already sat inside its own try or on a
     path that must fail loudly, so swallowing here would hide an unwritable home from the
     one layer that knows whether that is fatal.
     """
-    target = store_dir()
-    target.mkdir(mode=0o700, exist_ok=True)
-    return target
+    from contexer.permissions import ensure_private_directory
+    return ensure_private_directory(store_dir())
 
 
 def sidecar_path(kind: str, **fields: str) -> Path:

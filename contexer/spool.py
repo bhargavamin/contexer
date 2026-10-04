@@ -222,6 +222,7 @@ def _checked_id(value: object, label: str) -> str:
 def _ensure_dir(path: Path) -> Path:
     """`mkdir -p` at 0700 on every level, including the ones `Path.mkdir(parents=True)` would
     create at the default mode - the spool holds verbatim prompt text, so 0700 is the point."""
+    store.ensure_store_dir()
     chain = [path]
     while chain[-1] != store.store_dir() and chain[-1].parent != chain[-1]:
         chain.append(chain[-1].parent)

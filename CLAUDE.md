@@ -83,6 +83,7 @@ A small package (`contexer/`), intentionally minimal. Each module is a cohesive 
 - **`reconciliation.py`** - pure team-reconciliation state transitions (leaf; `store` imports it, never the reverse).
 - **`review.py`** - pure proposal-slot policy: trust order, slot claims, proposal construction.
 - **`retrieval.py`** - pure lexical retrieval: tokenization, topics, BM25, artifact extraction, the default-off Contract 06 classifier.
+- **`permissions.py`** - owner-only directory creation and descriptor-based tightening.
 - **`working_set.py`** - bounded per-session delivered-guidance ledger.
 - **`prompt_capture.py`** - pure classifiers for factual decisions in prompts; never writes storage.
 - **`evidence.py`** - fail-soft evidence events from hooks and agent conclusions; observations only, never active decisions.
