@@ -15,6 +15,22 @@ HASH_A = "a" * 64
 HEAD = "c" * 40
 
 
+@pytest.fixture(autouse=True)
+def live_checkout_witness_is_stubbed(monkeypatch):
+    """Keep `collect()` off the LIVE checkout's witness, which no test here controls (#386).
+
+    The witness records the mtime of every directory holding a git-listed file, the repo root
+    included. Under `-n auto` another worker's legitimate write there (a gitignored artefact
+    such as a worker's `.coverage.*` file, a first-import `__pycache__`) trips "executed
+    checkout changed during collection" in whichever collection test is running, masking the
+    property that test asserts. The witness itself is proven on directories these tests own
+    (`test_source_witness_*`), and its wiring into `collect()` by a test that overrides this
+    stub."""
+    witness = {"files": [], "directories": [], "entries": []}
+    monkeypatch.setattr(qualification, "_checkout_source_witness", lambda: witness)
+    monkeypatch.setattr(qualification, "_require_checkout_witness", lambda _expected: None)
+
+
 def _write(path: Path, value: object) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(value, (dict, list)):
@@ -811,6 +827,21 @@ def test_source_witness_detects_source_replaced_with_identical_bytes(tmp_path):
     replacement.replace(source)
 
     assert qualification.sha256(source) == expected_sha256
+    assert qualification._source_witness_for_paths(
+        tmp_path, ["source.py"], ["."],
+    ) != witness
+
+
+def test_source_witness_detects_a_new_entry_in_a_witnessed_directory(tmp_path):
+    """The case the stub above keeps out of the collection tests: no witnessed FILE changes,
+    but a new (even ignored) entry beside one does."""
+    _write(tmp_path / "source.py", "stable source\n")
+    witness = qualification._source_witness_for_paths(
+        tmp_path, ["source.py"], ["."],
+    )
+
+    _write(tmp_path / ".coverage.worker", "")
+
     assert qualification._source_witness_for_paths(
         tmp_path, ["source.py"], ["."],
     ) != witness
