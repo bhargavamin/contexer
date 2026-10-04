@@ -87,6 +87,19 @@ def test_corrupt_source_refuses_export_without_touching_existing_output(tmp_repo
 
 
 @pytest.mark.parametrize("format", ["md", "adr"])
+def test_corrupt_store_never_refreshes_an_owned_export_to_empty(tmp_repo, tmp_path, format):
+    """The test above trips the ownership check first; this one pins the strict store read."""
+    store.update_decision(tmp_repo, "Use Postgres for durable storage.", "s", "convention")
+    out = tmp_path / "export"
+    export.write(tmp_repo, out, format=format)
+    before = {p.name: p.read_bytes() for p in out.iterdir()}
+    store._store_path(tmp_repo).write_text("{bad")
+    with pytest.raises(ValueError):
+        export.write(tmp_repo, out, format=format)
+    assert {p.name: p.read_bytes() for p in out.iterdir()} == before
+
+
+@pytest.mark.parametrize("format", ["md", "adr"])
 def test_corrupt_retired_history_preserves_existing_export(tmp_repo, tmp_path, format):
     store.update_decision(tmp_repo, "Use Postgres for durable storage.", "s", "convention")
     out = tmp_path / "export"
