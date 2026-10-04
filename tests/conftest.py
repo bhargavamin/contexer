@@ -211,6 +211,11 @@ def console_paths_never_resolve_the_real_home(tmp_path_factory):
     chokepoint — after it, no in-process code path can name the real ui.json / ui.log /
     config.toml no matter which thread runs when.
 
+    Keep the baseline until process exit, including AFTER session fixture teardown. xdist
+    workers finish independently: a handler in a finished worker can still log while another
+    worker's leak guard is running. Restoring the real paths here reopened that race after
+    this worker's own guard had already passed.
+
     `no_real_store_writes` keeps its teeth for what this cannot reach: a SUBPROCESS resolves
     `Path.home()` from its own HOME, so a child spawned with an unpatched env still leaks and
     still fails the run."""
@@ -219,12 +224,9 @@ def console_paths_never_resolve_the_real_home(tmp_path_factory):
 
     sandbox = tmp_path_factory.mktemp("home") / ".contexer"
     sandbox.mkdir()
-    saved = (daemon.STATE_PATH, daemon.LOG_PATH, config.CONFIG_PATH)
     daemon.STATE_PATH = sandbox / "ui.json"
     daemon.LOG_PATH = sandbox / "ui.log"
     config.CONFIG_PATH = sandbox / "config.toml"
-    yield
-    daemon.STATE_PATH, daemon.LOG_PATH, config.CONFIG_PATH = saved
 
 
 @pytest.fixture(scope="session", autouse=True)

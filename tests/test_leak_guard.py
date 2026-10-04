@@ -6,6 +6,13 @@ Written because the guard went blind: it named a fixed list of console artefacts
 tmp_path marker, so the evidence spool, the reconcile log and the `.spool_maintained_` stamp
 - three families added by the evidence-capture work, all keyed to the REAL repo slug - matched
 nothing and would have been reported as a clean run."""
+import json
+import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
 from tests.conftest import _leaked
 
 
@@ -79,3 +86,66 @@ def test_the_share_retry_queue_is_not_mistaken_for_a_reconcile_log(tmp_path):
     # `.reconcile-outbox.json` (hyphen) is the share outbox a live session may write; only
     # the slug-keyed `.reconcile_<slug>.*` (underscore) belongs to the test suite's families.
     assert _leaked(_dir(tmp_path, ".reconcile-outbox.json")) == []
+
+
+def test_a_late_handler_stays_sandboxed_after_session_teardown(tmp_path):
+    """A finished xdist worker can still write while another worker checks for leaks.
+
+    Release the writer only after ALL session fixtures (including the leak guard) have
+    finished. The child's real home is disposable too, so the unfixed fixture can be
+    convicted without touching the developer's home. Events make the race deterministic.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    receipt = tmp_path / "writer.json"
+    (tmp_path / "conftest.py").write_text(textwrap.dedent('''
+        import json
+        import threading
+        from pathlib import Path
+        from contexer import config as settings
+        from contexer.ui import daemon, server
+
+        pytest_plugins = ("tests.conftest",)
+        release = threading.Event()
+        writer = None
+
+        def pytest_unconfigure(config):
+            if writer is not None:
+                release.set()
+                writer.join(timeout=5)
+                Path("writer.json").write_text(json.dumps({
+                    "alive": writer.is_alive(),
+                    "log": str(daemon.LOG_PATH),
+                    "state": str(daemon.STATE_PATH),
+                    "config": str(settings.CONFIG_PATH),
+                }))
+    '''), encoding="utf-8")
+    (tmp_path / "test_late.py").write_text(textwrap.dedent('''
+        import threading
+        import conftest
+
+        def test_handler_remains_in_flight():
+            started = threading.Event()
+            def late_log():
+                started.set()
+                if conftest.release.wait(timeout=30):
+                    conftest.server._log("delayed handler after session teardown")
+            conftest.writer = threading.Thread(target=late_log, daemon=True)
+            conftest.writer.start()
+            assert started.wait(timeout=5)
+    '''), encoding="utf-8")
+    root = Path(__file__).resolve().parents[1]
+    done = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "test_late.py", "-o", "addopts=",
+         "--basetemp", str(tmp_path / "pytest-tmp")],
+        cwd=tmp_path, env={**os.environ, "HOME": str(home), "PYTHONPATH": str(root),
+                           "PYTEST_ADDOPTS": ""},
+        capture_output=True, text=True, timeout=30)
+    assert done.returncode == 0, done.stdout + done.stderr
+    result = json.loads(receipt.read_text(encoding="utf-8"))
+    assert not result["alive"], "the late writer did not finish"
+    assert not (home / ".contexer" / "ui.log").exists(), done.stdout + done.stderr
+    log = Path(result["log"])
+    assert "delayed handler after session teardown" in log.read_text(encoding="utf-8")
+    assert log.is_relative_to(tmp_path / "pytest-tmp")
+    assert Path(result["state"]).parent == Path(result["config"]).parent == log.parent
