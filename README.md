@@ -169,6 +169,7 @@ A local web console shows what Contexer has stored across your projects, not jus
 
 - **Inspect and edit.** Search decisions, read their reasoning and revision history, and correct their content without losing earlier versions.
 - **Review proposed changes.** See pending decisions and before/after diffs for proposed updates.
+- **Erase sensitive content.** Run `contexer erase <id>` or choose **Erase content** in the console to permanently remove one decision’s local content and history. A content-free erasure record remains.
 - **Delete and restore.** Remove unwanted decisions while retaining the option to restore them. Deletion markers prevent the same imported entry from immediately reappearing.
 - **Switch context.** Browse per-repo decisions, global rules, cached team context, deleted entries, and settings.
 
@@ -252,3 +253,8 @@ The Contexer name and logo are trademarks of Contexer.ai. The MIT license does n
 The local data directory is private to its owner (mode `0700`); existing group or world permissions are removed on next use.
 
 When saving a decision, the agent can include concrete situations where it applies, such as “slow upstream reads.” These help later tasks find the rule even when the task uses different words from the decision. File-specific decisions remain discoverable through lookup pointers when their subject does not fit the current task.
+
+When current decisions prescribe incompatible version formats, Contexer shows both together and asks you to resolve the conflict before an agent chooses a format.
+
+If `redact_secrets = false`, sharing always shows a warning and requires preview/confirmation, including when `skip_confirm` is enabled. Background sharing retries and automatic proposals pause until redaction is enabled again. Local capture remains verbatim.
+Large Claude sessions keep approved constraints first and summarize additional stored context with a lookup pointer, so a long rule list stays readable in the session.

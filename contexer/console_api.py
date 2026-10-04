@@ -707,7 +707,9 @@ def list_tombstones(repo_path: str) -> dict:
     list, so without this the view renders "nothing deleted" over a file that actually still
     holds tombstones it could not parse. One read."""
     data, error = store.read_deleted(repo_path)
-    rows = [{**_console_summary(e), "deleted_at": e.get("deleted_at"),
+    rows = [{**(_console_summary(e) if e.get("type") != "erasure" else
+                {"id": e["id"], "title": "Erased decision", "content": "", "status": "erased", "reason": "erased"}),
+             "deleted_at": e.get("deleted_at"),
              "deleted_by": e.get("deleted_by", "ui")}
             for e in data.get("entries", [])]
     rows.sort(key=lambda r: r["deleted_at"] or "", reverse=True)

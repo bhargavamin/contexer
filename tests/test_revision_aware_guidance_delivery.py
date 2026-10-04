@@ -897,7 +897,7 @@ class TestStartupDeliveryCredit:
             created_by="human")[1]
         sid = "startup-credit"
 
-        start = store._local_session_start_payload(tmp_repo, "startup", sid, "claude")
+        start = store.session_start_payload(tmp_repo, "startup", sid, "claude")
 
         assert "silently drops out" not in start["context"]
         credited = {(r["scope"], r["id"]) for r in working_set.records(tmp_repo, sid)
@@ -917,7 +917,7 @@ class TestStartupDeliveryCredit:
             SESSION, "architecture", created_by="human", source_files=["billing.py"])[1]
         sid = "short-rule-credit"
 
-        start = store._local_session_start_payload(tmp_repo, "startup", sid, "claude")
+        start = store.session_start_payload(tmp_repo, "startup", sid, "claude")
 
         assert "Name billing jobs with the invoice_ prefix so dashboards group them" in (
             start["context"])
@@ -941,7 +941,7 @@ class TestStartupDeliveryCredit:
             created_by="human")[1]
         sid = "global-fingerprint"
         # No local decisions: the bootstrap-offer branch renders the global rule too.
-        store._local_session_start_payload(tmp_repo, "startup", sid, "claude")
+        store.session_start_payload(tmp_repo, "startup", sid, "claude")
         _, receipts = store._render_prompt_decisions_with_records(tmp_repo, [gid])
         assert self._credited(tmp_repo, sid) == {("global", gid): receipts[0]["fingerprint"]}
 
@@ -951,7 +951,7 @@ class TestStartupDeliveryCredit:
             SESSION, "convention", created_by="human")[1]
         _propose(tmp_repo, did, "Name billing jobs with the bill_ prefix instead")
         sid = "conflict-credit"
-        store._local_session_start_payload(tmp_repo, "startup", sid, "claude")
+        store.session_start_payload(tmp_repo, "startup", sid, "claude")
         _, receipts = store._render_prompt_decisions_with_records(tmp_repo, [did])
         assert self._credited(tmp_repo, sid) == {("personal", did): receipts[0]["fingerprint"]}
 
@@ -966,12 +966,12 @@ class TestStartupDeliveryCredit:
         needed = _approved(tmp_repo, "Use checkout reservation leases for inventory consistency",
                            source_files=["checkout.py"])
         sid = "compact-twice"
-        store._local_session_start_payload(tmp_repo, "startup", sid, "claude")
+        store.session_start_payload(tmp_repo, "startup", sid, "claude")
         assert "checkout reservation leases" in store.get_context_for_prompt(
             tmp_repo, "fix the checkout reservation lease bug in checkout.py", sid)
 
         for _ in range(2):
-            payload = store._local_session_start_payload(tmp_repo, "compact", sid, "claude")
+            payload = store.session_start_payload(tmp_repo, "compact", sid, "claude")
             assert payload["context"].count("Constraint body number 3 ") == 1
             replay = payload["context"].split("## Rehydrated working context:")[1]
             assert "checkout reservation leases" in replay
@@ -988,12 +988,12 @@ class TestStartupDeliveryCredit:
         needed = _approved(tmp_repo, "Use checkout reservation leases for inventory consistency",
                            source_files=["checkout.py"])
         sid = "ledger-cap"
-        store._local_session_start_payload(tmp_repo, "startup", sid, "claude")
+        store.session_start_payload(tmp_repo, "startup", sid, "claude")
         store.get_context_for_prompt(tmp_repo, "fix the checkout reservation lease bug in checkout.py", sid)
         monkeypatch.setattr(store, "MAX_ENTRIES", 5)   # fewer ledger rows than startup credits
 
         for _ in range(2):
-            payload = store._local_session_start_payload(tmp_repo, "compact", sid, "claude")
+            payload = store.session_start_payload(tmp_repo, "compact", sid, "claude")
             assert "checkout reservation leases" in payload["context"].split(
                 "## Rehydrated working context:")[1]
         assert ("personal", needed) in self._credited(tmp_repo, sid)
@@ -1010,7 +1010,7 @@ class TestStartupDeliveryCredit:
         sid = "legacy-twin"
         working_set.add_hints(tmp_repo, sid, [local_id])
 
-        payload = store._local_session_start_payload(tmp_repo, "compact", sid, "claude")
+        payload = store.session_start_payload(tmp_repo, "compact", sid, "claude")
 
         assert "Use checkout reservation leases" in payload["context"].split(
             "## Rehydrated working context:")[1]

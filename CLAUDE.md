@@ -95,7 +95,7 @@ A small package (`contexer/`), intentionally minimal. Each module is a cohesive 
 - **`guard_engine.py`** - commit-time guard engine and `decisions_for_files`; re-exported lazily by `store`.
 - **`anchors.py`** - anchor verification: rename correction, retirement proposals on loss.
 - **`lifecycle.py`** - retirement/restoration and the lifecycle and reconsideration review lanes.
-- **`conflicts.py`** - open-conflict rendering and advisory resolution memos.
+- **`conflicts.py`** - open-conflict rendering, explicit incompatible current version-format pairs, and advisory resolution memos.
 - **`review_impact.py`** - read-only approval-impact preview shared by MCP, CLI and console.
 - **`decision_impact.py`** - opt-in, diagnostics-only decision-impact pilot sidecar.
 - **`console_api.py`** - read projections for the `contexer ui` console (`ui/api.py` -> `console_api` -> `store`).
@@ -136,7 +136,7 @@ A decision owns immutable **revisions** inline (`revisions[]` + `current_revisio
 
 ## Session behaviour (hooks)
 
-Hosts run Contexer hooks at `SessionStart` (inject approved context), `PostToolUse` Write/Edit (silent edit tracking), `UserPromptSubmit` (directive capture, rationale retrieval, reminders, team poll), `PreCompact`, and `SessionEnd`. Two standing invariants: there is **no `Stop` hook** (tried and removed), and **bookkeeping writes are best-effort**, so failing to write an optional flag never prevents context injection. Hook-by-hook behaviour: [`docs/architecture.md`](docs/architecture.md#session-behaviour-hooks); host wiring: [`contexer/adapters/CLAUDE.md`](contexer/adapters/CLAUDE.md).
+Hosts run Contexer hooks at `SessionStart` (inject approved context), `PostToolUse` Write/Edit (silent edit tracking), `UserPromptSubmit` (directive capture, rationale retrieval, reminders, team poll), `PreCompact`, and `SessionEnd`. Two standing invariants: there is **no `Stop` hook** (tried and removed), and **bookkeeping writes are best-effort**, so failing to write an optional flag never prevents context injection. Claude SessionStart additionalContext is capped at 8,000 bytes including conservative JSON escaping below the observed inline cutoff: complete approved constraints first, then global rules and useful context, followed by one get_context pointer for omitted blocks. Dropped blocks receive no delivery credit. Other hosts retain their own delivery behavior. Hook-by-hook behaviour: [`docs/architecture.md`](docs/architecture.md#session-behaviour-hooks); host wiring: [`contexer/adapters/CLAUDE.md`](contexer/adapters/CLAUDE.md).
 
 ## Commit-time guard (`contexer guard`)
 

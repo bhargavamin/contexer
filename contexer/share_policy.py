@@ -45,7 +45,7 @@ TERMINAL_RECEIPT_STATES = frozenset({
     "submitted", "already_pending", "unchanged", "attention", "baseline",
 })
 ERROR_CODES = frozenset({
-    "unsupported_protocol", "account_mismatch", "policy_mismatch", "repo_mismatch",
+    "unsupported_protocol", "account_mismatch", "policy_mismatch", "repo_mismatch", "redaction_disabled",
     "team_mismatch", "not_member", "not_authorized", "ineligible_revision",
     "global_decision", "baseline_revision", "duplicate_receipt", "corrupt_queue",
     "stale_head", "stale_intent", "lock_busy", "rate_limited", "quota_exceeded",
@@ -151,6 +151,7 @@ def _emit(operation: str, outcome: OperationOutcome, started_ns: int, *,
         "account_mismatch": "capability",
         "unsupported_protocol": "capability",
         "policy_mismatch": "validation",
+        "redaction_disabled": "validation",
         "repo_mismatch": "validation",
         "team_mismatch": "authorization",
         "not_member": "authorization",
@@ -1344,6 +1345,10 @@ def _drain_intent(intent: dict, profile: Profile, owner: str, *,
                 OperationOutcome("no_op", "duplicate_receipt"), started, intent,
                 queue_depth=queue_depth,
             )
+        if not profile.redact_secrets:
+            outcome = _move_intent_to_attention(
+                intent, "redaction_disabled", "validation", owner=owner)
+            return _finish_drain(outcome, started, intent, queue_depth=queue_depth)
         policy = _load_bound_policy(intent)
         if policy is None:
             outcome = _move_intent_to_attention(

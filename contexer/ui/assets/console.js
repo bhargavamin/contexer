@@ -408,7 +408,11 @@
    *  legitimately null on a write that worked. */
   async function act(path, method, body, okMessage, onOk) {
     try {
-      const out = await mutate(path, method, body);
+      let out = await mutate(path, method, body);
+      while (out && out.confirmation_required) {
+        if (!window.confirm(out.preview + "\n\nSend this unredacted payload?")) return false;
+        out = await mutate(path, method, { ...body, confirm: true, confirmation_digest: out.confirmation_digest });
+      }
       // A 200 carrying `error` is the daemon refusing in prose. It is a failure, so nothing the
       // caller staged on success may run.
       if (out && out.error) {
@@ -1375,6 +1379,18 @@
     );
   }
 
+  function eraseButton(slug, id) {
+    return h("button", {
+      class: "btn btn-danger btn-sm", type: "button", text: "Erase content",
+      on: { click: async () => {
+        if (!window.confirm("Permanently erase all local content and history for " + shortId(id) + "? This cannot be restored. Shared team copies must be erased there too.")) return;
+        const ok = await act("/api/store/" + encodeURIComponent(slug) + "/decisions/" + encodeURIComponent(id) + "/erase",
+          "POST", { confirm: true }, "Content erased permanently.");
+        if (ok) go(hrefFor("deleted", slug));
+      } },
+    });
+  }
+
   // ── View: decisions ───────────────────────────────────────────────────────────────────
   async function viewDecisions(slug, id) {
     const f = state.filters;
@@ -1645,6 +1661,7 @@
     const actions = editing
       ? null
       : h("div", { class: "block btn-row" }, [
+          eraseButton(slug, id),
           h("button", {
             class: "btn btn-ghost btn-sm",
             type: "button",
@@ -2588,7 +2605,7 @@
             statusBadge(d.status),
             h("span", { class: "badge badge-rejected", text: "deleted " + fmtAgo(d.deleted_at) }),
             h("span", { class: "drow-when", text: "by " + String(d.deleted_by || "ui") + " · " + shortId(id) }),
-            h("button", {
+            d.status === "erased" ? null : h("button", {
               class: "btn btn-ghost btn-sm push",
               type: "button",
               text: "Restore",
@@ -2606,6 +2623,7 @@
                   ),
               },
             }),
+            d.status === "erased" ? null : eraseButton(slug, id),
           ]),
         ]);
       })

@@ -524,7 +524,10 @@ class TestCursorEntrypoints:
         assert "Should I keep this as a Contexer constraint?" in rule
         assert "Do not approve it yourself" in rule
 
-    def test_entrypoints_never_raise(self, tmp_repo):
+    def test_entrypoints_never_raise(self, tmp_repo, tmp_path, monkeypatch):
+        # No repo argument falls back to cwd, and session start writes .cursor/rules there:
+        # left at the checkout, that write tripped a concurrent checkout witness (#386).
+        monkeypatch.chdir(tmp_path)
         assert _json.loads(cursor.capture_constraint(tmp_repo, "garbage")) == {"continue": True}
         assert _json.loads(cursor.session_start("", "garbage"))  # returns dict, no raise
 

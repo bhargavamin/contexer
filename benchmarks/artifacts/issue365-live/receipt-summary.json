@@ -1,0 +1,33 @@
+{
+  "task_id": "adopt-k2-config",
+  "store_size": 150,
+  "needed_delivery": "full",
+  "success": true,
+  "transcript": "startup-canary-transcripts/-private-var-folders-zp-q8mqb4s11d3f-rxq753y9-z80000gn-T-tmphskj9xzy-w-adopt-k2-config-with-0/65398273-50a3-4b2a-9b6e-73ca3dd8595e.jsonl",
+  "full_constraint_seed_indices": [
+    1,
+    24,
+    28,
+    48,
+    72,
+    88,
+    107,
+    120,
+    123,
+    126,
+    141
+  ],
+  "content_utf8_bytes": 7764,
+  "json_escaped_content_bytes": 7885,
+  "inline_pointer_received": true,
+  "cost_usd": 0.0819994,
+  "model": "claude-sonnet-5-5",
+  "seed": 0,
+  "rep": 0,
+  "source_commit": "4d961e00ee85a6172c7e1cc8aed3e992f920d42c",
+  "fixture": "benchmarks/adoption_tasks_150.json",
+  "fixture_sha256": "387f454097b5fe4cb930a9db119abc8524322ff84776ded2f6c4929d4e859c04",
+  "raw_transcript_sha256": "cfb27ca9e3b171c3498d76c36284fcf7e344e4825cdcc3c8871663160b769955",
+  "published_receipt": "startup-receipt.jsonl",
+  "receipt_scope": "Unmodified SessionStart attachment entry extracted from a retained live Claude transcript. The complete synthetic coding-session transcript is retained locally; no host authentication files are included."
+}

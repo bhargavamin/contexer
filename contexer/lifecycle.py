@@ -39,11 +39,235 @@ Two rules carry the lane and neither is negotiable:
   form; `dismiss_lifecycle` stays available, since dropping a proposal needs no basis.
 """
 
+import contextlib
+import hashlib
+import hmac
+import secrets
+import shutil
+import fnmatch
+import json
+import re
 import uuid
 from datetime import datetime, timezone
 
 from contexer import revisions
 from contexer import store          # module object, not `from`-imports: see docstring above
+
+
+def erasure_key(*, create: bool = False) -> bytes | None:
+    """Private machine-local matcher key; never part of an erasure audit or MCP result."""
+    path = store.sidecar_path("erasure_key")
+    if create:
+        with store.store_lock(".erasure_key"):
+            if not path.exists():
+                from contexer import sidecars
+                for audit_path in store.store_dir().glob(sidecars.glob_for("deleted")):
+                    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+                    if (not isinstance(audit, dict) or not isinstance(audit.get("entries"), list)
+                            or any(not isinstance(entry, dict) for entry in audit["entries"])):
+                        raise ValueError("Erasure audits are unreadable; refusing matcher key initialization")
+                    if any(entry.get("type") == "erasure" and entry.get("content_digests")
+                           for entry in audit["entries"]):
+                        raise ValueError("Erasure matcher key is missing; refusing to replace existing fingerprints")
+                store.atomic_write(path, secrets.token_hex(32), durable=True)
+    if not path.exists():
+        return None
+    value = path.read_text(encoding="utf-8")
+    if not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise ValueError("Erasure matcher key is unreadable; refusing write")
+    return bytes.fromhex(value)
+
+
+def erasure_digest(content: str, *, key: bytes) -> str:
+    """Opaque exact-replay fingerprint: an audit alone cannot test guessed plaintext."""
+    return hmac.new(key, " ".join(content.casefold().split()).encode(), hashlib.sha256).hexdigest()
+
+
+def erasure_fragments(value: str) -> set[str]:
+    """Exact text and recognizable copied payloads covered by an erasure sweep."""
+    from contexer import redact
+
+    fragments = {value, *(line for line in value.splitlines() if line.strip())}
+    fragments.update(re.findall(r"[^\s\"'<>;,()]{16,}", value))
+    fragments.update(re.findall(r"[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}", value))
+    for pattern in redact.HIGH_CONFIDENCE_PATTERNS:
+        fragments.update(m.group(0) for m in pattern.finditer(value))
+    for match in redact._GENERIC.finditer(value):
+        secret = match.group(4) or match.group(5)
+        if redact._looks_secretlike(secret) and not redact._is_placeholder(secret):
+            fragments.add(secret)
+    fragments.update(m.group(3) for m in redact._CONN.finditer(value))
+    fragments.update(m.group(0)[len(m.group(1)):] for m in redact._BEARER.finditer(value))
+    return fragments
+
+
+def erase_decision(repo_path: str, entry_id: str, *, confirm: bool = False,
+                   actor: str = "human") -> tuple[bool, str]:
+    """Human-only privacy erasure; deliberately absent from the MCP surface.
+
+    Preflight every read before mutation. Clean related records and copied payloads before
+    removing the live entry, so a failed cleanup remains retryable. The audit tombstone
+    contains only identity, dates, actor and a fixed reason, and cannot be restored.
+    """
+    if confirm is not True:
+        return False, "Erasure is permanent. Confirm explicitly to remove all local content."
+    if actor not in {"human", "cli", "ui"}:
+        return False, "Unknown erasure actor; use human, cli or ui."
+    from contexer import share, share_policy, sidecars
+
+    slug = store.repo_slug(repo_path)
+    try:
+        with contextlib.ExitStack() as locks:
+            locks.enter_context(share_policy.proposal_drainer_lock())
+            locks.enter_context(share.outbox_lock())
+            locks.enter_context(store.store_lock(".shared"))
+            for path in (share_policy.proposal_outbox_lock_path(),
+                         share_policy.proposal_attention_lock_path(),
+                         share_policy.proposal_receipts_lock_path()):
+                locks.enter_context(share_policy._sidecar_lock(path))
+            locks.enter_context(store.store_lock(f".reconcile_{slug}"))
+            locks.enter_context(store.store_lock(slug))
+            if not locks.enter_context(store.evidence_publication_lock(repo_path, exclusive=True)):
+                return False, "Evidence is being published; retry erasure shortly."
+            data = store.load_for_update(repo_path)
+            graveyard, error = store.read_deleted(repo_path)
+            if error:
+                raise ValueError("Tombstones are unreadable; refusing erasure")
+            candidates = [e for e in data["entries"] + graveyard["entries"]
+                          if e.get("type") == "decision"]
+            exact = [e for e in candidates if e.get("id") == entry_id]
+            matches = exact or [e for e in candidates if str(e.get("id", "")).startswith(entry_id)]
+            if not entry_id or not matches:
+                return False, "Decision not found."
+            if len({e["id"] for e in matches}) != 1:
+                return False, "Decision id is ambiguous; use the full id."
+            decision_id = matches[0]["id"]
+            if (any(row.get("decision_id") == decision_id
+                    and row.get("state") in {"submitted", "already_pending", "unchanged"}
+                    for row in share_policy.read_receipts())
+                    or any(e.get("last_team_reconciliation")
+                           or (e.get("proposed_revision") or {}).get("team_reconciliation")
+                           for e in matches)):
+                return False, "This decision has a known team copy. Erase the team copy there too before local erasure."
+            markers = store.sidecar_path("shared_markers")
+            if markers.exists():
+                for line in markers.read_bytes().splitlines():
+                    if not line.strip():
+                        continue
+                    shared = json.loads(line)
+                    if not isinstance(shared, dict) or not shared.get("endpoint") or not shared.get("id"):
+                        raise ValueError("Shared markers are unreadable; refusing erasure")
+                    if shared["id"] == decision_id:
+                        return False, "This decision was shared. Erase the team copy there too before local erasure."
+            matcher_key = erasure_key(create=True)
+            # Held evidence is linked to its decision by candidate metadata, not by any id field
+            # inside the raw events, and its summaries can paraphrase the decision. Remove the
+            # whole held candidate rather than relying on exact-fragment scrubbing.
+            from contexer import spool
+            for candidate_id, meta in spool.held_candidates(repo_path).items():
+                if decision_id in {meta.get(key) for key in
+                                   ("entry_id", "target_decision_id", "replacement_decision_id")}:
+                    shutil.rmtree(spool._held_dir(repo_path, candidate_id))
+            selected_paths = []
+            for path in store.store_dir().rglob("*"):
+                if not path.is_file() or path.is_symlink() or path.name.endswith(".lock"):
+                    continue
+                relative = path.relative_to(store.store_dir())
+                if relative.parts[0] == "evidence" and len(relative.parts) > 1 and relative.parts[1] != slug:
+                    continue
+                kind = next((kind for kind in sidecars.KINDS if fnmatch.fnmatch(path.name, kind.glob)), None) if len(relative.parts) == 1 else None
+                if kind and "{slug}" in kind.template and slug not in path.name:
+                    continue
+                if path.name in {"config.toml", sidecars.filename("console_state"), sidecars.filename("console_log")} or (kind and kind.name in {"team_creds", "repo_pointer", "erasure_key"}):
+                    continue
+                selected_paths.append(path)
+
+            fragments: set[str] = set()
+            identities = {decision_id}
+            text_fields = {"content", "title", "evidence", "text", "prompt", "rationale",
+                           "reason", "excerpt", "examples", "description", "applies_when"}
+
+            def collect(value, field=""):
+                if isinstance(value, dict):
+                    for key, item in value.items():
+                        collect(item, key)
+                elif isinstance(value, list):
+                    for item in value:
+                        collect(item, field)
+                elif isinstance(value, str) and value:
+                    if field in {"id", "revision_id", "proposal_id", "event_id", "event_ids"}:
+                        identities.add(value)
+                    elif field in text_fields:
+                        # Credentials and personal identifiers may be quoted inside larger
+                        # evidence records. Preserve ordinary short prose tokens elsewhere.
+                        fragments.update(erasure_fragments(value))
+
+            for entry in matches:
+                collect(entry)
+            ordered = sorted(fragments, key=len, reverse=True)
+            removed = object()
+
+            def scrub(value):
+                if isinstance(value, dict):
+                    if any(value.get(key) in identities for key in
+                           ("id", "decision_id", "local_decision_id", "event_id", "target_decision_id")
+                           if isinstance(value.get(key), str)):
+                        return removed
+                    # Another decision is authoritative data, even when its prose overlaps.
+                    if (value.get("type") in {"decision", "erasure"} and value.get("id")) or any(
+                            value.get(key) and value.get(key) not in identities
+                            for key in ("id", "decision_id", "local_decision_id", "target_decision_id")):
+                        return value
+                    result = {}
+                    for key, item in value.items():
+                        if key in identities:
+                            continue
+                        clean = scrub(item)
+                        if clean is not removed:
+                            result[scrub(key)] = clean
+                    return result
+                if isinstance(value, list):
+                    return [clean for item in value if (clean := scrub(item)) is not removed]
+                if isinstance(value, str):
+                    for fragment in ordered:
+                        value = value.replace(fragment, "[erased]")
+                return value
+
+            for path in selected_paths:
+                raw = path.read_bytes()
+                # The two authoritative files are published last, with a safe audit record.
+                if path in {store.sidecar_path("store", slug=slug), store.sidecar_path("deleted", slug=slug)}:
+                    continue
+                try:
+                    parsed = json.loads(raw)
+                except (ValueError, UnicodeDecodeError):
+                    # JSONL and quarantine/temp files can contain copied, JSON-escaped text.
+                    clean = raw
+                    for fragment in ordered:
+                        for variant in (fragment, json.dumps(fragment, ensure_ascii=True)[1:-1],
+                                        json.dumps(fragment, ensure_ascii=False)[1:-1]):
+                            clean = clean.replace(variant.encode(), b"[erased]")
+                    if clean != raw:
+                        store.atomic_write(path, clean.decode("utf-8"), durable=True)
+                else:
+                    clean = scrub(parsed)
+                    if clean is removed:
+                        store.atomic_write(path, "{}", durable=True)
+                    elif clean != parsed:
+                        store.atomic_write(path, json.dumps(clean, ensure_ascii=False), durable=True)
+            data = scrub(data)
+            graveyard = scrub(graveyard)
+            now = datetime.now(timezone.utc).isoformat()
+            graveyard["entries"].append({"type": "erasure", "id": decision_id,
+                "timestamp": matches[0].get("timestamp", ""), "deleted_at": now,
+                "deleted_by": actor, "reason": "erased",
+                "content_digests": sorted({erasure_digest(fragment, key=matcher_key)
+                                           for fragment in fragments})})
+            store._save_deleted(repo_path, graveyard, durable=True)
+            store.save(repo_path, data, durable=True)
+            return True, f"Erased {decision_id[:8]}; content cannot be restored."
+    except (OSError, ValueError, BlockingIOError, share_policy.SidecarDataError):
+        return False, "Erasure did not complete. Resolve unreadable files or busy sharing, then retry."
 
 LIFECYCLE_ACTIONS = ("retire",)
 # The four answers a developer may give a reconsideration proposal. `skip` writes nothing at
@@ -324,6 +548,8 @@ def _restore_unlocked(repo_path: str, entry_id: str, reason: str = "",
     entry = store.entry_by_id(graveyard["entries"], entry_id)
     if entry is None:
         return False, f"Deleted decision {entry_id!r} not found.", None
+    if entry.get("type") == "erasure":
+        return False, "Erased content cannot be restored.", None
     data = store.load(repo_path)
     # Full id, never the caller's prefix: this asks "is THIS entry already live".
     live = store.entry_by_id(data["entries"], entry["id"])

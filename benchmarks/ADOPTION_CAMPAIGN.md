@@ -90,5 +90,8 @@ do. Every task's needed, secondary and conflict indices point to the same decisi
 `--tasks-file benchmarks/adoption_tasks_150.json`; the `without` arm doesn't read the store, so
 its results carry over from a run on the smaller file.
 
-At this size the SessionStart block exceeds Claude Code's inline limit for hook output and
-arrives as a short preview (#365); report results with that in mind until it is fixed.
+Claude SessionStart delivery is budgeted to 8,000 JSON-escaped bytes, with whole approved
+constraints prioritized and a `get_context` pointer for omitted guidance. A retained live
+150-decision session received the needed configuration constraint in full plus the pointer
+(#365); startup context was 7,764 UTF-8 bytes (7,885 after JSON escaping). This validates
+that session's host receipt, not delivery of every decision or other hosts' limits.
