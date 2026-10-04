@@ -86,6 +86,16 @@ def test_background_outbox_retains_pending_sends(tmp_repo, monkeypatch):
     assert not fake.calls and not fake.batches
 
 
+def test_async_outbox_drain_also_pauses_with_redaction_off(tmp_repo, monkeypatch):
+    """The in-loop MCP share drains the outbox first; it must hold queued rows like the sync drain."""
+    fake = _afake(monkeypatch)
+    share._enqueue({"id": "queued", "content": "password=secret-value", "repo": "r"})
+    before = share._load_outbox()
+    assert asyncio.run(share._adrain_outbox_unlocked(OFF)) == 0
+    assert share._load_outbox() == before
+    assert not fake.calls and not fake.batches
+
+
 def test_cli_reconcile_warns_and_confirms_before_remote_preview(tmp_repo, monkeypatch, capsys):
     _, did = store.update_decision(tmp_repo, "Use PostgreSQL for the database", "s", "convention")
     monkeypatch.setattr(config, "load_profile", lambda: OFF)
