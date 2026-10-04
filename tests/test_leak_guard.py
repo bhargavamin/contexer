@@ -187,6 +187,7 @@ def test_an_abandoned_handler_logs_into_its_own_test_not_the_next(pytester, monk
     pytester.makepyfile(test_abandon='''
         import socket
         import threading
+        import time
         import pytest
         import conftest
         from contexer.ui import daemon, server
@@ -198,7 +199,7 @@ def test_an_abandoned_handler_logs_into_its_own_test_not_the_next(pytester, monk
             monkeypatch.setattr(daemon, "LOG_PATH", path)
             return path
 
-        def test_abandons_a_handler(log):
+        def test_abandons_a_handler(log, console_handlers):
             conftest.first_log = log
             srv = server.ConsoleServer(0, "token")
             serving = threading.Thread(target=srv.serve_forever,
@@ -206,6 +207,12 @@ def test_an_abandoned_handler_logs_into_its_own_test_not_the_next(pytester, monk
             serving.start()
             sock = socket.create_connection(("127.0.0.1", srv.port), timeout=5)
             sock.sendall(half_sent(srv))
+            # Shut down only once the connection is accepted: otherwise serve_forever can see
+            # the shutdown flag first, no handler ever starts, and there is nothing to wait out.
+            deadline = time.monotonic() + 5
+            while not console_handlers and time.monotonic() < deadline:
+                time.sleep(0.005)
+            assert console_handlers, "the server never accepted the connection"
 
             def close_in_teardown():
                 conftest.teardown_started.wait(timeout=10)
