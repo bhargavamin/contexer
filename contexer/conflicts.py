@@ -19,6 +19,7 @@ documents at its own top: they're looked up at call time, so anything a test mon
 """
 
 import hashlib
+import re
 from datetime import datetime, timezone
 
 from contexer import revisions      # pure stdlib leaf (no cycle): revision lifecycle
@@ -36,6 +37,92 @@ _CONFLICT_GUIDE = (
     "which version is current is not resolving it — report both, naming the update as the "
     "latest stated direction and flagging it as unreviewed."
 )
+
+
+_CURRENT_CONFLICT_GUIDE = (
+    "CONFLICT: these current decisions prescribe incompatible version formats. "
+    "Ask the developer which applies to this task before implementing either. "
+    "Their status is unchanged; this marker does not approve or retire a decision."
+)
+
+
+def current_pairs(entries: list[dict]) -> list[tuple[dict, dict]]:
+    """Conservative explicit version-format conflicts, never inferred from similarity alone.
+
+    Match an operative prescription, not a historical example or a rationale mentioning
+    an alternative. Other contradiction classes stay undetected until they have evidence
+    and a specific grammar; lexical overlap is not proof of incompatible guidance.
+    """
+    from contexer import policy
+
+    prescriptions = []
+    for entry in entries:
+        if (entry.get("type") != "decision" or store.entry_status(entry) not in {"approved", "suggested"}
+                or entry.get("bootstrap") or entry.get("superseded_by")):
+            continue
+        text = revisions.current_content(entry).lower()
+        clauses = [part.strip() for part in re.split(
+            r";|\.\s|\b(?:but|and)\s+(?=(?:prefix|publish|use|return)\b)", text)]
+        target = r"(?:(?:package[- ]release|package|git[- ]tag|sample[- ]doc) )?"
+        prefix_rule = rf"^(?:prefix|publish|use) {target}versions? (?:strings? )?with (?:a )?(?:lowercase )?v\b"
+        bare_rule = rf"^(?:publish|use|return) (?:{target}versions? as )?(?:bare|unprefixed) (?:semantic )?{target}versions?\b"
+        for clause in clauses:
+            for form, pattern in (("prefixed", prefix_rule), ("bare", bare_rule)):
+                match = re.match(pattern, clause)
+                if not match:
+                    continue
+                # Only explicit output qualifiers restrict scope. A rationale such as
+                # "so they match Git tags" does not narrow a rule for all version strings.
+                qualifier = re.search(r"\b(?:for|in|on) (?:the )?([^.;]+)", clause[match.end():])
+                output = match.group() + (" " + qualifier.group(1) if qualifier else "")
+                scope = ("tags" if re.search(r"git[- ]tags?", output) else
+                         "package" if re.search(r"package(?:[- ]release| index)?", output) else
+                         "docs" if re.search(r"(?:sample[- ]docs?|documentation|docs)\b", output) else "")
+                if not scope and re.search(r"package index (?:rejects|requires|accepts)\b", text):
+                    scope = "package"
+                prescriptions.append((entry, form, scope))
+    pairs = []
+    seen = set()
+    for left, left_form, left_scope in prescriptions:
+        for right, right_form, right_scope in prescriptions:
+            if left_form != "prefixed" or right_form != "bare":
+                continue
+            if left_scope and right_scope and left_scope != right_scope:
+                continue
+            if left.get("id") == right.get("id"):
+                continue
+            lfiles, rfiles = {path for path in left.get("source_files") or [] if isinstance(path, str)}, {path for path in right.get("source_files") or [] if isinstance(path, str)}
+            if (lfiles and rfiles and not policy.source_anchor_hits(lfiles, rfiles)
+                    and not policy.source_anchor_hits(rfiles, lfiles)):
+                continue
+            key = (left.get("id"), right.get("id"))
+            if key not in seen:
+                seen.add(key)
+                pairs.append((left, right))
+    return pairs
+
+
+def render_current_pair(left: dict, right: dict, *, seen: set | None = None) -> list[str]:
+    seen = set() if seen is None else seen
+    lines = [] if seen else [_CURRENT_CONFLICT_GUIDE]
+    for entry in (left, right):
+        if entry.get("id") in seen:
+            continue
+        seen.add(entry.get("id"))
+        status = store.entry_status(entry)
+        date = (entry.get("updated_at") or entry.get("timestamp") or "")[:10]
+        text = " ".join(revisions.current_content(entry).split())
+        lines.append(f"- [{status}, {date}] {entry.get('title') or revisions.derive_title(text)} "
+                     f"(id={entry.get('id', '')[:8]})\n    {text}")
+        proposal = entry.get("proposed_revision") or {}
+        if proposal:
+            pending = " ".join(proposal.get("content", "").split())
+            lines.append(f"    [Pending update — not approved] {pending}")
+            if proposal.get("applies_when") is not None:
+                lines.append("    Proposed applicability: " + "; ".join(proposal["applies_when"]))
+            steer = memo_steer_line(entry)
+            lines.append("    " + (steer or "Review the pending update with the developer before treating it as operative."))
+    return lines
 
 
 def _conflict_pair_key(entry: dict) -> str:

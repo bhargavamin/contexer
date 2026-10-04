@@ -129,6 +129,12 @@ Private-directory tightening uses an owner-readable descriptor when possible, so
 
 Reconciliation snapshots use strict live/tombstone reads before disposition so unreadable stores cannot dismiss held evidence. Global guard management may still use a healthy global store when the local store is corrupt; local failure is re-raised when no global id matches.
 
+### Incompatible current decisions
+
+`conflicts.current_pairs` detects explicit active prescriptions for prefixed versus bare semantic version strings, excluding historical, retired and disjoint file scopes. Startup renders each pair with both full current bodies and a clarification instruction; prompt retrieval brings the sibling alongside either selected member. This conservative supported class does not use similarity as proof of arbitrary contradictions and does not grant approval or choose a winner.
+
+Operative version-format clauses exclude negated alternatives and retain each explicit output scope. Mixed tag/package/documentation rules can conflict with a rule for the same output while compatible prescriptions for different outputs remain separate. Malformed anchors are ignored. Startup renders each conflicting identity once and keeps pending updates explicitly unapproved beside the current rule.
+
 ### Visible redaction opt-out
 
 The compatibility `redact_secrets=false` opt-out is preserved, but personal share/reconciliation results carry an explicit disabled-redaction flag and warning. MCP preview gating and CLI bypass rules require confirmation when redaction is off, independently of `skip_confirm`/`--yes`. Background personal/reconciliation drains stop and automatic proposal intents move to `redaction_disabled` attention instead of silently sending unsanitized content. Capture does not scrub or warn.

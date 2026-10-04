@@ -5463,6 +5463,16 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
 
     sys_parts = []
     full_local: list[dict] = []
+    paired = conflicts.current_pairs(pre_loaded)
+    paired_ids = {d.get("id") for pair in paired for d in pair}
+    if paired:
+        sys_parts.append("## Conflicting current decisions:")
+        rendered_pair_ids: set[str] = set()
+        for left, right in paired:
+            sys_parts.extend(conflicts.render_current_pair(left, right, seen=rendered_pair_ids))
+        full_local.extend(d for d in pre_loaded if d.get("id") in paired_ids)
+        pre_loaded = [d for d in pre_loaded if d.get("id") not in paired_ids]
+
     if global_rules:
         sys_parts.append("## Global rules (apply to ALL repos):")
         for d in global_rules:
@@ -5555,9 +5565,9 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     if compact_rehydrated:
         sys_parts.append(compact_rehydrated)
 
-    constraints = [d for d in pre_loaded if d.get("subtype") == "constraint"]
-    conventions = [d for d in pre_loaded if d.get("subtype") == "convention"]
-    patterns = [d for d in pre_loaded if d.get("subtype") == "pattern"]
+    constraints = [d for d in trusted if d.get("subtype") == "constraint"]
+    conventions = [d for d in trusted if d.get("subtype") == "convention"]
+    patterns = [d for d in trusted if d.get("subtype") == "pattern"]
 
     loaded_parts = []
     if global_rules:
@@ -6356,6 +6366,17 @@ def _render_prompt_decisions_with_records(
                    if e.get("type") == "decision"}
     global_data: dict | None = None
     global_by_id: dict[str, dict] = {}
+    requested_ids = {item.get("id") if isinstance(item, dict) else item for item in ids
+                     if not isinstance(item, dict) or item.get("scope", "personal") == "personal"}
+    paired = [pair for pair in conflicts.current_pairs(list(local_by_id.values()))
+              if any(e.get("id") in requested_ids for e in pair)]
+    ids = list(ids)
+    for pair in paired:
+        for entry in pair:
+            if entry.get("id") not in requested_ids:
+                ids.append({"scope": "personal", "id": entry["id"]})
+                requested_ids.add(entry["id"])
+
 
     def _ensure_global() -> dict:
         nonlocal global_data, global_by_id
@@ -6424,6 +6445,8 @@ def _render_prompt_decisions_with_records(
         receipts.append(receipt)
     if conflicted:
         lines.append(f"\n{conflicts._CONFLICT_GUIDE}")
+    if paired:
+        lines.append(conflicts._CURRENT_CONFLICT_GUIDE)
     return "\n".join(lines), receipts
 
 
