@@ -6781,6 +6781,8 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
     selected = {(r.get("scope", "personal"), r["id"]) if isinstance(r, dict)
                 else ("personal", r) for r in strong}
     overflow = [r for r in anchor_requests if (r.get("scope", "personal"), r["id"]) not in selected]
+    # Name the most relevant overflow first: the pointer lists only _OVERFLOW_NAMED_CAP titles (#341).
+    overflow.sort(key=candidate_priority, reverse=True)
     if strong:
         try:
             from contexer import decision_impact

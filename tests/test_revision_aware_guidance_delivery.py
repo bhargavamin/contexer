@@ -1023,6 +1023,22 @@ class TestAnchorOverflow:
             repo, content, SESSION, subtype, created_by="human", title=title,
             source_files=["src/outbox.py"])[1]
 
+    def test_overflow_names_the_most_relevant_anchors_first(self, tmp_repo):
+        """The pointer lists five titles; a relevant anchor stored after six unrelated ones
+        must not fall into the "+N more" tail."""
+        for i in range(6):
+            self._anchor(tmp_repo, f"Widget{i} gizmo{i} handling is synchronous", f"Widget{i} gizmo{i} rule")
+        for content in ("Batch failure accounting counts each batch once, never per row",
+                        "Failure accounting for a batch logs the batch size beside the error",
+                        "Accounting of batch failures emits one metric named outbox_failed"):
+            self._anchor(tmp_repo, content, content[:40])
+        self._anchor(tmp_repo, "Batch failure accounting retries a failed batch with backoff",
+                     "Retry failed batches")
+        text = store.get_context_for_prompt(
+            tmp_repo, "Refactor batch failure accounting in src/outbox.py", "overflow-order")
+        named = text.split("not shown:", 1)[1].split("(+", 1)[0]
+        assert named.count("Widget") < 5, text   # a relevant leftover outranks the unrelated ones
+
     def test_relevant_anchor_wins_a_slot_and_the_rest_are_named(self, tmp_repo):
         titles = ["Store outbox rows in arrival order", "Serialize outbox payloads as JSON",
                   "Keep outbox files under the user cache", "Expire outbox rows after a week"]
