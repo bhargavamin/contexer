@@ -45,6 +45,9 @@ jobs:
         # transient worker output outside the source checkout.
         env:
           COVERAGE_FILE: ${{ runner.temp }}/contexer-coverage
+          # A fresh checkout grows __pycache__ directories as workers first import packages,
+          # which changes witnessed directory metadata mid-collection (#386).
+          PYTHONDONTWRITEBYTECODE: "1"
         run: >-
           uv run pytest tests/ -m "not slow and not perf" -v --tb=short
           -o cache_dir=${{ runner.temp }}/contexer-pytest-cache
