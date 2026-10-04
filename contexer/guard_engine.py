@@ -768,9 +768,15 @@ def arm_guard(repo_path: str, entry_id: str, check_type: str, pattern: str = "",
                     "paths": paths, "message": message,
                     "armed_at": datetime.now(timezone.utc).isoformat()}
 
+    repo_error = None
     with store.store_lock(store.repo_slug(repo)):
-        data = store.load(repo)
-        entry = store.entry_by_id(data["entries"], entry_id)
+        try:
+            data = store.load_for_update(repo)
+        except ValueError as exc:
+            repo_error = exc
+            entry = None
+        else:
+            entry = store.entry_by_id(data["entries"], entry_id)
         if entry is not None:
             if store.entry_status(entry) != "approved":
                 raise ValueError("only approved decisions can be armed")
@@ -779,7 +785,7 @@ def arm_guard(repo_path: str, entry_id: str, check_type: str, pattern: str = "",
             return f"Armed {entry['id'][:8]} ({check_type})."
 
     with store.store_lock(store.GLOBAL_SLUG):
-        data = store.load_global()
+        data = store.load_global_for_update()
         entry = store.entry_by_id(data["entries"], entry_id)
         if entry is not None:
             if store.entry_status(entry) != "approved":
@@ -788,6 +794,8 @@ def arm_guard(repo_path: str, entry_id: str, check_type: str, pattern: str = "",
             store.save_global(data)
             return f"Armed {entry['id'][:8]} ({check_type})."
 
+    if repo_error is not None:
+        raise repo_error
     raise ValueError(f"Decision {entry_id!r} not found.")
 
 
@@ -799,9 +807,15 @@ def disarm_guard(repo_path: str, entry_id: str) -> str:
     disarming an already-unarmed decision is a harmless idempotent request."""
     repo = store.resolve_repo(repo_path)
 
+    repo_error = None
     with store.store_lock(store.repo_slug(repo)):
-        data = store.load(repo)
-        entry = store.entry_by_id(data["entries"], entry_id)
+        try:
+            data = store.load_for_update(repo)
+        except ValueError as exc:
+            repo_error = exc
+            entry = None
+        else:
+            entry = store.entry_by_id(data["entries"], entry_id)
         if entry is not None:
             had_check = entry.pop("guard_check", None) is not None
             if had_check:
@@ -810,7 +824,7 @@ def disarm_guard(repo_path: str, entry_id: str) -> str:
             return f"{entry['id'][:8]} was not armed."
 
     with store.store_lock(store.GLOBAL_SLUG):
-        data = store.load_global()
+        data = store.load_global_for_update()
         entry = store.entry_by_id(data["entries"], entry_id)
         if entry is not None:
             had_check = entry.pop("guard_check", None) is not None
@@ -819,6 +833,8 @@ def disarm_guard(repo_path: str, entry_id: str) -> str:
                 return f"Disarmed {entry['id'][:8]}."
             return f"{entry['id'][:8]} was not armed."
 
+    if repo_error is not None:
+        raise repo_error
     raise ValueError(f"Decision {entry_id!r} not found.")
 
 

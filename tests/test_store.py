@@ -1799,13 +1799,15 @@ class TestCorruptionRecovery:
         result = store.get_context(tmp_repo)
         assert "No context stored" in result
 
-    def test_capture_after_corruption_rewrites_valid_store(self, tmp_repo):
-        self._corrupt(store._store_path(tmp_repo))
-        ok, _ = store.update_decision(
-            tmp_repo, "decided to use JWT instead of sessions — stateless auth", "sess-1")
-        assert ok
-        data = json.loads(store._store_path(tmp_repo).read_text())  # valid JSON again
-        assert len(data["entries"]) == 1
+    def test_capture_after_corruption_preserves_original(self, tmp_repo):
+        path = store._store_path(tmp_repo)
+        self._corrupt(path)
+        original = path.read_bytes()
+        with pytest.raises(ValueError, match="refusing write"):
+            store.update_decision(
+                tmp_repo, "decided to use JWT instead of sessions — stateless auth", "sess-1")
+        assert path.read_bytes() == original
+
 
 
 class TestSessionFromHookStdin:
@@ -1922,8 +1924,10 @@ class TestNonDictStoreRecovery:
         store._store_path(tmp_repo).write_text("[]", encoding="utf-8")
         # Any of these would raise TypeError/AttributeError on a list/None payload.
         assert store.get_context(tmp_repo) == "No context stored for this repository."
-        ok, _ = store.update_decision(tmp_repo, "use postgres over mysql for jsonb support", "s1")
-        assert ok is True
+        original = store._store_path(tmp_repo).read_bytes()
+        with pytest.raises(ValueError, match="refusing write"):
+            store.update_decision(tmp_repo, "use postgres over mysql for jsonb support", "s1")
+        assert store._store_path(tmp_repo).read_bytes() == original
 
     def test_entries_wrong_type_reads_as_empty(self, tmp_repo):
         store._store_path(tmp_repo).write_text('{"entries": "oops"}', encoding="utf-8")
@@ -1944,8 +1948,10 @@ class TestNonDictStoreRecovery:
             json.dumps({"repo_path": tmp_repo, "entries": ["oops"]}), encoding="utf-8")
 
         assert store.load(tmp_repo)["entries"] == []
-        ok, _ = store.update_decision(tmp_repo, "use postgres over mysql for jsonb support", "s1")
-        assert ok is True
+        original = store._store_path(tmp_repo).read_bytes()
+        with pytest.raises(ValueError, match="refusing write"):
+            store.update_decision(tmp_repo, "use postgres over mysql for jsonb support", "s1")
+        assert store._store_path(tmp_repo).read_bytes() == original
 
     def test_a_non_object_entry_reads_as_unreadable_not_empty(self, tmp_repo):
         store._store_path(tmp_repo).write_text(

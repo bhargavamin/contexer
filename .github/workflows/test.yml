@@ -41,7 +41,16 @@ jobs:
       # No --cov-fail-under here — the floor lives in pyproject addopts so the
       # convention miner can see it (see the comment there before moving it).
       - name: Run tests with coverage
-        run: uv run pytest tests/ -m "not slow and not perf" -v --tb=short
+        # Qualification collection also witnesses directory metadata. Keep
+        # transient worker output outside the source checkout.
+        env:
+          COVERAGE_FILE: ${{ runner.temp }}/contexer-coverage
+          # A fresh checkout grows __pycache__ directories as workers first import packages,
+          # which changes witnessed directory metadata mid-collection (#386).
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: >-
+          uv run pytest tests/ -m "not slow and not perf" -v --tb=short
+          -o cache_dir=${{ runner.temp }}/contexer-pytest-cache
 
       - name: Write prompt-capture benchmark report
         if: matrix.python-version == '3.13'

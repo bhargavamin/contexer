@@ -1327,9 +1327,14 @@ def _sweep_orphan_holds(repo_path: str) -> tuple:
     it is and is REPORTED, so the pass says it was incomplete rather than settling silently.
     """
     try:
-        live = {str(e.get("id") or "") for e in store.load(repo_path).get("entries", [])
+        # Strict reads: a corrupt store or tombstone sidecar degrades to EMPTY on the render
+        # readers, which would make every held candidate look orphaned and dismiss its evidence.
+        live = {str(e.get("id") or "") for e in store.load_for_update(repo_path).get("entries", [])
                 if isinstance(e, dict)}
-        live |= {str(e.get("id") or "") for e in store.load_deleted(repo_path).get("entries", [])
+        tombstones, error = store.read_deleted(repo_path)
+        if error:
+            return [], []
+        live |= {str(e.get("id") or "") for e in tombstones.get("entries", [])
                  if isinstance(e, dict)}
     except Exception:                   # broad on purpose: a sweep never breaks its caller
         return [], []
