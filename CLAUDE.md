@@ -104,6 +104,7 @@ A small package (`contexer/`), intentionally minimal. Each module is a cohesive 
 - **`bootstrap.py`** / **`repository_discovery.py`** - evidence-backed bootstrap; Markdown nomination as evidence, never authority.
 - **`miner.py`** - deterministic, stdlib-only convention mining (legacy scan verification only).
 - **`updates.py`** - release-notice fact and policy; never network I/O on the hook path. Declaring a version floor is a manual maintainer act (details in the reference).
+- **`export.py`** - read-only deterministic Markdown/ADR projections; redacted by default.
 - **`redact.py`** - deterministic egress-only secret redaction; see "Secrets never egress" below.
 - **`remote.py`** / **`team_context.py`** / **`share_status.py`** - Teams protocol adapter, team-context cache, typed share outcomes.
 - **`share.py`** / **`share_policy.py`** - explicit share to Teams (never automatic on capture); local policy state for remembered automatic proposals (no network, no store lock).

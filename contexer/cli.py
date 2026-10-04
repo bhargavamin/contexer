@@ -31,6 +31,8 @@ Commands:
   retire        Retire one decision - it leaves active context, keeping its history:
                 retire <id> --reason <text> [--replaced-by <id>].
   restore       Bring one retired decision back: restore <id> [--reason <text>].
+  export        Export decisions to Markdown or ADR files:
+                export [--format md|adr] [--out DIR] [--include-retired] [--verbatim].
   erase         Permanently remove one decision's local content: erase <id> [--yes].
   ui            Local web console over the stored decisions: ui [--open] [--stop]
                 [--status] [--port N] [--foreground] [--reset-token].
@@ -209,6 +211,29 @@ def _resolve_targets(rest: list) -> list:
             sys.exit(1)
     detected = adapters.detect()
     return detected or [adapters.get("claude")]
+
+
+def export_cmd(rest: list | None = None) -> None:
+    import argparse
+    from contexer import export, store
+
+    parser = argparse.ArgumentParser(prog="contexer export")
+    parser.add_argument("--format", choices=("md", "adr"), default="md")
+    parser.add_argument("--out", type=Path, default=Path("decisions"))
+    parser.add_argument("--include-retired", action="store_true")
+    parser.add_argument("--verbatim", action="store_true")
+    args = parser.parse_args(rest or [])
+    repo = store.git_root(os.getcwd())
+    if not repo:
+        parser.error("run inside a repository")
+    if args.verbatim:
+        print("Verbatim local export: secrets and personal data are included. Review before sharing.")
+    try:
+        paths = export.write(repo, args.out, format=args.format,
+                             include_retired=args.include_retired, verbatim=args.verbatim)
+    except (OSError, ValueError) as exc:
+        parser.exit(1, f"contexer export: {exc}\n")
+    print(f"Exported {len(paths)} file(s) to {args.out.resolve()}.")
 
 
 def install(rest: list | None = None) -> None:
@@ -3089,6 +3114,7 @@ COMMANDS: tuple[Command, ...] = (
     Command(("review",), lambda rest: review(), guarded=False),
     Command(("retire",), lambda rest: _lifecycle_cmd(rest, retiring=True)),
     Command(("restore",), lambda rest: _lifecycle_cmd(rest, retiring=False)),
+    Command(("export",), lambda rest: export_cmd(rest), guarded=False, backstop=False),
     Command(("erase",), lambda rest: erase_cmd(rest), backstop=False),
     Command(("ui",), lambda rest: ui_cmd(rest)),
     # `status` already reports the available version on its own line; the aside would

@@ -315,6 +315,13 @@ What exists today: the **open-source (OSS)** version, **Personal Cloud**, and **
 Decisions can carry an optional `applies_when` list of specific task phrases. An agent capturing “keep execution synchronous” might include “slow upstream reads” and “making fetches faster.” Use concrete phrases rather than generic keywords. Changes to the applicability of approved constraints follow the same review as changes to their text. Existing decisions continue to work; applicability phrases can be added with an explicit correction.
 
 Sharing with `redact_secrets = false` warns that credentials and personal data can be sent verbatim. `skip_confirm` and CLI `--yes` cannot bypass the warning/preview; the developer must confirm the displayed payload. Background queued sends and automatic proposal delivery pause while redaction is off. Explicit confirmed sharing remains available.
+
+## Export decisions
+
+Run `contexer export --format md --out decisions/` for a Markdown document grouped by decision type, or `contexer export --format adr --out docs/adr/` for one ADR per decision. Both formats include titles, current decision text, status, dates and file applicability. `--include-retired` includes retired/superseded decisions and replacement links. Pending decisions and proposed revisions are excluded. Filenames and ordering are stable. Exports are redacted by default even when sharing redaction is disabled. Use `--verbatim` only for an explicit local copy with secrets preserved; the command warns when selected. Export does not change decisions or existing repository documentation.
+
+If live decisions or requested retired history are unreadable, export stops and leaves any previous output intact. Repair the source before retrying.
+
 ## Erase sensitive content
 
 Run `contexer erase <id>` inside the project and type `ERASE` to confirm, or use `contexer erase <id> --yes` for an explicit noninteractive erasure. The console’s **Erase content** action also requires confirmation. Erasure removes the decision’s title, all revisions and proposals, the evidence linked to it, and local copies and queued sends that contain its text or recognizable fragments of it. It cannot find a pending evidence event that only paraphrases the decision without being linked to it. A record retains its id, dates, actor, reason `erased` and opaque fingerprints that prevent exact automatic recapture without allowing the audit alone to test guessed text; it cannot be restored. Ordinary retire/delete operations preserve history instead. Shared decisions are refused with a reminder to erase the team copy too. Erasure is available only to the developer through the CLI or console.

@@ -99,7 +99,7 @@ def _is_placeholder(value: str) -> bool:
     return False
 
 
-def scrub(text: str) -> tuple[str, int]:
+def scrub(text: str, *, strict_assignments: bool = False) -> tuple[str, int]:
     """Return (redacted_text, redaction_count). Never raises."""
     try:
         if not isinstance(text, str):
@@ -126,7 +126,11 @@ def scrub(text: str) -> tuple[str, int]:
             nonlocal total
             quote = m.group(3)                       # the quote char, or None for a bare value
             value = m.group(4) if quote else m.group(5)
-            if _is_placeholder(value) or not _looks_secretlike(value):
+            prose = not quote and (m.group(1).lower(), value.rstrip(".,;")) in {
+                ("auth", "required"), ("auth", "bearer"), ("token", "short-lived")}
+            strict_credential = strict_assignments and not prose
+            inspected = value.rstrip(".,;") if prose else value
+            if _is_placeholder(value) or (not strict_credential and not _looks_secretlike(inspected)):
                 return m.group(0)
             total += 1
             secret = _PLACEHOLDER.format("secret")
@@ -143,6 +147,6 @@ def scrub(text: str) -> tuple[str, int]:
         return (text if isinstance(text, str) else ""), 0
 
 
-def scrub_text(text: str) -> str:
+def scrub_text(text: str, *, strict_assignments: bool = False) -> str:
     """Convenience: the redacted text only."""
-    return scrub(text)[0]
+    return scrub(text, strict_assignments=strict_assignments)[0]
