@@ -79,13 +79,40 @@ def compute_confidence(entry: dict) -> tuple[int, list[str]]:
     return min(score, 100), factors
 
 
+def normalize_applies_when(value: list[str] | None) -> list[str] | None:
+    """Bound task phrases so author-supplied applicability cannot become a word dump."""
+    if value is None:
+        return None
+    if not isinstance(value, list) or len(value) > 8:
+        raise ValueError("applies_when must contain at most eight short task phrases")
+    phrases = []
+    for phrase in value:
+        if not isinstance(phrase, str):
+            raise ValueError("applies_when phrases must be strings")
+        clean = " ".join(phrase.split())
+        from contexer import retrieval
+        subject = clean
+        for artifact in retrieval.raw_path_artifacts(clean):
+            subject = subject.replace(artifact, " ")
+        tokens = set(retrieval.index_tokens(subject))
+        if not clean or len(clean) > 100 or len(tokens) < 2:
+            raise ValueError("applies_when needs specific task phrases of 2+ words, at most 100 characters")
+        if tokens <= retrieval._GENERIC_TASK_WORDS:
+            raise ValueError("applies_when phrases need a word specific to the situation, "
+                             f"not only generic task words: {clean!r}")
+        if clean not in phrases:
+            phrases.append(clean)
+    return phrases
+
+
 def new_revision(decision_id: str, version_number: int, content: str, source: str,
                  confidence_score: int = 0, evidence: list | None = None,
                  approved_at: str | None = None, created_at: str | None = None,
-                 normalize: bool = True, title: str = "") -> dict:
+                 normalize: bool = True, title: str = "",
+                 applies_when: list[str] | None = None) -> dict:
     """Build one immutable revision object."""
     now = datetime.now(timezone.utc).isoformat()
-    return {
+    revision = {
         "revision_id": str(uuid.uuid4()),
         "decision_id": decision_id,
         "version_number": version_number,
@@ -97,6 +124,9 @@ def new_revision(decision_id: str, version_number: int, content: str, source: st
         "approved_at": approved_at,
         "source": source,
     }
+    if applies_when is not None:
+        revision["applies_when"] = normalize_applies_when(applies_when)
+    return revision
 
 
 def current_revision(entry: dict) -> dict | None:
@@ -125,6 +155,10 @@ def sync_decision_cache(entry: dict) -> None:
         return
     entry["content"] = revision.get("content", "")
     entry["title"] = revision.get("title") or derive_title(revision.get("content", ""))
+    if "applies_when" in revision:
+        entry["applies_when"] = list(revision["applies_when"])
+    else:
+        entry.pop("applies_when", None)
     entry["revision"] = revision.get("version_number", 1)
     entry["confidence"] = revision.get("confidence_score", entry.get("confidence", 0))
     evidence = revision.get("evidence") or []
@@ -136,11 +170,13 @@ def sync_decision_cache(entry: dict) -> None:
 
 def append_revision(entry: dict, content: str, source: str,
                     approved_at: str | None = None, title: str = "",
-                    normalize: bool = True) -> dict:
+                    normalize: bool = True, applies_when: list[str] | None = None) -> dict:
     """Append a revision, advance HEAD, invalidate stale approval, and sync its cache.
 
     `normalize=False` preserves already-collapsed case-sensitive factual content.
     """
+    if applies_when is None:
+        applies_when = (current_revision(entry) or entry).get("applies_when")
     revisions = entry.setdefault("revisions", [])
     next_version = (revisions[-1]["version_number"] + 1) if revisions else 1
     if source != "human":
@@ -151,6 +187,7 @@ def append_revision(entry: dict, content: str, source: str,
         entry.get("id", ""), next_version, content,
         source=source, confidence_score=score, evidence=factors,
         approved_at=approved_at, title=effective_title, normalize=normalize,
+        applies_when=applies_when,
     )
     revisions.append(revision)
     entry["current_revision_id"] = revision["revision_id"]

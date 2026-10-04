@@ -312,6 +312,8 @@ What exists today: the **open-source (OSS)** version, **Personal Cloud**, and **
 - **Gemini compression is deferred.** Gemini CLI restores stored context on the next turn after compression, not immediately.
 - **Contexer steers, it doesn't enforce.** Agents are told your rules before writing code; your CI and PR gates still verify. The one opt-in exception is the [commit-time guard](#commit-time-guard): a decision you explicitly `guard arm` blocks the commit it violates — but only that decision, only on the machine where it was armed, and `git commit --no-verify` still skips it, so it's a local nudge, not a replacement for CI.
 
+Decisions can carry an optional `applies_when` list of specific task phrases. An agent capturing “keep execution synchronous” might include “slow upstream reads” and “making fetches faster.” Use concrete phrases rather than generic keywords. Changes to the applicability of approved constraints follow the same review as changes to their text. Existing decisions continue to work; applicability phrases can be added with an explicit correction.
+
 Sharing with `redact_secrets = false` warns that credentials and personal data can be sent verbatim. `skip_confirm` and CLI `--yes` cannot bypass the warning/preview; the developer must confirm the displayed payload. Background queued sends and automatic proposal delivery pause while redaction is off. Explicit confirmed sharing remains available.
 ## Erase sensitive content
 

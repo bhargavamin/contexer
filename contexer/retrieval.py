@@ -28,6 +28,16 @@ _TASK_ACTIONS = frozenset({
     "add", "implement", "fix", "update", "remove", "replace", "refactor",
     "optimize", "migrate", "configure", "enable", "disable", "extend",
 })
+# Words that appear in almost any coding prompt. An `applies_when` phrase made only of these
+# ("fix test", "new feature", "code changes") would win the top slot on most task prompts.
+# ponytail: fixed word list; a corpus-df check is the upgrade if generic phrases still slip in.
+_GENERIC_TASK_WORDS = _TASK_ACTIONS | frozenset({
+    "new", "feature", "features", "code", "change", "changes", "changing", "test", "tests",
+    "testing", "task", "tasks", "bug", "bugs", "file", "files", "function", "functions",
+    "method", "methods", "class", "classes", "module", "modules", "any", "work", "working",
+    "thing", "things", "issue", "issues", "write", "writing", "making", "run", "running",
+    "fixing", "adding", "updating", "edit", "editing", "project", "repo", "all", "every",
+})
 _TASK_WRAPPER_RE = re.compile(
     r"^(?:```|~~~|>|[\"'`“”‘’]|\[(?:user|assistant|system)\]|"
     r"(?:user|assistant|system|developer)\s*:|<(?:user|assistant|system|developer)>)",
@@ -242,20 +252,35 @@ def prompt_rank(keywords: list[str], index: dict) -> list[tuple[str, float, int,
         keywords, index, tf_field="title_tf", len_field="title_len",
         df_field="title_df", avgdl_field="title_avgdl",
     )}
+    query = set(keywords)
+    applicable = {did for did, doc in index.get("docs", {}).items()
+                  if any(len(set(phrase)) >= 2 and set(phrase) <= query
+                         for phrase in doc.get("applies_phrases", []))}
+    applies = {row[0]: row for row in bm25_rank(
+        keywords, index, tf_field="applies_tf", len_field="applies_len",
+        df_field="applies_df", avgdl_field="applies_avgdl",
+    ) if row[0] in applicable}
+    # An authored complete task phrase is a more precise applicability signal than
+    # incidental mentions in a long narrative. Partial or cross-phrase hits add no weight.
+    applicability_priority = max((content.get(did, (did, 0))[1]
+                                  + _TITLE_BM25_WEIGHT * titles.get(did, (did, 0))[1]
+                                  for did in index.get("docs", {})), default=0) + 1
     ranked = []
     # Walk the persisted document order rather than a set union. Python's stable sort then
     # gives equal-score candidates deterministic ordering across hook processes.
     candidate_ids = (
-        did for did in index.get("docs", {}) if did in content or did in titles
+        did for did in index.get("docs", {}) if did in content or did in titles or did in applies
     )
     for did in candidate_ids:
         content_row = content.get(did, (did, 0.0, 0, 0))
         title_row = titles.get(did, (did, 0.0, 0, 0))
+        applies_row = applies.get(did, (did, 0.0, 0, 0))
         ranked.append((
             did,
-            content_row[1] + _TITLE_BM25_WEIGHT * title_row[1],
-            max(content_row[2], title_row[2]),
-            max(content_row[3], title_row[3]),
+            content_row[1] + _TITLE_BM25_WEIGHT * title_row[1] + applies_row[1]
+            + (applicability_priority if did in applies else 0),
+            max(content_row[2], title_row[2], applies_row[2]),
+            max(content_row[3], title_row[3], applies_row[3]),
             content_row[2],
             title_row[2],
         ))
