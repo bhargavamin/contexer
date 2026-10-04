@@ -94,8 +94,12 @@ def normalize_applies_when(value: list[str] | None) -> list[str] | None:
         subject = clean
         for artifact in retrieval.raw_path_artifacts(clean):
             subject = subject.replace(artifact, " ")
-        if not clean or len(clean) > 100 or len(set(retrieval.index_tokens(subject))) < 2:
+        tokens = set(retrieval.index_tokens(subject))
+        if not clean or len(clean) > 100 or len(tokens) < 2:
             raise ValueError("applies_when needs specific task phrases of 2+ words, at most 100 characters")
+        if tokens <= retrieval._GENERIC_TASK_WORDS:
+            raise ValueError("applies_when phrases need a word specific to the situation, "
+                             f"not only generic task words: {clean!r}")
         if clean not in phrases:
             phrases.append(clean)
     return phrases

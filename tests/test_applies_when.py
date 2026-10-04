@@ -98,6 +98,13 @@ def test_unmatchable_phrases_are_refused(tmp_repo, phrase):
         store.update_decision(tmp_repo, "Keep execution synchronous.", "s", applies_when=[phrase])
 
 
+@pytest.mark.parametrize("phrase", ["fix test", "new feature", "code changes", "any task"])
+def test_generic_task_phrases_are_refused(tmp_repo, phrase):
+    """Such a phrase is a subset of most task prompts and would take the top full slot on all of them."""
+    with pytest.raises(ValueError, match="applies_when"):
+        store.update_decision(tmp_repo, "Keep execution synchronous.", "s", applies_when=[phrase])
+
+
 def test_explicit_lookup_matches_one_term_but_not_two_mixed_phrases(tmp_repo):
     store.update_decision(tmp_repo, "Keep execution synchronous.", "s", "architecture",
                           applies_when=["slow upstream", "writing records"])

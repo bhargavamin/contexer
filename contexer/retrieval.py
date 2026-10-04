@@ -28,6 +28,16 @@ _TASK_ACTIONS = frozenset({
     "add", "implement", "fix", "update", "remove", "replace", "refactor",
     "optimize", "migrate", "configure", "enable", "disable", "extend",
 })
+# Words that appear in almost any coding prompt. An `applies_when` phrase made only of these
+# ("fix test", "new feature", "code changes") would win the top slot on most task prompts.
+# ponytail: fixed word list; a corpus-df check is the upgrade if generic phrases still slip in.
+_GENERIC_TASK_WORDS = _TASK_ACTIONS | frozenset({
+    "new", "feature", "features", "code", "change", "changes", "changing", "test", "tests",
+    "testing", "task", "tasks", "bug", "bugs", "file", "files", "function", "functions",
+    "method", "methods", "class", "classes", "module", "modules", "any", "work", "working",
+    "thing", "things", "issue", "issues", "write", "writing", "making", "run", "running",
+    "fixing", "adding", "updating", "edit", "editing", "project", "repo", "all", "every",
+})
 _TASK_WRAPPER_RE = re.compile(
     r"^(?:```|~~~|>|[\"'`“”‘’]|\[(?:user|assistant|system)\]|"
     r"(?:user|assistant|system|developer)\s*:|<(?:user|assistant|system|developer)>)",

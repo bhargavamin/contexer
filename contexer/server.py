@@ -119,7 +119,8 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
            from `content`.
 
     applies_when: up to eight specific task phrases (2+ words, <=100 characters each)
-    describing situations that need this decision. Use task vocabulary, for example
+    describing situations that need this decision, each with a situation-specific word (not
+    only generic words like "fix test" or "new feature"). Use task vocabulary, for example
     ["slow upstream reads", "making fetches faster"]. They aid deterministic retrieval;
     they grant no approval or file authority. Omit when unknown.
 
