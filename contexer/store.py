@@ -440,15 +440,20 @@ def load_for_update(repo_path: str) -> dict:
 
 
 @contextlib.contextmanager
-def evidence_publication_lock(repo_path: str, *, exclusive: bool = False):
-    """Nonblocking shared event publication; exclusive only for human privacy erasure."""
+def evidence_publication_lock(repo_path: str, *, exclusive: bool = False, wait: bool = False):
+    """Shared event publication; exclusive only for human privacy erasure.
+
+    Erasure refuses existing publishers. A publisher may wait for an erasure already in
+    progress so an unrelated event is not lost merely because the human is deleting data.
+    """
     import fcntl
     ensure_store_dir()
     fd = os.open(sidecar_path("evidence_publication_lock", slug=repo_slug(repo_path)), os.O_CREAT | os.O_RDWR, 0o600)
     acquired = False
     try:
         try:
-            fcntl.flock(fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+            fcntl.flock(fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+                        | (0 if wait else fcntl.LOCK_NB))
             acquired = True
         except BlockingIOError:
             pass

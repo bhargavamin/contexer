@@ -3,7 +3,7 @@
 The properties asserted here are the ones the design is FOR, not incidental behaviour:
 
 * a write creates one event file without listing or serializing ordinary writers; the
-  nonblocking shared publication gate excludes privacy erasure, so racing hook writers land;
+  shared publication gate excludes privacy erasure, so racing hook writers land;
 * a write is atomic - a reader sees the whole event or no event, never a torn one;
 * one bad file never hides its valid siblings (it is quarantined as it is met);
 * loss is RECORDED (`.gap`) rather than silent, whether it came from a failed write or a
@@ -46,6 +46,49 @@ def _event(**overrides):
 
 def _ago(days):
     return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+
+@pytest.mark.parametrize("erased", [False, True, "copied-token", "decision-id"])
+def test_append_waits_for_erasure_and_preserves_unrelated_evidence(tmp_repo, monkeypatch, erased):
+    from contexer import lifecycle
+
+    secret = "PERSONAL_ERASURE_PAYLOAD_987654321"
+    text = f"Use the private credential {secret} for upstream authentication."
+    _, did = store.update_decision(tmp_repo, text, "s", "architecture", created_by="human")
+    event = _event(summary=text if erased else "Keep an unrelated observation.")
+    if erased == "copied-token":
+        event["summary"] = f"The developer mentioned {secret} in another sentence."
+    if erased == "decision-id":
+        event["summary"] = "A referenced decision changed."
+        event["attributes"] = {"decision_id": did}
+    waiting = threading.Event()
+    original_lock = store.evidence_publication_lock
+
+    def observed_lock(repo, **options):
+        if options.get("wait"):
+            waiting.set()
+        return original_lock(repo, **options)
+
+    monkeypatch.setattr(store, "evidence_publication_lock", observed_lock)
+    results = []
+    with original_lock(tmp_repo, exclusive=True) as acquired:
+        assert acquired
+        worker = threading.Thread(target=lambda: results.append(spool.append_evidence(tmp_repo, event)))
+        worker.start()
+        assert waiting.wait(5)
+        assert worker.is_alive() and not results
+        # Model the committed audit while the exclusive sweep still prevents publication.
+        key = lifecycle.erasure_key(create=True)
+        store._save_deleted(tmp_repo, {"entries": [{"type": "erasure", "id": did,
+            "content_digests": [lifecycle.erasure_digest(part, key=key)
+                                for part in lifecycle.erasure_fragments(text)]}]})
+    worker.join(5)
+    assert not worker.is_alive()
+    assert results == [{"status": "stored", "errors": []}]
+    [path] = list(_pending(tmp_repo).glob("*.json"))
+    saved = json.loads(path.read_text())
+    assert saved["summary"] == ("[erased]" if erased else event["summary"])
+    assert not spool._gap_path(tmp_repo).exists()
 
 
 def _pending(repo):

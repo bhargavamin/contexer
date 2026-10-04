@@ -14,7 +14,7 @@ Storage for the evidence ledger, laid out as a spool rather than a sidecar docum
 Why per-event files: a host hook appends on every prompt and every tool use, and the one
 property that keeps that affordable is that **the cost of event N does not depend on events
 1..N-1**. `append_evidence` writes exactly one file - it never lists, reads, parses, counts
-or rewrites the spool. A nonblocking shared publication gate coordinates only with human erasure; ordinary writers run concurrently. A uuid event id in the filename is
+or rewrites the spool. A shared publication gate coordinates only with human erasure; ordinary writers run concurrently. A uuid event id in the filename is
 what removes writer contention: two concurrent writers cannot name the same target, so there
 is nothing to serialize and nothing to lose.
 
@@ -366,8 +366,10 @@ def append_evidence(repo_path: str, event: Mapping) -> dict:
     | `rejected_invalid`.
 
     NEVER raises - host hooks call this on every prompt and tool use. Writes exactly ONE file
-    and reads nothing: no listing or count, and the shared publication gate never waits, so cost is independent of how much the
-    spool already holds. An I/O failure drops the event and bumps `.gap` (recorded loss); an
+    and normally reads nothing: no listing or count, so cost is independent of how much the
+    spool already holds. Only a contended human erasure delays publication; once it finishes,
+    the event is checked against the resulting erasure audit before it is written.
+    An I/O failure drops the event and bumps `.gap` (recorded loss); an
     invalid event is rejected WITHOUT a gap bump, since a schema rejection is a caller bug
     rather than evidence going missing.
     """
@@ -375,13 +377,37 @@ def append_evidence(repo_path: str, event: Mapping) -> dict:
     if normalized is None:
         return {"status": "rejected_invalid", "errors": errors}
     try:
-        with store.evidence_publication_lock(repo_path) as acquired:
-            if not acquired:
-                raise BlockingIOError("privacy erasure is in progress")
+        def publish():
             pending = _ensure_dir(_pending_dir(repo_path))
             _write_json(pending,
                         f"{_stamp(normalized['occurred_at'])}-{normalized['event_id']}.json",
                         normalized)
+        with store.evidence_publication_lock(repo_path) as acquired:
+            if acquired:
+                publish()
+                return {"status": "stored", "errors": []}
+        with store.evidence_publication_lock(repo_path, wait=True):
+            # The audit is read only on this exceptional path. Preserve unrelated events,
+            # but do not replay an erased decision queued before the exclusive sweep.
+            from contexer import lifecycle
+            deleted, error = store.read_deleted(repo_path)
+            if error:
+                raise ValueError("Cannot verify evidence after erasure: " + error)
+            audits = [e for e in deleted["entries"] if e.get("type") == "erasure"]
+            key = lifecycle.erasure_key() if audits else None
+            erased_ids = {e["id"] for e in audits}
+            digests = {digest for e in audits for digest in e.get("content_digests", [])}
+            values = [normalized["summary"], *normalized["attributes"].values()]
+            if any(isinstance(value, str) and (value in erased_ids or
+                    (key is not None and any(lifecycle.erasure_digest(fragment, key=key) in digests
+                                             for fragment in lifecycle.erasure_fragments(value))))
+                   for value in values):
+                normalized["summary"] = "[erased]"
+                normalized["attributes"] = {}
+                normalized.pop("content_hash", None)
+            if digests and key is None:
+                raise ValueError("Erasure matcher key is missing; refusing evidence replay")
+            publish()
     except Exception as exc:            # broad on purpose: the never-raises contract
         _bump_gap(repo_path, "write_error")
         return {"status": "dropped_error", "errors": [f"{type(exc).__name__}: {exc}"]}

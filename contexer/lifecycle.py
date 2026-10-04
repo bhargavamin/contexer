@@ -82,6 +82,24 @@ def erasure_digest(content: str, *, key: bytes) -> str:
     return hmac.new(key, " ".join(content.casefold().split()).encode(), hashlib.sha256).hexdigest()
 
 
+def erasure_fragments(value: str) -> set[str]:
+    """Exact text and recognizable copied payloads covered by an erasure sweep."""
+    from contexer import redact
+
+    fragments = {value, *(line for line in value.splitlines() if line.strip())}
+    fragments.update(re.findall(r"[^\s\"'<>;,()]{16,}", value))
+    fragments.update(re.findall(r"[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}", value))
+    for pattern in redact.HIGH_CONFIDENCE_PATTERNS:
+        fragments.update(m.group(0) for m in pattern.finditer(value))
+    for match in redact._GENERIC.finditer(value):
+        secret = match.group(4) or match.group(5)
+        if redact._looks_secretlike(secret) and not redact._is_placeholder(secret):
+            fragments.add(secret)
+    fragments.update(m.group(3) for m in redact._CONN.finditer(value))
+    fragments.update(m.group(0)[len(m.group(1)):] for m in redact._BEARER.finditer(value))
+    return fragments
+
+
 def erase_decision(repo_path: str, entry_id: str, *, confirm: bool = False,
                    actor: str = "human") -> tuple[bool, str]:
     """Human-only privacy erasure; deliberately absent from the MCP surface.
@@ -94,7 +112,7 @@ def erase_decision(repo_path: str, entry_id: str, *, confirm: bool = False,
         return False, "Erasure is permanent. Confirm explicitly to remove all local content."
     if actor not in {"human", "cli", "ui"}:
         return False, "Unknown erasure actor; use human, cli or ui."
-    from contexer import redact, share, share_policy, sidecars
+    from contexer import share, share_policy, sidecars
 
     slug = store.repo_slug(repo_path)
     try:
@@ -171,20 +189,9 @@ def erase_decision(repo_path: str, entry_id: str, *, confirm: bool = False,
                     if field in {"id", "revision_id", "proposal_id", "event_id", "event_ids"}:
                         identities.add(value)
                     elif field in text_fields:
-                        fragments.add(value)
-                        fragments.update(line for line in value.splitlines() if line.strip())
                         # Credentials and personal identifiers may be quoted inside larger
                         # evidence records. Preserve ordinary short prose tokens elsewhere.
-                        fragments.update(re.findall(r"[^\s\"'<>;,()]{16,}", value))
-                        fragments.update(re.findall(r"[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}", value))
-                        for pattern in redact.HIGH_CONFIDENCE_PATTERNS:
-                            fragments.update(m.group(0) for m in pattern.finditer(value))
-                        for match in redact._GENERIC.finditer(value):
-                            secret = match.group(4) or match.group(5)
-                            if redact._looks_secretlike(secret) and not redact._is_placeholder(secret):
-                                fragments.add(secret)
-                        fragments.update(m.group(3) for m in redact._CONN.finditer(value))
-                        fragments.update(m.group(0)[len(m.group(1)):] for m in redact._BEARER.finditer(value))
+                        fragments.update(erasure_fragments(value))
 
             for entry in matches:
                 collect(entry)
@@ -245,10 +252,8 @@ def erase_decision(repo_path: str, entry_id: str, *, confirm: bool = False,
             graveyard["entries"].append({"type": "erasure", "id": decision_id,
                 "timestamp": matches[0].get("timestamp", ""), "deleted_at": now,
                 "deleted_by": actor, "reason": "erased",
-                "content_digests": sorted({erasure_digest(r["content"], key=matcher_key)
-                    for entry in matches for r in [entry, *(entry.get("revisions") or []),
-                                                   entry.get("proposed_revision") or {}]
-                    if r.get("content")})})
+                "content_digests": sorted({erasure_digest(fragment, key=matcher_key)
+                                           for fragment in fragments})})
             store._save_deleted(repo_path, graveyard, durable=True)
             store.save(repo_path, data, durable=True)
             return True, f"Erased {decision_id[:8]}; content cannot be restored."
