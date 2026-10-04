@@ -144,7 +144,8 @@ def validate(campaign_dir):
     recomputed["excluded_errored"] = len(err_rows)
     _check_anomalies(rows, ok_rows, err_rows, warnings, recomputed)
     _check_paired(ok_rows, warnings, recomputed)
-    _check_chains(rows, failures)
+    _check_chains(rows, failures, _chain_lengths(campaign))
+    _check_capture_fields(ok_rows, failures)
     _check_interleaving(rows, warnings)
     _check_memory_isolation(rows, failures)
     _check_tier_coverage(rows, warnings)
@@ -358,19 +359,53 @@ def _check_paired(ok_rows, warnings, recomputed):
     recomputed["paired"] = paired
 
 
-def _check_chains(rows, failures):
-    """Check 7 (coverage only): each chain must cover steps 1..3 in every
-    condition observed in the campaign."""
+def _chain_lengths(campaign: dict) -> dict:
+    """Each chain's step count from the campaign's own task file, when campaign.json names one
+    that still exists; {} otherwise (then coverage falls back to the rows)."""
+    try:
+        tasks = json.loads(Path(campaign["tasks_file"]).read_text())
+    except (KeyError, OSError, TypeError, json.JSONDecodeError):
+        return {}
+    lengths: dict = {}
+    for t in tasks if isinstance(tasks, list) else []:
+        if isinstance(t, dict) and t.get("chain"):
+            lengths[t["chain"]] = max(lengths.get(t["chain"], 0), int(t.get("step") or 0))
+    return lengths
+
+
+def _check_chains(rows, failures, lengths: dict = None):
+    """Check 7 (coverage only): each chain must cover steps 1..N in every condition observed in
+    the campaign. N comes from the task file when known (so a final step missing from every arm
+    is still caught), else the chain's highest recorded step; chains differ in length (the memory
+    chains have three steps, the capture loop two)."""
+    lengths = lengths or {}
     chains = sorted({r.get("chain") for r in rows if r.get("chain")})
     conds = _conditions_present(rows)
     for chain in chains:
+        last = lengths.get(chain) or max(int(r.get("step", 0) or 0) for r in rows
+                                         if r.get("chain") == chain)
         for c in conds:
             steps = {int(r.get("step", 0) or 0) for r in rows
                      if r.get("chain") == chain and r.get("condition") == c}
-            missing = [s for s in (1, 2, 3) if s not in steps]
+            missing = [s for s in range(1, last + 1) if s not in steps]
             if missing:
                 failures.append(f"chain '{chain}' condition '{c}' missing step(s): "
                                 f"{missing}")
+
+
+def _check_capture_fields(rows, failures):
+    """Capture loop integrity: a clean session-1 row on an arm with memory must say whether the
+    rule was captured, and a clean Contexer session-2 row whether it was delivered, so a broken
+    measurement can't pass silently as 'not captured'."""
+    for r in rows:
+        if r.get("kind") != "capture":
+            continue
+        where = f"{r.get('task_id')} {r.get('condition')} rep {r.get('rep')}"
+        if r.get("step") == 1 and r.get("condition") in ("claudemd_maintained", "with") \
+                and "captured" not in r:
+            failures.append(f"capture row without 'captured': {where}")
+        if r.get("step") == 2 and r.get("condition") == "with" and "needed_delivery" not in r:
+            failures.append(f"capture row without 'needed_delivery': {where}")
 
 
 def _check_interleaving(rows, warnings):

@@ -233,6 +233,22 @@ def _docs_indexed_setup(work: Path, seed_decisions: list) -> None:
     (work / "CLAUDE.md").write_text("\n".join(index) + "\n")
 
 
+_MAINTAINED_HEADING = "## Decisions"
+
+
+def _maintained_setup(work: Path) -> None:
+    """The capture-loop competitor: no Contexer, and a CLAUDE.md that starts with no decisions
+    and asks the agent to keep it current, the way a team that maintains CLAUDE.md works. What
+    session 1 writes under the heading is all session 2 gets."""
+    (work / "CLAUDE.md").write_text("\n".join([
+        "# Project: record service", "",
+        "FastAPI-style record service (Python, managed with uv). Run `uv run pytest tests/ -q`"
+        " before finishing any task.", "",
+        _MAINTAINED_HEADING, "",
+        "Record every engineering decision you make or are told here, one bullet each with its"
+        " reason, so later sessions follow it.", ""]) + "\n")
+
+
 # Which static rules file(s) each condition writes into the work repo.
 _FILE_CONDITIONS = {
     "claudemd": ("CLAUDE.md",),
@@ -290,15 +306,20 @@ def _blocks(entry: dict) -> list[dict]:
     return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
 
 
-def _needed_delivery(home: Path, content: str, entry_id: str) -> tuple[str, int]:
-    """(how the needed decision reached the agent, Contexer lookups the agent made), read
-    from the session transcript. Only what CONTEXER gave the agent counts: hook context
+def _transcripts(home: Path) -> set:
+    return set((home / ".claude" / "projects").rglob("*.jsonl"))
+
+
+def _contexer_received(home: Path, skip: set = frozenset()) -> tuple[str, int]:
+    """(everything Contexer gave the agent, Contexer lookups the agent made), read from the
+    session transcript. Only what CONTEXER gave counts: hook context
     (`hook_additional_context` attachments) and results of the agent's own Contexer tool calls,
-    so neither an echo nor a file the agent read can: "full" when the decision's whole text
-    arrived, "named" when only its id did (a pointer), else "none". Lookups count the agent's
-    calls to Contexer's get_context tools, the way a pointer is followed up."""
+    so neither an echo nor a file the agent read can. Lookups count the agent's calls to
+    Contexer's get_context tools, the way a pointer is followed up. `skip` leaves out earlier
+    sessions' transcripts: chain steps share a HOME, and session 1's capture acknowledgement
+    repeats the rule, which would read as delivery to session 2."""
     entries = []
-    for transcript in (home / ".claude" / "projects").rglob("*.jsonl"):
+    for transcript in _transcripts(home) - set(skip):
         for line in transcript.read_text(errors="ignore").splitlines():
             try:
                 entry = json.loads(line)
@@ -320,12 +341,87 @@ def _needed_delivery(home: Path, content: str, entry_id: str) -> tuple[str, int]
                         if block.get("type") == "tool_result"
                         and block.get("tool_use_id") in contexer_calls
                         for s in _strings(block.get("content")))
-    text = " ".join(" ".join(received).split())
+    return " ".join(" ".join(received).split()), lookups
+
+
+def _needed_delivery(home: Path, content: str, entry_id: str) -> tuple[str, int]:
+    """(how the needed decision reached the agent, Contexer lookups): "full" when the decision's
+    whole text arrived, "named" when only its id did (a pointer), else "none"."""
+    text, lookups = _contexer_received(home)
     if " ".join(content.split()) in text:
         return "full", lookups
     if entry_id and entry_id[:8] in text:
         return "named", lookups
     return "none", lookups
+
+
+def _matches(patterns: list, text: str, noise: tuple = ()) -> bool:
+    """Whether any pattern appears in `text`, after removing `noise`: the run's own repository
+    path and chain name, which hook output repeats and which can contain a rule word
+    (`w-cap-cents-with-0` matched the cents rule in the first smoke run)."""
+    for word in noise:
+        text = text.replace(word, " ")
+    return any(re.search(p, text, re.IGNORECASE) for p in patterns)
+
+
+def _run_noise(work: Path, task: dict) -> tuple:
+    return tuple(w for w in (str(work), str(work.resolve()), work.name, task.get("chain", "")) if w)
+
+
+def _revert_code_keep_memory(work: Path, base_sha: str, condition: str) -> None:
+    """Capture loop, between sessions: put the repository back where session 1 started, keeping
+    only the arm's own memory (the maintained CLAUDE.md; Contexer's store lives in HOME). Session
+    1's code applies the rule, and any note it left (a CLAUDE.md it created in another arm, a
+    stray file) would hand the rule to session 2 through a channel that arm isn't meant to have.
+    Raises when git fails, so a chain never continues on an unreverted tree."""
+    claude_md = work / "CLAUDE.md"
+    keep = condition == "claudemd_maintained" and claude_md.exists()
+    kept = claude_md.read_text(errors="replace") if keep else None
+    for cmd in (["reset", "-q", "--hard", base_sha], ["clean", "-fdq", "-e", ".venv"]):
+        done = subprocess.run(["git", "-C", str(work), *cmd], capture_output=True, text=True,
+                              timeout=60)
+        if done.returncode != 0:
+            raise RuntimeError(f"capture revert failed: git {cmd[0]}: {done.stderr.strip()[:200]}")
+    if kept is not None:
+        claude_md.write_text(kept)
+
+
+def _capture_state(condition: str, work: Path, home: Path, patterns: list,
+                   noise: tuple = ()) -> dict:
+    """Capture loop, between sessions: whether session 1 recorded the rule where session 2 can
+    find it, judged by the task's `capture_terms` patterns over what was stored (the rule's
+    wording is the agent's own, so there's no fixed text to compare). Contexer: the decisions
+    in the isolated store, their status, and how many wait for review; no approval is simulated.
+    claudemd_maintained: the CLAUDE.md the session left behind. Read-only."""
+    if condition in _CONTEXER_CONDITIONS:
+        decisions = []
+        for path in (home / ".contexer").glob("*.json"):
+            # pathlib's glob also returns dot-file sidecars (indexes, outbox, ui state); only
+            # repository stores and the global store hold decisions. Global rules reach every
+            # repository, so they count.
+            if path.name.startswith(".") or path.name.endswith(".deleted.json"):
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict) or not isinstance(data.get("entries"), list):
+                continue
+            decisions += [e for e in data["entries"]
+                          if isinstance(e, dict) and e.get("type") == "decision"]
+        hits = [e for e in decisions
+                if _matches(patterns, f"{e.get('title', '')} {e.get('content', '')}", noise)]
+        return {"captured": bool(hits),
+                "capture_status": hits[0].get("status", "approved") if hits else None,
+                "decisions_stored": len(decisions),
+                "decisions_pending": sum(e.get("status") == "pending_approval"
+                                         for e in decisions)}
+    if condition == "claudemd_maintained":
+        claude_md = work / "CLAUDE.md"
+        text = claude_md.read_text(errors="replace") if claude_md.exists() else ""
+        decisions = text.split(_MAINTAINED_HEADING, 1)[1] if _MAINTAINED_HEADING in text else ""
+        return {"captured": _matches(patterns, decisions, noise)}
+    return {}
 
 
 def _telemetry_check(row: dict, snap: dict):
@@ -424,6 +520,10 @@ def run_campaign(out_dir: Path, reps: int = 3, task_ids=None, claude_cmd: str = 
                                            claude_cmd, seed, model, rx, contexer_sources, wait_for_otel,
                                            steady_state)
                             _append(out, row)
+                            if row["error"]:
+                                # Later steps would run on an unknown state (a failed session or
+                                # revert); leave them missing so validation flags the chain.
+                                break
                         _discard(work, home)
     finally:
         rx.stop()
@@ -491,6 +591,8 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
             files = _FILE_CONDITIONS.get(condition)
             if files:
                 _condition_c_setup(work, task["seed_decision"], files, seed_decisions=seeds)
+            if condition == "claudemd_maintained":
+                _maintained_setup(work)
             if condition == "docs_indexed":
                 legacy = ([{"content": task["seed_decision"], "subtype": "constraint"}]
                           if task["seed_decision"] else [])
@@ -508,6 +610,7 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
         # from a live `git diff HEAD` — score against where the repo started.
         base_sha = subprocess.run(["git", "-C", str(work), "rev-parse", "HEAD"],
                                   capture_output=True, text=True).stdout.strip() or "HEAD"
+        earlier = _transcripts(home)
         res = _run_session(str(work), prompt, claude_cmd,
                            _session_env(home, rx.port), model)
         if res.get("_error"):
@@ -534,6 +637,11 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
             score.changed_files(str(work), base_sha), baseline)
         row["rationale"] = score.rationale_score(res.get("result", ""), task["gold"])
         row["result_snippet"] = str(res.get("result", ""))[:300]
+        if task.get("capture_terms") and condition in _CONTEXER_CONDITIONS and task["step"] > 1:
+            # Capture loop, session 2: did the rule session 1 recorded reach this agent?
+            text, row["contexer_lookups"] = _contexer_received(home, earlier)
+            row["needed_delivery"] = ("full" if _matches(task["capture_terms"], text,
+                                                         _run_noise(work, task)) else "none")
         if needed:
             # Contexer arms only: a static rules file is loaded into the system prompt, which
             # the transcript doesn't record, so "none" there would be a false reading.
@@ -568,6 +676,10 @@ def _one_run(task, condition, rep, work: Path, home: Path, baseline,
         if failures:
             # The session's folders are discarded after scoring: keep why the check failed.
             row["check_output"] = "\n".join(failures)[-3000:]
+        if task.get("capture_terms") and task["step"] == 1:
+            row.update(_capture_state(condition, work, home, task["capture_terms"],
+                                      _run_noise(work, task)))
+            _revert_code_keep_memory(work, base_sha, condition)
         if task["chain"]:
             # Snapshot the worktree so the next step scores ONLY its own work —
             # otherwise an untracked file left by step 1 is re-counted by steps 2-3

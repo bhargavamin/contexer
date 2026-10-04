@@ -1,0 +1,334 @@
+[
+  {
+    "id": "cap-cents-1",
+    "kind": "capture",
+    "chain": "cap-cents",
+    "step": 1,
+    "prompt": "Add order_total(prices: list[float]) -> dict to app/svc_{seed}_core.py that returns the total of a list of item prices. Something to know about this service: money is always an integer number of cents under the key amount_cents, never a float, because float totals came out a cent off in last quarter's reconciliation. Add a test and run the tests.",
+    "check_cmd": "uv run python -c \"import app.svc_{seed}_core as m; r = m.order_total([1.10, 2.20]); assert type(r.get('amount_cents')) is int and r['amount_cents'] == 330, r\"",
+    "functional_cmd": "",
+    "gold": [],
+    "seed_decision": "",
+    "seed_decisions": [],
+    "fixture_files": [],
+    "class": "H5",
+    "capture_terms": [
+      "amount_cents",
+      "\\bcents\\b",
+      "minor.{0,12}units"
+    ],
+    "plausible_wrong": null
+  },
+  {
+    "id": "cap-cents-2",
+    "kind": "capture",
+    "chain": "cap-cents",
+    "step": 2,
+    "prompt": "Add refund_amount(total_cents: int, percent: int) -> dict to app/svc_{seed}_core.py that computes a partial refund of an order. Add a test and run the tests.",
+    "check_cmd": "uv run python -c \"import app.svc_{seed}_core as m; r = m.refund_amount(1000, 25); assert type(r.get('amount_cents')) is int and r['amount_cents'] == 250, r\"",
+    "functional_cmd": "uv run python -c \"import app.svc_{seed}_core as m; \ndef leaves(x):\n    if isinstance(x, dict):\n        return [v for y in x.values() for v in leaves(y)]\n    if isinstance(x, (list, tuple)):\n        return [v for y in x for v in leaves(y)]\n    return [x]\nr = m.refund_amount(1000, 25)\nassert any(v in (250, 2.5) for v in leaves(r)), r\"",
+    "gold": [],
+    "seed_decision": "",
+    "seed_decisions": [],
+    "fixture_files": [],
+    "class": "H5",
+    "capture_terms": [
+      "amount_cents",
+      "\\bcents\\b",
+      "minor.{0,12}units"
+    ],
+    "plausible_wrong": "a key named after the operation, such as {'refund_cents': 250} or {'refund': 2.5}"
+  },
+  {
+    "id": "cap-recprefix-1",
+    "kind": "capture",
+    "chain": "cap-recprefix",
+    "step": 1,
+    "prompt": "Add record_ref(record_id: int) -> dict to app/svc_{seed}_core.py returning a reference to a record that other services can store. Ids that leave this module are strings prefixed rec_, like 'rec_42', because the gateway's router dispatches on that prefix. Add a test and run the tests.",
+    "check_cmd": "uv run python -c \"import app.svc_{seed}_core as m; r = m.record_ref(42); assert 'rec_42' in r.values(), r\"",
+    "functional_cmd": "",
+    "gold": [],
+    "seed_decision": "",
+    "seed_decisions": [],
+    "fixture_files": [],
+    "class": "H5",
+    "capture_terms": [
+      "rec_",
+      "prefix\\w*.{0,40}\\b(id|ids|record)",
+      "record.prefixed"
+    ],
+    "plausible_wrong": null
+  },
+  {
+    "id": "cap-recprefix-2",
+    "kind": "capture",
+    "chain": "cap-recprefix",
+    "step": 2,
+    "prompt": "Add link_records(parent_id: int, child_id: int) -> dict to app/svc_{seed}_core.py that describes a parent-child link between two records for the gateway. Add a test and run the tests.",
+    "check_cmd": "uv run python -c \"import app.svc_{seed}_core as m; \ndef leaves(x):\n    if isinstance(x, dict):\n        return [v for y in x.values() for v in leaves(y)]\n    if isinstance(x, (list, tuple)):\n        return [v for y in x for v in leaves(y)]\n    return [x]\nr = m.link_records(1, 2)\nvals = leaves(r)\nassert 'rec_1' in vals and 'rec_2' in vals, r\"",
+    "functional_cmd": "uv run python -c \"import app.svc_{seed}_core as m; \ndef leaves(x):\n    if isinstance(x, dict):\n        return [v for y in x.values() for v in leaves(y)]\n    if isinstance(x, (list, tuple)):\n        return [v for y in x for v in leaves(y)]\n    return [x]\nr = m.link_records(1, 2)\nvals = [str(v) for v in leaves(r)]\nassert any(v in ('1', 'rec_1') for v in vals) and any(v in ('2', 'rec_2') for v in vals), r\"",
+    "gold": [],
+    "seed_decision": "",
+    "seed_decisions": [],
+    "fixture_files": [],
+    "class": "H5",
+    "capture_terms": [
+      "rec_",
+      "prefix\\w*.{0,40}\\b(id|ids|record)",
+      "record.prefixed"
+    ],
+    "plausible_wrong": "plain integer ids: {'parent_id': 1, 'child_id': 2}"
+  },
+  {
+    "id": "cap-millis-1",
+    "kind": "capture",
+    "chain": "cap-millis",
+    "step": 1,
+    "prompt": "Add timed_fetch(record_id: int) -> dict to app/svc_{seed}_core.py that fetches the slot 0 record for the id and reports how long the fetch took. Team convention: durations are integers in milliseconds under keys ending in _ms (for example took_ms), because the latency dashboards parse that suffix. Add a test and run the tests.",
+    "check_cmd": "uv run python -c \"import app.svc_{seed}_core as m; r = m.timed_fetch(1); ks = [k for k in r if str(k).endswith('_ms')]; assert ks and all(type(r[k]) is int for k in ks), r\"",
+    "functional_cmd": "",
+    "gold": [],
+    "seed_decision": "",
+    "seed_decisions": [],
+    "fixture_files": [],
+    "class": "H5",
+    "capture_terms": [
+      "_ms\\b",
+      "millisecond",
+      "\\bms\\b"
+    ],
+    "plausible_wrong": null
+  },
+  {
+    "id": "cap-millis-2",
+    "kind": "capture",
+    "chain": "cap-millis",
+    "step": 2,
+    "prompt": "Add backoff_delay(attempt: int) -> dict to app/svc_{seed}_core.py describing how long a caller should wait before attempt number `attempt`, starting at half a second for attempt 1 and doubling each time. Add a test and run the tests.",
+    "check_cmd": "uv run python -c \"import app.svc_{seed}_core as m; r = m.backoff_delay(3); ks = [k for k in r if str(k).endswith('_ms')]; assert ks and type(r[ks[0]]) is int and r[ks[0]] == 2000, r; assert not any(v in (2, 2.0) for v in r.values() if not isinstance(v, bool)), 'a seconds value is still returned'\"",
+    "functional_cmd": "uv run python -c \"import app.svc_{seed}_core as m; \ndef leaves(x):\n    if isinstance(x, dict):\n        return [v for y in x.values() for v in leaves(y)]\n    if isinstance(x, (list, tuple)):\n        return [v for y in x for v in leaves(y)]\n    return [x]\nr = m.backoff_delay(3)\nassert any(v in (2, 2.0, 2000) for v in leaves(r)), r\"",
+    "gold": [],
+    "seed_decision": "",
+    "seed_decisions": [],
+    "fixture_files": [],
+    "class": "H5",
+    "capture_terms": [
+      "_ms\\b",
+      "millisecond",
+      "\\bms\\b"
+    ],
+    "plausible_wrong": "seconds as a float: {'delay_seconds': 2.0}"
+  },
+  {
+    "id": "cap-errdict-1",
+    "kind": "capture",
+    "chain": "cap-errdict",
+    "step": 1,
+    "prompt": "Add parse_slot(text: str) -> dict to app/svc_{seed}_core.py that turns strings like 'slot-07' into the slot number. Public functions here never raise for bad input; they return {'ok': False, 'error': '<short_code>'} instead, and {'ok': True, ...} on success, because the gateway maps those codes straight to HTTP responses. Add a test and run the tests.",
+    "check_cmd": "uv run python -c \"import app.svc_{seed}_core as m; r = m.parse_slot('slot-07'); assert r.get('ok') is True and 7 in r.values(), r; e = m.parse_slot('nope'); assert e.get('ok') is False and isinstance(e.get('error'), str), e\"",
+    "functional_cmd": "",
+    "gold": [],
+    "seed_decision": "",
+    "seed_decisions": [],
+    "fixture_files": [],
+    "class": "H5",
+    "capture_terms": [
+      "ok.{0,8}false",
+      "never raise",
+      "don.t raise",
+      "instead of (throwing|raising)",
+      "structured error",
+      "error result"
+    ],
+    "plausible_wrong": null
+  },
+  {
+    "id": "cap-errdict-2",
+    "kind": "capture",
+    "chain": "cap-errdict",
+    "step": 2,
+    "prompt": "Add parse_record_number(text: str) -> dict to app/svc_{seed}_core.py that parses strings like 'R-42' into the number 42 and rejects anything else. Add a test and run the tests.",
+    "check_cmd": "uv run python -c \"import app.svc_{seed}_core as m; \ndef leaves(x):\n    if isinstance(x, dict):\n        return [v for y in x.values() for v in leaves(y)]\n    if isinstance(x, (list, tuple)):\n        return [v for y in x for v in leaves(y)]\n    return [x]\ng = m.parse_record_number('R-42'); assert g.get('ok') is True and 42 in leaves(g), g\ntry:\n    e = m.parse_record_number('x')\nexcept Exception as exc:\n    raise SystemExit('raised: %r' % exc)\nassert e.get('ok') is False and isinstance(e.get('error'), str), e\nimport re\nassert re.fullmatch('[A-Za-z0-9_.-]{1,40}', e['error']), 'error is not a short code: %r' % e['error']\"",
+    "functional_cmd": "uv run python -c \"import app.svc_{seed}_core as m; \ndef leaves(x):\n    if isinstance(x, dict):\n        return [v for y in x.values() for v in leaves(y)]\n    if isinstance(x, (list, tuple)):\n        return [v for y in x for v in leaves(y)]\n    return [x]\ng = m.parse_record_number('R-42')\nassert 42 in leaves(g), g\"",
+    "gold": [],
+    "seed_decision": "",
+    "seed_decisions": [],
+    "fixture_files": [],
+    "class": "H5",
+    "capture_terms": [
+      "ok.{0,8}false",
+      "never raise",
+      "don.t raise",
+      "instead of (throwing|raising)",
+      "structured error",
+      "error result"
+    ],
+    "plausible_wrong": "raise ValueError for bad input, as idiomatic Python does"
+  },
+  {
+    "id": "cap-paging-1",
+    "kind": "capture",
+    "chain": "cap-paging",
+    "step": 1,
+    "prompt": "Add list_slot_numbers() to app/svc_{seed}_core.py returning the slot numbers 0-24 one page at a time. All our list functions take offset and page_size, with page_size defaulting to 25 and capped at 100, because the web table and the gateway agree on those numbers. Add a test and run the tests.",
+    "check_cmd": "uv run python -c \"import app.svc_{seed}_core as m; import inspect; p = inspect.signature(m.list_slot_numbers).parameters; assert 'offset' in p and p['page_size'].default == 25, p\"",
+    "functional_cmd": "",
+    "gold": [],
+    "seed_decision": "",
+    "seed_decisions": [],
+    "fixture_files": [],
+    "class": "H5",
+    "capture_terms": [
+      "page.?size"
+    ],
+    "plausible_wrong": null
+  },
+  {
+    "id": "cap-paging-2",
+    "kind": "capture",
+    "chain": "cap-paging",
+    "step": 2,
+    "prompt": "Add list_recent_ids(record_ids: list[int]) to app/svc_{seed}_core.py that returns the given ids one page at a time. Add a test and run the tests.",
+    "check_cmd": "uv run python -c \"import app.svc_{seed}_core as m; import inspect; p = inspect.signature(m.list_recent_ids).parameters; assert 'offset' in p and 'page_size' in p and p['page_size'].default == 25, p; items = lambda r: r if isinstance(r, list) else next((v for v in r.values() if isinstance(v, list)), []) if isinstance(r, dict) else list(r); f = lambda *a, **k: items(m.list_recent_ids(*a, **k)); ids = list(range(10)); a = f(ids, offset=0, page_size=2); b = f(ids, offset=2, page_size=2); assert len(a) == 2 and len(b) == 2 and not set(a) & set(b), (a, b); assert len(f(list(range(300)), page_size=500)) == 100\"",
+    "functional_cmd": "uv run python -c \"import app.svc_{seed}_core as m; r = m.list_recent_ids(list(range(10)))\npage = r if isinstance(r, list) else next((v for v in r.values() if isinstance(v, list)), []) if isinstance(r, dict) else list(r)\nassert page and all(x in range(10) for x in page), r\"",
+    "gold": [],
+    "seed_decision": "",
+    "seed_decisions": [],
+    "fixture_files": [],
+    "class": "H5",
+    "capture_terms": [
+      "page.?size"
+    ],
+    "plausible_wrong": "page and per_page (or limit) parameters with a default such as 10 or 20, and no cap"
+  },
+  {
+    "id": "cap-newest-1",
+    "kind": "capture",
+    "chain": "cap-newest",
+    "step": 1,
+    "prompt": "Add records_for(ids: list[int]) -> list[dict] to app/svc_{seed}_core.py returning the slot 0 record for each id. Lists of records we return are always sorted by id, highest first, because clients render them as a newest-first feed. Add a test and run the tests.",
+    "check_cmd": "uv run python -c \"import app.svc_{seed}_core as m; r = m.records_for([2, 9, 4]); assert [x['id'] for x in r] == [9, 4, 2], r\"",
+    "functional_cmd": "",
+    "gold": [],
+    "seed_decision": "",
+    "seed_decisions": [],
+    "fixture_files": [],
+    "class": "H5",
+    "capture_terms": [
+      "highest first",
+      "newest.first",
+      "descending",
+      "sorted by id",
+      "largest",
+      "high\\w* to low",
+      "revers"
+    ],
+    "plausible_wrong": null
+  },
+  {
+    "id": "cap-newest-2",
+    "kind": "capture",
+    "chain": "cap-newest",
+    "step": 2,
+    "prompt": "Add records_in_slot(ids: list[int], slot: int) -> list[dict] to app/svc_{seed}_core.py returning each id's record for the given slot (0-24). Add a test and run the tests.",
+    "check_cmd": "uv run python -c \"import app.svc_{seed}_core as m; r = m.records_in_slot([3, 8, 5], 2); assert [x['id'] for x in r] == [8, 5, 3], r\"",
+    "functional_cmd": "uv run python -c \"import app.svc_{seed}_core as m; r = m.records_in_slot([3, 8, 5], 2); assert sorted(x['id'] for x in r) == [3, 5, 8] and all(x.get('slot') == 2 for x in r), r\"",
+    "gold": [],
+    "seed_decision": "",
+    "seed_decisions": [],
+    "fixture_files": [],
+    "class": "H5",
+    "capture_terms": [
+      "highest first",
+      "newest.first",
+      "descending",
+      "sorted by id",
+      "largest",
+      "high\\w* to low",
+      "revers"
+    ],
+    "plausible_wrong": "the records in input order"
+  },
+  {
+    "id": "cap-camel-1",
+    "kind": "capture",
+    "chain": "cap-camel",
+    "step": 1,
+    "prompt": "Add record_summary(record_id: int) -> dict to app/svc_{seed}_core.py with the record's id, its slot and whether the id is positive. Keys in dicts we return use camelCase (recordId, slotNumber), because the web client consumes them without a mapping layer. Add a test and run the tests.",
+    "check_cmd": "uv run python -c \"import app.svc_{seed}_core as m; r = m.record_summary(3); assert 'recordId' in r and not any('_' in k for k in r), r\"",
+    "functional_cmd": "",
+    "gold": [],
+    "seed_decision": "",
+    "seed_decisions": [],
+    "fixture_files": [],
+    "class": "H5",
+    "capture_terms": [
+      "camel",
+      "recordId"
+    ],
+    "plausible_wrong": null
+  },
+  {
+    "id": "cap-camel-2",
+    "kind": "capture",
+    "chain": "cap-camel",
+    "step": 2,
+    "prompt": "Add slot_overview(slot: int) -> dict to app/svc_{seed}_core.py giving the slot number, the name of the fetcher function that serves it, and whether it is the first slot. Add a test and run the tests.",
+    "check_cmd": "uv run python -c \"import app.svc_{seed}_core as m; r = m.slot_overview(3); assert isinstance(r, dict) and len(r) >= 2, r; import re; assert all(re.fullmatch('[a-z][a-zA-Z0-9]*', k) for k in r), r\"",
+    "functional_cmd": "uv run python -c \"import app.svc_{seed}_core as m; \ndef leaves(x):\n    if isinstance(x, dict):\n        return [v for y in x.values() for v in leaves(y)]\n    if isinstance(x, (list, tuple)):\n        return [v for y in x for v in leaves(y)]\n    return [x]\nr = m.slot_overview(3)\nassert isinstance(r, dict) and 3 in leaves(r), r\"",
+    "gold": [],
+    "seed_decision": "",
+    "seed_decisions": [],
+    "fixture_files": [],
+    "class": "H5",
+    "capture_terms": [
+      "camel",
+      "recordId"
+    ],
+    "plausible_wrong": "snake_case keys such as slot_number and fetcher_name"
+  },
+  {
+    "id": "cap-ynflags-1",
+    "kind": "capture",
+    "chain": "cap-ynflags",
+    "step": 1,
+    "prompt": "Add record_flags(record_id: int) -> dict to app/svc_{seed}_core.py saying whether the record id is even and whether it is above 1000. Flags in our return values are the strings 'Y' and 'N', never booleans, because the mainframe export reads them as single characters. Add a test and run the tests.",
+    "check_cmd": "uv run python -c \"import app.svc_{seed}_core as m; r = m.record_flags(1002); assert set(r.values()) >= {'Y'} and not any(isinstance(v, bool) for v in r.values()), r\"",
+    "functional_cmd": "",
+    "gold": [],
+    "seed_decision": "",
+    "seed_decisions": [],
+    "fixture_files": [],
+    "class": "H5",
+    "capture_terms": [
+      "'Y'",
+      "\\bY\\b.{0,12}\\bN\\b",
+      "not booleans",
+      "single.character",
+      "rather than (native )?booleans"
+    ],
+    "plausible_wrong": null
+  },
+  {
+    "id": "cap-ynflags-2",
+    "kind": "capture",
+    "chain": "cap-ynflags",
+    "step": 2,
+    "prompt": "Add slot_status(slot: int) -> dict to app/svc_{seed}_core.py reporting the slot number, whether it is a valid slot (0-24) and whether it is reserved (slot 0 is reserved). Add a test and run the tests.",
+    "check_cmd": "uv run python -c \"import app.svc_{seed}_core as m; flag = lambda r, word: [v for k, v in r.items() if word in k.lower()]; r0, r30 = m.slot_status(0), m.slot_status(30); assert flag(r0, 'valid') == ['Y'] and flag(r0, 'reserv') == ['Y'], r0; assert flag(r30, 'valid') == ['N'] and flag(r30, 'reserv') == ['N'], r30; assert not any(isinstance(v, bool) for v in [*r0.values(), *r30.values()]), (r0, r30)\"",
+    "functional_cmd": "uv run python -c \"import app.svc_{seed}_core as m; yes = lambda v: v in (True, 'Y', 1, 'yes', 'true')\nflag = lambda r, word: [yes(v) for k, v in r.items() if word in k.lower()]\nr0, r30 = m.slot_status(0), m.slot_status(30)\nassert flag(r0, 'valid') == [True] and flag(r0, 'reserv') == [True], r0\nassert flag(r30, 'valid') == [False] and flag(r30, 'reserv') == [False], r30\"",
+    "gold": [],
+    "seed_decision": "",
+    "seed_decisions": [],
+    "fixture_files": [],
+    "class": "H5",
+    "capture_terms": [
+      "'Y'",
+      "\\bY\\b.{0,12}\\bN\\b",
+      "not booleans",
+      "single.character",
+      "rather than (native )?booleans"
+    ],
+    "plausible_wrong": "booleans: {'valid': True, 'reserved': True}"
+  }
+]
