@@ -6838,10 +6838,19 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
         pool = global_scores if request.get("scope") == "global" else scores
         return pool.get(request["id"], 0.0)
 
-    # Use the existing relevance floor for every file candidate. A named pointer preserves
-    # discoverability when its subject is weak; authority alone cannot manufacture relevance.
+    def is_approved_constraint(request: str | dict) -> bool:
+        scope, did = ((request.get("scope", "personal"), request["id"])
+                      if isinstance(request, dict) else ("personal", request))
+        doc = (global_index if scope == "global" else index).get("docs", {}).get(did, {})
+        return doc.get("status") == "approved" and doc.get("subtype") == "constraint"
+
+    # #341 (owner decision on #380): an approved constraint anchored to a named file is always
+    # admitted to full text, whatever the task is called - a "never X" rule on that file must
+    # reach the agent, and agents rarely follow a one-line pointer (#361). Every other file
+    # candidate meets the existing relevance floor; a named pointer preserves discoverability
+    # when its subject is weak, and authority short of approval cannot manufacture relevance.
     def qualifies_anchor(request: dict) -> bool:
-        if not query_terms:
+        if not query_terms or is_approved_constraint(request):
             return True
         score = candidate_score(request)
         global_scope = request.get("scope") == "global"
@@ -6903,12 +6912,9 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
             if did not in strong_ids:
                 strong.append(did)
                 strong_ids.add(did)
+    # Approved constraints lead the full-text slots, ordered by relevance among themselves.
     def candidate_priority(request: str | dict) -> tuple[bool, float]:
-        scope, did = ((request.get("scope", "personal"), request["id"])
-                      if isinstance(request, dict) else ("personal", request))
-        doc = (global_index if scope == "global" else index).get("docs", {}).get(did, {})
-        approved_constraint = doc.get("status") == "approved" and doc.get("subtype") == "constraint"
-        return approved_constraint, candidate_score(request)
+        return is_approved_constraint(request), candidate_score(request)
 
     strong.sort(key=candidate_priority, reverse=True)
     strong = strong[:_STRONG_CAP]

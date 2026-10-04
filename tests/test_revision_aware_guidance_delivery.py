@@ -1057,9 +1057,13 @@ class TestAnchorOverflow:
         # #353: the path's bare basename is matched on but not listed a second time.
         assert "call get_context(files=['src/outbox.py']) if relevant." in text
 
-    def test_unrelated_constraint_is_named_without_displacing_task_guidance(self, tmp_repo):
-        for title in ("Add credit notes as separate documents", "Number credit notes in sequence",
-                      "Store credit notes with the invoice"):
+    def test_approved_constraint_on_the_named_file_is_injected_whatever_the_task(self, tmp_repo):
+        """Owner decision on #380 (keep #341): a "never X" rule on the named file reaches the
+        agent in full even when the task's wording is about something else; agents rarely
+        follow a one-line pointer (#361). Task-relevant guidance keeps the remaining slots."""
+        titles = ("Add credit notes as separate documents", "Number credit notes in sequence",
+                  "Store credit notes with the invoice")
+        for title in titles:
             self._anchor(tmp_repo, f"{title} for credit note support", title)
         self._anchor(tmp_repo, "Round totals once, after tax is applied",
                      "Round totals once after tax", subtype="constraint")
@@ -1067,8 +1071,10 @@ class TestAnchorOverflow:
         text = store.get_context_for_prompt(
             tmp_repo, "Add credit note support to src/outbox.py", "constraint-first")
 
-        assert "Round totals once, after tax is applied" not in text
-        assert "Round totals once after tax" in text.split("not shown:", 1)[1]
+        shown, overflow = text.split("not shown:", 1)
+        assert "Round totals once, after tax is applied" in shown
+        assert sum(f"{title} for credit note support" in shown for title in titles) == 2
+        assert sum(title in overflow for title in titles) == 1
 
     def test_pending_constraints_do_not_displace_the_needed_decision(self, tmp_repo):
         self._anchor(tmp_repo, "Count failed batches once per batch, not per row",

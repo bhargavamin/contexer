@@ -2097,7 +2097,7 @@
           "action_id": "other-session",
           "decision_id": "r20-constraint",
           "revision_id": "rev-r20-constraint-a",
-          "tier": "pointer"
+          "tier": "prompt_full"
         }
       ],
       "delivery_expectations": [
