@@ -258,7 +258,9 @@ def console_handlers(monkeypatch):
     loudly, naming the leak, rather than letting it write into a stranger.
 
     Each handler is registered on the ACCEPT thread, before its thread is started, so one
-    accepted just before shutdown cannot slip past the wait."""
+    accepted just before shutdown cannot slip past the wait. Yields that registry (accepted
+    socket -> finished event): a test that must have a handler in flight before it shuts the
+    server down waits for an entry, since `shutdown()` can otherwise win the race with accept."""
     from contexer.ui import server
 
     finished: dict[object, threading.Event] = {}  # keyed by the accepted socket
@@ -281,7 +283,7 @@ def console_handlers(monkeypatch):
 
     monkeypatch.setattr(server.ConsoleServer, "process_request", process_request)
     monkeypatch.setattr(server.ConsoleServer, "process_request_thread", process_request_thread)
-    yield
+    yield finished
     deadline = time.monotonic() + CONSOLE_HANDLER_DRAIN_SECONDS
     stuck = sum(not done.wait(max(deadline - time.monotonic(), 0)) for done in finished.values())
     if stuck:
