@@ -1350,3 +1350,19 @@ def test_corruption_never_dismisses_existing_review_evidence(tmp_repo):
     for p, raw in before.items():
         if p != store._store_path(tmp_repo):
             assert p.read_bytes() == raw
+
+
+@pytest.mark.parametrize("damaged", ["live", "tombstones"])
+def test_orphan_sweep_never_dismisses_holds_over_an_unreadable_store(tmp_repo, damaged):
+    """Session-start maintenance judges holds against the store; an unreadable store or
+    tombstone sidecar must not read as "every decision is gone" and dismiss held evidence."""
+    _spool(tmp_repo, [_event("held-then-corrupt", "user_directive", "never commit a generated file")])
+    assert reconcile.reconcile_session(tmp_repo)["proposed"] == 1
+    if damaged == "live":
+        store._store_path(tmp_repo).write_bytes(b'{"entries": [')
+    else:
+        # Only the (unreadable) tombstones could still vouch for the decision.
+        store.save(tmp_repo, {"repo_path": tmp_repo, "entries": []})
+        store._deleted_path(tmp_repo).write_bytes(b'{"entries": [')
+    spool.maintain_spool(tmp_repo, force=True)
+    assert spool.evidence_diagnostics(tmp_repo)["held_events"] == 1

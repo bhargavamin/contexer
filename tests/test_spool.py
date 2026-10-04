@@ -900,7 +900,7 @@ def test_an_unreadable_store_defers_the_orphan_sweep_rather_than_failing(tmp_rep
     def unreadable(*_args, **_kwargs):
         raise OSError("store is gone")
 
-    monkeypatch.setattr(store, "load", unreadable)
+    monkeypatch.setattr(store, "load_for_update", unreadable)
 
     assert spool.run_retention(tmp_repo) == {
         "dropped_pending": 0, "dropped_quarantine": 0,
