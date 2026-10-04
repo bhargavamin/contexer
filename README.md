@@ -252,4 +252,5 @@ The Contexer name and logo are trademarks of Contexer.ai. The MIT license does n
 
 The local data directory is private to its owner (mode `0700`); existing group or world permissions are removed on next use.
 
+If `redact_secrets = false`, sharing always shows a warning and requires preview/confirmation, including when `skip_confirm` is enabled. Background sharing retries and automatic proposals pause until redaction is enabled again. Local capture remains verbatim.
 Large Claude sessions keep approved constraints first and summarize additional stored context with a lookup pointer, so a long rule list stays readable in the session.

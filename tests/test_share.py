@@ -43,7 +43,7 @@ class _FakeRS:
 
 def _fake(monkeypatch, **kw):
     fake = _FakeRS(**kw)
-    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p, **options: fake))
     remote.reset_degradation_warnings()
     return fake
 
@@ -70,7 +70,7 @@ class _AsyncFakeRS:
 
 def _afake(monkeypatch, **kw):
     fake = _AsyncFakeRS(**kw)
-    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p, **options: fake))
     remote.reset_degradation_warnings()
     return fake
 
@@ -253,7 +253,7 @@ def test_reconcile_previews_then_atomically_submits_team_candidate(tmp_repo, mon
                 revision_id, False, remote.RemoteTeam("team-1", "Platform", "member"))
 
     fake = Fake()
-    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p, **options: fake))
     out = share.reconcile(tmp_repo, did[:8], profile=TEAM)
 
     assert out.outcome == share_status.SUBMITTED
@@ -399,7 +399,7 @@ def test_reconcile_falls_back_for_server_without_capability_tool(tmp_repo, monke
                 remote.RemoteTeam(team_id, "Platform", "member"))
 
     fake = Fake()
-    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p, **options: fake))
     out = share.reconcile(tmp_repo, did, profile=TEAM)
     assert fake.events == ["push", "submit"]
     assert out.outcome == share_status.SUBMITTED and out.candidate_id == "candidate-1"
@@ -432,7 +432,7 @@ def test_reconcile_falls_back_with_explicit_team_when_discovery_is_missing(
                 remote.RemoteTeam(team_id, team_id, "member"))
 
     fake = Fake()
-    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p, **options: fake))
     out = share.reconcile(tmp_repo, did, team="team-legacy", profile=TEAM)
     assert fake.events == [("push", did), ("submit", did, "team-legacy")]
     assert out.outcome == share_status.SUBMITTED and out.candidate_id == "candidate-1"
@@ -465,7 +465,7 @@ def test_reconcile_falls_back_with_explicit_team_when_capabilities_are_generic(
                 remote.RemoteTeam(team_id, team_id, "member"))
 
     fake = Fake()
-    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p, **options: fake))
     out = share.reconcile(tmp_repo, did, team="team-legacy", profile=TEAM)
     assert fake.events == [("push", did), ("submit", did, "team-legacy")]
     assert out.outcome == share_status.SUBMITTED and out.candidate_id == "candidate-1"
@@ -496,7 +496,7 @@ def test_reconciliation_drain_reuses_payload_and_idempotency_key(tmp_repo, monke
                 remote.RemoteTeam(team_id, "Platform", "member"))
 
     fake = Fake()
-    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p, **options: fake))
     assert share.drain_outbox(TEAM) == 1
     assert fake.calls[0][3]["idempotency_key"] == "idem-stable"
     assert fake.calls[0][3]["expected_personal_head"] == "ph1"
@@ -717,7 +717,7 @@ def test_share_all_failure_enqueues_failed_and_remaining(tmp_repo, monkeypatch):
             return [f"srv-{i}" for i in range(len(kwargs_list))], []
 
     fake = _FlakyRS()
-    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p, **options: fake))
     remote.reset_degradation_warnings()
     monkeypatch.setattr(store, "run_git", lambda repo, *a: None)
     monkeypatch.setattr(share, "_BATCH_SIZE", 1)  # one decision per chunk -> partial progress
@@ -947,7 +947,7 @@ def test_drain_outbox_partial_success_then_failure(tmp_repo, monkeypatch):
             return [f"srv-{i}" for i in range(len(kwargs_list))], []
 
     fake = _FlakyRS()
-    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p, **options: fake))
     remote.reset_degradation_warnings()
     monkeypatch.setattr(share, "_BATCH_SIZE", 1)  # one entry per chunk -> partial progress
     sent = share.drain_outbox(TEAM)
@@ -978,7 +978,7 @@ def test_drain_outbox_concurrent_enqueue_survives_final_save(tmp_repo, monkeypat
             return [f"srv-{i}" for i in range(len(kwargs_list))], []
 
     fake = _ConcurrentEnqueueRS()
-    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p: fake))
+    monkeypatch.setattr(share.RemoteStore, "from_profile", staticmethod(lambda p, **options: fake))
     remote.reset_degradation_warnings()
 
     sent = share.drain_outbox(TEAM)

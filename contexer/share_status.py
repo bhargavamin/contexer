@@ -73,6 +73,8 @@ RATE_LIMITED_NOT_QUEUED = "rate_limited_not_queued"
 COMPAT_SYNC_FAILED = "compat_sync_failed"          # `share` carries the personal-push outcome
 COMPAT_SUBMIT_FAILED = "compat_submit_failed"      # personal sync landed, team submit did not
 
+_REDACTION_DISABLED_WARNING = "Warning: secret redaction is OFF; this share can send credentials and personal data verbatim."
+
 _NOT_TEAM_MODE_TEXT = ("Not in team mode. Set mode='team' + endpoint + token in "
                        "~/.contexer/config.toml to share.")
 _RATE_LIMIT_QUEUED_TEXT = "The service rate limit was reached; the confirmed submission is queued."
@@ -111,10 +113,12 @@ class ShareStatus:
     lost: int = 0
     lifecycle_pending: int = 0
     lifecycle_lost: int = 0
+    retry_cleanup_failed: int = 0
     total: int = 0
     unknown_ids: tuple[str, ...] = ()
     server_id: str = ""
     scope: str = "repo"      # "repo" | "global" - which store was asked for
+    redaction_disabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -135,6 +139,7 @@ class ReconcileStatus:
     detail: str = ""             # the service's own reason, or the team the caller asked for
     teams: tuple[str, ...] = ()  # "Name (id)" rows, for the pick-a-team outcomes
     share: ShareStatus | None = None
+    redaction_disabled: bool = False
 
 
 def with_unknown(status: ShareStatus, unknown_ids) -> ShareStatus:
@@ -166,9 +171,16 @@ _OK_OUTCOMES = frozenset({
 
 def describe(status: ShareStatus | ReconcileStatus) -> str:
     """Render one outcome as the sentence a person reads. The only prose in this area."""
-    if isinstance(status, ReconcileStatus):
-        return _describe_reconcile(status)
-    return _describe_share(status)
+    result = _describe_reconcile(status) if isinstance(status, ReconcileStatus) else _describe_share(status)
+    if status.redaction_disabled:
+        result = result.replace("it will retry automatically at the next session start",
+                                "retry is paused until redact_secrets is enabled")
+        result = result.replace("to retry automatically at the next session start",
+                                "with retry paused until redact_secrets is enabled")
+        result = result.replace("for automatic retry", "with retry paused until redact_secrets is enabled")
+        result = result.replace("Automatic retry", "Retry (paused until redact_secrets is enabled)")
+        return _REDACTION_DISABLED_WARNING + "\n" + result
+    return result
 
 
 def _short_ids(unknown_ids: tuple[str, ...]) -> str:
@@ -203,6 +215,9 @@ def _shortfall(s: ShareStatus) -> str:
                 "against another decision, and were skipped - nothing of them was saved")
     if s.lost:
         out += f"; {s.lost} could NOT be queued (outbox write failed) and are unsaved"
+    if s.retry_cleanup_failed:
+        out += (f"; cleanup of {s.retry_cleanup_failed} saved decision retry(s) failed; older payloads "
+                "may remain queued - repair local storage and re-share before allowing retries")
     if s.lifecycle_pending:
         out += (f"; {s.lifecycle_pending} lifecycle update(s) were refused and remain queued "
                 "until the server protocol changes")
