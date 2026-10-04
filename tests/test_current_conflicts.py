@@ -92,6 +92,30 @@ def test_mixed_compatible_prescriptions_are_not_false_conflicts():
     assert conflicts.current_pairs([left, right]) == []
 
 
+@pytest.mark.parametrize("mixed", [
+    "Prefix versions with a lowercase v for package releases; use bare semantic versions in sample docs.",
+    "Prefix package-release versions with a lowercase v but use bare versions in sample docs.",
+])
+def test_mixed_rule_retains_conflict_for_the_same_output(tmp_repo, mixed):
+    left, right = pair()
+    left["content"] = mixed
+    left["revisions"][0]["content"] = mixed
+    assert len(conflicts.current_pairs([left, right])) == 1
+    store.save(tmp_repo, {"entries": [left, right]})
+    startup = store.session_start_payload(tmp_repo)["context"]
+    prompt, receipts = store._render_prompt_decisions_with_records(tmp_repo, [left["id"]])
+    for text in (startup, prompt):
+        assert "CONFLICT:" in text
+        assert left["id"][:8] in text and right["id"][:8] in text
+    assert {row["id"] for row in receipts} == {left["id"], right["id"]}
+
+
+def test_single_output_rules_do_not_conflict_across_outputs():
+    left, right = pair()
+    left["revisions"][0]["content"] = "Publish versions with a lowercase v for Git tags."
+    assert conflicts.current_pairs([left, right]) == []
+
+
 def test_negated_alternative_does_not_change_bare_classification():
     left, right = pair()
     right["content"] = "Publish bare semantic versions; do not use versions with v."

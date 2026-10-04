@@ -55,31 +55,50 @@ def current_pairs(entries: list[dict]) -> list[tuple[dict, dict]]:
     """
     from contexer import policy
 
-    prefixed, bare = [], []
+    prescriptions = []
     for entry in entries:
         if (entry.get("type") != "decision" or store.entry_status(entry) not in {"approved", "suggested"}
                 or entry.get("bootstrap") or entry.get("superseded_by")):
             continue
         text = revisions.current_content(entry).lower()
-        clauses = [part.strip() for part in re.split(r";|\.\s", text)]
-        prefix_rule = r"^(?:prefix|publish|use) versions? (?:strings? )?with (?:a )?(?:lowercase )?v\b"
-        bare_rule = r"^(?:publish|use|return) (?:versions? as )?(?:bare|unprefixed) (?:semantic )?versions?\b"
-        forms = {form for clause in clauses for form, pattern in
-                 (("prefixed", prefix_rule), ("bare", bare_rule)) if re.match(pattern, clause)}
-        # Mixed prescriptions can govern different outputs (Git tags versus package versions).
-        if len(forms) != 1:
-            continue
-        (prefixed if "prefixed" in forms else bare).append(entry)
+        clauses = [part.strip() for part in re.split(
+            r";|\.\s|\b(?:but|and)\s+(?=(?:prefix|publish|use|return)\b)", text)]
+        target = r"(?:(?:package[- ]release|package|git[- ]tag|sample[- ]doc) )?"
+        prefix_rule = rf"^(?:prefix|publish|use) {target}versions? (?:strings? )?with (?:a )?(?:lowercase )?v\b"
+        bare_rule = rf"^(?:publish|use|return) (?:{target}versions? as )?(?:bare|unprefixed) (?:semantic )?{target}versions?\b"
+        for clause in clauses:
+            for form, pattern in (("prefixed", prefix_rule), ("bare", bare_rule)):
+                match = re.match(pattern, clause)
+                if not match:
+                    continue
+                # Only explicit output qualifiers restrict scope. A rationale such as
+                # "so they match Git tags" does not narrow a rule for all version strings.
+                qualifier = re.search(r"\b(?:for|in|on) (?:the )?([^.;]+)", clause[match.end():])
+                output = match.group() + (" " + qualifier.group(1) if qualifier else "")
+                scope = ("tags" if re.search(r"git[- ]tags?", output) else
+                         "package" if re.search(r"package(?:[- ]release| index)?", output) else
+                         "docs" if re.search(r"(?:sample[- ]docs?|documentation|docs)\b", output) else "")
+                if not scope and re.search(r"package index (?:rejects|requires|accepts)\b", text):
+                    scope = "package"
+                prescriptions.append((entry, form, scope))
     pairs = []
-    for left in prefixed:
-        for right in bare:
+    seen = set()
+    for left, left_form, left_scope in prescriptions:
+        for right, right_form, right_scope in prescriptions:
+            if left_form != "prefixed" or right_form != "bare":
+                continue
+            if left_scope and right_scope and left_scope != right_scope:
+                continue
             if left.get("id") == right.get("id"):
                 continue
             lfiles, rfiles = {path for path in left.get("source_files") or [] if isinstance(path, str)}, {path for path in right.get("source_files") or [] if isinstance(path, str)}
             if (lfiles and rfiles and not policy.source_anchor_hits(lfiles, rfiles)
                     and not policy.source_anchor_hits(rfiles, lfiles)):
                 continue
-            pairs.append((left, right))
+            key = (left.get("id"), right.get("id"))
+            if key not in seen:
+                seen.add(key)
+                pairs.append((left, right))
     return pairs
 
 
