@@ -6687,8 +6687,12 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
     discriminative = {r[0]: r[3] for r in ranked}
     global_scores: dict[str, float] = {}
     global_discriminative: dict[str, int] = {}
+    global_index: dict = {}
     if any(r.get("scope") == "global" for r in anchor_requests):
-        global_ranked = retrieval.prompt_rank(query_terms, _read_retrieval_index(GLOBAL_SLUG) or {})
+        global_index = _read_retrieval_index(GLOBAL_SLUG)
+        if global_index is None:
+            global_index = _build_retrieval_index(load_global())
+        global_ranked = retrieval.prompt_rank(query_terms, global_index)
         global_scores = {r[0]: r[1] for r in global_ranked}
         global_discriminative = {r[0]: r[3] for r in global_ranked}
     personal_top = max(scores.values(), default=0.0)
@@ -6765,7 +6769,14 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
             if did not in strong_ids:
                 strong.append(did)
                 strong_ids.add(did)
-    strong.sort(key=candidate_score, reverse=True)
+    def candidate_priority(request: str | dict) -> tuple[bool, float]:
+        scope, did = ((request.get("scope", "personal"), request["id"])
+                      if isinstance(request, dict) else ("personal", request))
+        doc = (global_index if scope == "global" else index).get("docs", {}).get(did, {})
+        approved_constraint = doc.get("status") == "approved" and doc.get("subtype") == "constraint"
+        return approved_constraint, candidate_score(request)
+
+    strong.sort(key=candidate_priority, reverse=True)
     strong = strong[:_STRONG_CAP]
     selected = {(r.get("scope", "personal"), r["id"]) if isinstance(r, dict)
                 else ("personal", r) for r in strong}
@@ -6814,11 +6825,13 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
     prompt_topics = set(retrieval.derive_topics(prompt + " " + " ".join(artifacts)))
     if prompt_topics:
         counts: dict[str, int] = {}
+        pointer_ids = {(r.get("scope", "personal"), r["id"]) for r in overflow}
         for did, doc in index.get("docs", {}).items():
             if has_credit("personal", did, doc.get("guidance_fingerprint")):
                 continue
             for t in set(doc.get("topics", [])) & prompt_topics:
                 counts[t] = counts.get(t, 0) + 1
+                pointer_ids.add(("personal", did))
         if counts:
             ordered_topics = sorted(counts, key=lambda t: (-counts[t], t))
             parts = ", ".join(f"{t}({counts[t]})" for t in ordered_topics)
@@ -6828,7 +6841,7 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
                     f"call get_context(query='{ordered_topics[0]}') if relevant.")
             if overflow_text:
                 text = overflow_text + "\n" + text
-            meta = {"kind": "pointer", "count": sum(counts.values()) + len(overflow), "topics": ordered_topics}
+            meta = {"kind": "pointer", "count": len(pointer_ids), "topics": ordered_topics}
             if task_origin:
                 meta["origin"] = retrieval._ORDINARY_TASK_VARIANT
             return text, meta
@@ -6851,7 +6864,9 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
                 f"call get_context(files={shown_files!r}) if relevant.")
         if overflow_text:
             text = overflow_text + "\n" + text
-        meta = {"kind": "pointer", "count": len(mention_hits) + len(overflow), "topics": shown_files}
+        pointer_ids = ({("personal", did) for did, _title in mention_hits}
+                       | {(r.get("scope", "personal"), r["id"]) for r in overflow})
+        meta = {"kind": "pointer", "count": len(pointer_ids), "topics": shown_files}
         if task_origin:
             meta["origin"] = retrieval._ORDINARY_TASK_VARIANT
         return text, meta
