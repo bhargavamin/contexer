@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.50.0](https://github.com/bhargavamin/contexer/compare/v0.49.5...v0.50.0) (2026-10-04)
+
+
+### Features
+
+* **conflicts:** render incompatible current decisions together ([#383](https://github.com/bhargavamin/contexer/issues/383)) ([37e46aa](https://github.com/bhargavamin/contexer/commit/37e46aa9c0788644b1dade470111c5f1dd542fed))
+* **export:** add private redacted Markdown and ADR exports ([#381](https://github.com/bhargavamin/contexer/issues/381)) ([816ce9e](https://github.com/bhargavamin/contexer/commit/816ce9ed54b190bfa51bc7fa9c2f8c0eba75112d))
+* **privacy:** add human-only decision content erasure ([#382](https://github.com/bhargavamin/contexer/issues/382)) ([38b0f21](https://github.com/bhargavamin/contexer/commit/38b0f212132c01d5c5a7387aa755422ecb989dd8))
+* **retrieval:** prioritize authored applicability and task relevance ([#380](https://github.com/bhargavamin/contexer/issues/380)) ([06ac5d4](https://github.com/bhargavamin/contexer/commit/06ac5d45b9bef1492814c3a7935d2ee307bbba46))
+
+
+### Bug Fixes
+
+* **benchmarks:** make the label and deleted K7c pairs real conflicts ([#366](https://github.com/bhargavamin/contexer/issues/366)) ([932a080](https://github.com/bhargavamin/contexer/commit/932a08000ddc99b5767eb7da53a517d71a905668))
+* **claude:** preserve authoritative startup context within the inline budget ([#377](https://github.com/bhargavamin/contexer/issues/377)) ([b3604e7](https://github.com/bhargavamin/contexer/commit/b3604e7ce754e4d726d0108bd079f4ede70216fe))
+* **security:** restrict context directory permissions ([#375](https://github.com/bhargavamin/contexer/issues/375)) ([1b2a322](https://github.com/bhargavamin/contexer/commit/1b2a3225dc2a2c2d38e3ff1e1331043e1d2862d0))
+* **sharing:** make disabled redaction visible and confirmation mandatory ([#378](https://github.com/bhargavamin/contexer/issues/378)) ([7dc2ca3](https://github.com/bhargavamin/contexer/commit/7dc2ca3f10178430c2aede818d73eb624d4665a9))
+* **store:** preserve corrupt stores on every mutation ([#376](https://github.com/bhargavamin/contexer/issues/376)) ([7f1e620](https://github.com/bhargavamin/contexer/commit/7f1e620182709c5a1b9d63fe09cf776473c4f6db))
+* **tests:** stop xdist workers leaking writes into other tests and the checkout ([#388](https://github.com/bhargavamin/contexer/issues/388)) ([3a6c7b0](https://github.com/bhargavamin/contexer/commit/3a6c7b0488c6ab9e4c92be447b2f6b8772e9fedc))
+* **tests:** wait for accept before shutting down in the abandoned-handler test ([#389](https://github.com/bhargavamin/contexer/issues/389)) ([f6b0742](https://github.com/bhargavamin/contexer/commit/f6b074250c721f91cf412a727327a160214bbff1))
+
+
+### Documentation
+
+* add an adoption readiness page for team leads ([#371](https://github.com/bhargavamin/contexer/issues/371)) ([16f296c](https://github.com/bhargavamin/contexer/commit/16f296cc26022d69ad2b2f29b9f932cf3a4a2bdf))
+
 ## [0.49.5](https://github.com/bhargavamin/contexer/compare/v0.49.4...v0.49.5) (2026-10-01)
 
 
