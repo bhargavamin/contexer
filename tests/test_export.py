@@ -87,6 +87,20 @@ def test_corrupt_source_refuses_export_without_touching_existing_output(tmp_repo
 
 
 @pytest.mark.parametrize("format", ["md", "adr"])
+def test_corrupt_retired_history_preserves_existing_export(tmp_repo, tmp_path, format):
+    store.update_decision(tmp_repo, "Use Postgres for durable storage.", "s", "convention")
+    out = tmp_path / "export"
+    export.write(tmp_repo, out, format=format)
+    before = {p.name: p.read_bytes() for p in out.iterdir()}
+    deleted = store.sidecar_path("deleted", slug=store.repo_slug(tmp_repo))
+    deleted.write_text("{broken history")
+    with pytest.raises(ValueError, match="unreadable retired"):
+        export.write(tmp_repo, out, format=format, include_retired=True)
+    assert {p.name: p.read_bytes() for p in out.iterdir()} == before
+    assert deleted.read_text() == "{broken history"
+
+
+@pytest.mark.parametrize("format", ["md", "adr"])
 def test_real_retirement_links_to_replacement(tmp_repo, format):
     _, old = store.update_decision(tmp_repo, "Use Redis for cache entries.", "s", "convention", created_by="human")
     _, new = store.update_decision(tmp_repo, "Use Memcached for ephemeral values.", "s", "convention", created_by="human")

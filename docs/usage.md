@@ -315,3 +315,5 @@ What exists today: the **open-source (OSS)** version, **Personal Cloud**, and **
 ## Export decisions
 
 Run `contexer export --format md --out decisions/` for a Markdown document grouped by decision type, or `contexer export --format adr --out docs/adr/` for one ADR per decision. Both formats include titles, current decision text, status, dates and file applicability. `--include-retired` includes retired/superseded decisions and replacement links. Pending decisions and proposed revisions are excluded. Filenames and ordering are stable. Exports are redacted by default even when sharing redaction is disabled. Use `--verbatim` only for an explicit local copy with secrets preserved; the command warns when selected. Export does not change decisions or existing repository documentation.
+
+If live decisions or requested retired history are unreadable, export stops and leaves any previous output intact. Repair the source before retrying.
