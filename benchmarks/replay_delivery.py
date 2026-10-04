@@ -88,8 +88,8 @@ def _short(entry_id: str) -> str:
 
 
 def _deliver(repo: str, prompt: str, session_id: str) -> dict:
-    start_text = store.session_start_payload(repo, "startup", session_id).get("context", "")
-    text, meta = store.get_context_for_prompt_with_meta(repo, prompt, session_id)
+    start_text = store.session_start_payload(repo, "startup", session_id, "claude").get("context", "")
+    text, meta = store.get_context_for_prompt_with_meta(repo, prompt, session_id, "claude")
     entries = [e for e in store.load(repo).get("entries", [])
                if e.get("type") == "decision" and e.get("id")]
     # Pointer lines name decisions (titles included) without delivering them, so they are

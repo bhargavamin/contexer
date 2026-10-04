@@ -311,3 +311,9 @@ What exists today: the **open-source (OSS)** version, **Personal Cloud**, and **
 - **Cursor parity is partial.** Cursor's hooks can't inject per-prompt context or restore after compaction; Cursor steering rides on the session-start nudge plus an always-apply rule file. See [integrations](integrations.md).
 - **Gemini compression is deferred.** Gemini CLI restores stored context on the next turn after compression, not immediately.
 - **Contexer steers, it doesn't enforce.** Agents are told your rules before writing code; your CI and PR gates still verify. The one opt-in exception is the [commit-time guard](#commit-time-guard): a decision you explicitly `guard arm` blocks the commit it violates — but only that decision, only on the machine where it was armed, and `git commit --no-verify` still skips it, so it's a local nudge, not a replacement for CI.
+
+## Erase sensitive content
+
+Run `contexer erase <id>` inside the project and type `ERASE` to confirm, or use `contexer erase <id> --yes` for an explicit noninteractive erasure. The console’s **Erase content** action also requires confirmation. Erasure removes the decision’s title, all revisions and proposals, the evidence linked to it, and local copies and queued sends that contain its text or recognizable fragments of it. It cannot find a pending evidence event that only paraphrases the decision without being linked to it. A record retains its id, dates, actor, reason `erased` and opaque fingerprints that prevent exact automatic recapture without allowing the audit alone to test guessed text; it cannot be restored. Ordinary retire/delete operations preserve history instead. Shared decisions are refused with a reminder to erase the team copy too. Erasure is available only to the developer through the CLI or console.
+
+Unrelated session evidence received during erasure is retained. A session may pause briefly while the erasure finishes.

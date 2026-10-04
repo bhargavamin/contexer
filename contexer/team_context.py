@@ -765,6 +765,8 @@ def format_team_section(repo_path: str, query: str = "", entry_type: str = "",
         # (never stored back into the cache) - and the content line is skipped entirely when
         # it would merely repeat the title (collapsed-whitespace comparison).
         title, body = store.title_and_body({"title": r.get("title")}, content=content)
+        title = " ".join(title.split())
+        body = " ".join(body.split()) if body is not None else None
         lid, overlap = _best_local_overlap(content, local_tokens)
         divergence_tag = ", personal source retired; team copy remains authoritative" \
             if r.get("source_retired") is True else ""

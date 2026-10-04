@@ -120,7 +120,93 @@ def is_present(home: Path) -> bool:
     return (home / ".claude").exists() or (home / ".claude.json").exists()
 
 
-def format_session_start(payload: dict) -> dict:
+SESSION_CONTEXT_BYTES = 8_000
+
+
+def budget_session_context(context: str) -> tuple[str, set[str]]:
+    """Select whole guidance by priority, then preserve its section order and authority."""
+    def size(text: str) -> int:
+        return len(json.dumps(text).encode("utf-8"))
+
+    if size(context) <= SESSION_CONTEXT_BYTES:
+        return context, set()
+    from contexer import conflicts
+
+    blocks: list[tuple[str, str, bool]] = []
+    heading = ""
+    current: list[str] = []
+    instruction = True
+    for line in context.splitlines():
+        if "Conflicting current decisions" in heading and not line.startswith("## "):
+            current.append(line)
+            continue
+        rule = bool(re.match(r"^- (?:\[[^]]+\]|.*\(id=[a-f0-9]{8}\))", line))
+        boundary = line.startswith("## ") or rule or (line and not line.startswith(" "))
+        if boundary:
+            if current:
+                blocks.append((heading, "\n".join(current), instruction))
+                current = []
+            if line.startswith("## "):
+                heading = line
+                instruction = True
+                continue
+            instruction = not rule
+        current.append(line)
+    if current:
+        blocks.append((heading, "\n".join(current), instruction))
+
+    def is_conflict(body: str) -> bool:
+        return any(marker in body for marker in
+                   ("[update pending approval]", "Unreviewed update (", "picked with the developer"))
+
+    guide = next((i for i, (_, body, _) in enumerate(blocks)
+                  if body.strip() == conflicts._CONFLICT_GUIDE), None)
+
+    def priority(index: int) -> int:
+        section, body, instruction = blocks[index]
+        if instruction and "Conflicting current decisions" not in section:
+            return 0
+        if "Conflicting current decisions" in section or "Rehydrated working context" in section or is_conflict(body):
+            return 1
+        first = body.splitlines()[0] if body else ""
+        if "[constraint]" in first and "[suggested]" not in first:
+            return 1
+        if "Global rules" in section:
+            return 2
+        if "Project rules" in section:
+            return 3
+        return 4
+
+    pointer = "More stored context omitted to fit Claude's inline limit; call get_context with subject keywords or files before relying on unseen guidance."
+
+    def render(kept: set[int]) -> str:
+        lines = []
+        active = None
+        for index, (section, body, _) in enumerate(blocks):
+            if index not in kept:
+                continue
+            if section != active:
+                if section:
+                    lines.append(section)
+                active = section
+            lines.append(body)
+        return "\n".join(lines).rstrip() + "\n\n" + pointer
+
+    selected: set[int] = set()
+    for index in sorted(range(len(blocks)), key=priority):
+        if index == guide:
+            continue
+        trial = selected | {index}
+        if is_conflict(blocks[index][1]) and guide is not None:
+            trial.add(guide)
+        if size(render(trial)) <= SESSION_CONTEXT_BYTES:
+            selected = trial
+    dropped = {ident for index, (_, body, _) in enumerate(blocks) if index not in selected
+               for ident in re.findall(r"\(id=([a-f0-9]{8})\)", body)}
+    return render(selected), dropped
+
+
+def format_session_start(payload: dict, *, host: str = "claude") -> dict:
     """Neutral payload -> Claude SessionStart hook output. Empty context => status only."""
     if not payload.get("context"):
         return {"systemMessage": payload["status"]} if payload.get("status") else {}
@@ -128,7 +214,8 @@ def format_session_start(payload: dict) -> dict:
         "systemMessage": payload["status"],
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": payload["context"],
+            "additionalContext": (budget_session_context(payload["context"])[0]
+                                  if host == "claude" else payload["context"]),
         },
     }
 

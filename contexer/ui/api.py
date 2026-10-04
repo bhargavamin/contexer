@@ -236,6 +236,14 @@ def _decision_route(method: str, repo_path: str, entry_id: str, rest: list[str],
     if rest == ["restore"] and method == "POST":
         return _finish_restore(repo_path, entry_id, *lifecycle.restore_decision(repo_path, entry_id))
 
+    if rest == ["erase"] and method == "POST":
+        payload = _body(body, "confirm")
+        ok, message = lifecycle.erase_decision(repo_path, entry_id,
+                                              confirm=payload.get("confirm") is True, actor=SOURCE)
+        if not ok:
+            raise ApiError(409, message)
+        return 200, {"message": message}
+
     raise ApiError(404, "no such endpoint")
 
 

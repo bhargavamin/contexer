@@ -1,0 +1,21 @@
+{
+  "source_commit": "6834d56",
+  "needed_full": 3,
+  "styles": [
+    {
+      "style": "terse",
+      "needed": "full",
+      "json_escaped_bytes": 7957
+    },
+    {
+      "style": "narrative",
+      "needed": "full",
+      "json_escaped_bytes": 7964
+    },
+    {
+      "style": "plan",
+      "needed": "full",
+      "json_escaped_bytes": 7994
+    }
+  ]
+}
