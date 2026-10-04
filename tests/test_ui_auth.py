@@ -19,8 +19,10 @@ TOKEN = "console-token-for-tests"
 
 
 @pytest.fixture
-def home(tmp_path, monkeypatch):
-    """An isolated ~/.contexer: store, config, statefile and log. Never the real one."""
+def home(tmp_path, monkeypatch, console_handlers):
+    """An isolated ~/.contexer: store, config, statefile and log. Never the real one.
+
+    `console_handlers` waits out every request handler before these paths are restored."""
     path = tmp_path / ".contexer"
     path.mkdir()
     redirect_store_dir(monkeypatch, path)
