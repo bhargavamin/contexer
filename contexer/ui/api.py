@@ -236,6 +236,14 @@ def _decision_route(method: str, repo_path: str, entry_id: str, rest: list[str],
     if rest == ["restore"] and method == "POST":
         return _finish_restore(repo_path, entry_id, *lifecycle.restore_decision(repo_path, entry_id))
 
+    if rest == ["erase"] and method == "POST":
+        payload = _body(body, "confirm")
+        ok, message = lifecycle.erase_decision(repo_path, entry_id,
+                                              confirm=payload.get("confirm") is True, actor=SOURCE)
+        if not ok:
+            raise ApiError(409, message)
+        return 200, {"message": message}
+
     raise ApiError(404, "no such endpoint")
 
 
@@ -403,7 +411,7 @@ def _logout(body: object) -> tuple[int, object]:
 
 
 def _share(repo_path: str, body: object) -> tuple[int, object]:
-    ids = _body(body, "ids").get("ids")
+    ids = _body(body, "ids", "confirm", "confirmation_digest").get("ids")
     if not isinstance(ids, list) or not ids:
         raise ApiError(400, "ids must be a non-empty list")
     if len(ids) > MAX_SHARE_IDS:
@@ -411,8 +419,19 @@ def _share(repo_path: str, body: object) -> tuple[int, object]:
     for value in ids:
         if not isinstance(value, str) or not value or len(value) > MAX_WORD:
             raise ApiError(400, "every id must be a non-empty string")
+    profile = config.load_profile()
+    digest = body.get("confirmation_digest")
+    if not profile.redact_secrets and (body.get("confirm") is not True or not isinstance(digest, str) or len(digest) != 64):
+        with store.store_lock(store.repo_slug(repo_path)):
+            preview = store.format_share_preview(repo_path, ",".join(ids), profile=profile)
+            digest = share.selection_digest(repo_path, ids, profile=profile)
+        return 200, {"ok": False, "outcome": "confirmation_required", "confirmation_required": True,
+                     "preview": preview, "confirmation_digest": digest}
     try:
-        status = share.share_ids(repo_path, ids)
+        if profile.redact_secrets:
+            status = share.share_ids(repo_path, ids, profile=profile)
+        else:
+            status = share.share_ids(repo_path, ids, profile=profile, expected_digest=digest)
     except Exception as exc:
         # share_ids already swallows cloud failures (it queues them); anything left is local
         # and must still reach the console as text, never as a 500. `outcome`/`ok` are present
@@ -427,6 +446,7 @@ def _share(repo_path: str, body: object) -> tuple[int, object]:
         "outcome": status.outcome,
         "ok": share_status.is_ok(status),
         "sent": status.sent,
+        "retry_cleanup_failed": status.retry_cleanup_failed,
         "queued": status.queued,
         "at_capacity": status.at_capacity,
         "invalid": status.invalid,

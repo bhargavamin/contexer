@@ -53,6 +53,7 @@ _REASON_CODES = {
     "unsupported_protocol",
     "account_mismatch",
     "policy_mismatch",
+    "redaction_disabled",
     "repo_mismatch",
     "team_mismatch",
     "not_member",
