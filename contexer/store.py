@@ -439,30 +439,67 @@ def load_for_update(repo_path: str) -> dict:
     return data
 
 
-def atomic_write(path: Path, text: str) -> None:
+@contextlib.contextmanager
+def evidence_publication_lock(repo_path: str, *, exclusive: bool = False, wait: bool = False):
+    """Shared event publication; exclusive only for human privacy erasure.
+
+    Erasure refuses existing publishers. A publisher may wait for an erasure already in
+    progress so an unrelated event is not lost merely because the human is deleting data.
+    """
+    import fcntl
+    ensure_store_dir()
+    fd = os.open(sidecar_path("evidence_publication_lock", slug=repo_slug(repo_path)), os.O_CREAT | os.O_RDWR, 0o600)
+    acquired = False
+    try:
+        try:
+            fcntl.flock(fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+                        | (0 if wait else fcntl.LOCK_NB))
+            acquired = True
+        except BlockingIOError:
+            pass
+        yield acquired
+    finally:
+        if acquired:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def atomic_write(path: Path, text: str, *, durable: bool = False) -> None:
     """Write via a unique temp file + os.replace so readers never see a torn file.
 
     mkstemp creates the temp file with mode 0o600 (umask-independent), so the store
     is never readable by others - not even between creation and the final rename.
-    Deliberate trade-offs: no fsync (atomic, not power-loss durable - acceptable for
-    a context cache), and if `path` is a symlink it is replaced by a regular file."""
+    Normal cache writes omit fsync; privacy erasure selects durable=True to sync the
+    file and its directory publication. A symlink is replaced by a regular file."""
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
+            if durable:
+                f.flush()
+                os.fsync(f.fileno())
         os.replace(tmp, path)
+        if durable:
+            directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
     finally:
         Path(tmp).unlink(missing_ok=True)  # no-op after a successful replace
 
 
-def save(repo_path: str, data: dict) -> None:
+def save(repo_path: str, data: dict, *, durable: bool = False) -> None:
     # Record the CANONICAL repo path so a store written from any linked worktree stops
     # flip-flopping its recorded path between last-writer worktrees. (The global store
     # never routes through here - save_global writes it directly.)
     data["repo_path"] = canonical_store_key(data.get("repo_path") or repo_path)
     path = _store_path(repo_path)
     serializable = {k: v for k, v in data.items() if k != _GUIDANCE_PROVENANCE_KEY}
-    atomic_write(path, json.dumps(serializable, indent=2, ensure_ascii=False))
+    if durable:
+        atomic_write(path, json.dumps(serializable, indent=2, ensure_ascii=False), durable=True)
+    else:
+        atomic_write(path, json.dumps(serializable, indent=2, ensure_ascii=False))
     # Only a successful store publication makes revision UUIDs authoritative.  Legacy
     # migrations synthesize UUIDs in memory, so marking before atomic_write would let a
     # failed save leak an identity that no reader can reproduce.
@@ -4039,9 +4076,12 @@ def deleted_diagnostics(repo_path: str) -> dict:
     return {"ok": error is None, "error": error}
 
 
-def _save_deleted(repo_path: str, data: dict) -> None:
+def _save_deleted(repo_path: str, data: dict, *, durable: bool = False) -> None:
     # atomic_write's mkstemp gives 0600 from creation, same as the live store.
-    atomic_write(_deleted_path(repo_path), json.dumps(data, indent=2, ensure_ascii=False))
+    if durable:
+        atomic_write(_deleted_path(repo_path), json.dumps(data, indent=2, ensure_ascii=False), durable=True)
+    else:
+        atomic_write(_deleted_path(repo_path), json.dumps(data, indent=2, ensure_ascii=False))
 
 
 def entry_by_id(entries: list, entry_id: str) -> dict | None:
@@ -4075,7 +4115,18 @@ def _tombstoned_match(repo_path: str, content: str) -> dict | None:
     handled: `deleted_diagnostics` reports it so the Deleted view says "unreadable", and
     `delete_decision` refuses to write over a sidecar it could not parse, so a corrupt file
     never costs more than the tombstones it had already lost."""
-    return _find_match(content, _load_deleted(repo_path).get("entries", []))
+    from contexer import lifecycle
+    deleted = _load_deleted(repo_path).get("entries", [])
+    fingerprints = [e for e in deleted if e.get("type") == "erasure" and e.get("content_digests")]
+    if fingerprints:
+        key = lifecycle.erasure_key()
+        if key is None:
+            raise ValueError("Erasure matcher key is missing; refusing write")
+        digest = lifecycle.erasure_digest(content, key=key)
+        erased = next((e for e in fingerprints if digest in e["content_digests"]), None)
+        if erased:
+            return erased
+    return _find_match(content, deleted)
 
 
 def _keep_recent_tombstones(entries: list) -> list:
@@ -5022,7 +5073,7 @@ def _with_console_url(payload: dict, repo_path: str, enabled: bool = False) -> d
 
 
 def session_start_payload(repo_path: str, source: str = "", session_id: str = "",
-                          host: str = "", *, console_url: bool = False) -> dict:
+                          host: str = "", *, console_url: bool = False, claude_budget: bool = False) -> dict:
     """Provider-neutral session-start content, with the shared TEAM-context section
     appended. Returns {"status": str, "context": str}.
 
@@ -5069,13 +5120,36 @@ def session_start_payload(repo_path: str, source: str = "", session_id: str = ""
         # bare MCP calls (no repo_path) in this session resolve to the same store.
         anchor_repo(resolved)
     repo_path = resolved
-    payload = _local_session_start_payload(repo_path, source, session_id, host)
+    payload = (_local_session_start_payload(repo_path, source, session_id, host, claude_budget=True)
+               if claude_budget else _local_session_start_payload(repo_path, source, session_id, host))
+
+    def finalize(result: dict) -> dict:
+        credits = result.pop("_startup_credit", [])
+        if host == "claude" or claude_budget:
+            from contexer.adapters import claude
+            context, dropped = claude.budget_session_context(result.get("context", ""))
+            result["context"] = context
+            team_status = re.search(r"team: (\d+) synced(?: \(\d+ shown\))?", result.get("status", ""))
+            if team_status:
+                shown = len(re.findall(r"^- \[scope=team(?:\]|,)", context, re.MULTILINE))
+                total = int(team_status.group(1))
+                suffix = f"team: {total} synced" + (f" ({shown} shown)" if shown < total else "")
+                result["status"] = result["status"].replace(team_status.group(0), suffix)
+            credits = [r for r in credits if r["id"][:8] not in dropped]
+            if credits and session_id:
+                try:
+                    from contexer import working_set
+                    working_set.record_deliveries(repo_path, session_id, credits)
+                except Exception:
+                    pass
+        return _with_console_url(result, repo_path, console_url)
+
     resume_loaded = payload.pop("_resume_context_loaded", False)
     # text/count/deferred come from ONE team_context snapshot (see _team_section_with_counts)
     # so the status-suffix arithmetic below can never describe a different moment than `team`.
     team, count, deferred = _team_section_with_counts(repo_path)
     if not team or (source == "resume" and (resume_loaded or not payload.get("context"))):
-        return _with_console_url(payload, repo_path, console_url)
+        return finalize(payload)
     status = payload.get("status", "")
     if count:
         cap = _team_display_cap()
@@ -5090,11 +5164,11 @@ def session_start_payload(repo_path: str, source: str = "", session_id: str = ""
         shown = min(count - deferred, cap)
         status = (f"{status} | team: {count} synced" if shown >= count
                  else f"{status} | team: {count} synced ({shown} shown)")
-    return _with_console_url({
+    return finalize({
         **payload,
         "status": status,
         "context": _join_context_sections(payload.get("context", ""), team),
-    }, repo_path, console_url)
+    })
 
 
 def _pending_review_notice(total: int) -> str:
@@ -5144,7 +5218,7 @@ def _reconcile_note(receipt: dict) -> str:
 
 
 def _local_session_start_payload(repo_path: str, source: str = "", session_id: str = "",
-                                 host: str = "") -> dict:
+                                 host: str = "", *, claude_budget: bool = False) -> dict:
     """Local-only session-start content (no team). Returns {"status": str, "context": str}:
     `status` is the short human-facing line, `context` is the text to inject into the
     conversation. Empty `context` means "inject nothing". All filtering/promotion logic
@@ -5230,9 +5304,10 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
             sys_parts.append("## Global rules (apply to ALL repos):")
             for d in global_rules:
                 title, body = title_and_body(d)
-                sys_parts.append(f"- [{d.get('subtype', '')}] {title}")
+                sys_parts.append(f"- [{d.get('subtype', '')}] {title}"
+                                 + (f" (id={d['id'][:8]})" if (host == "claude" or claude_budget) and d.get("id") else ""))
                 if body is not None:
-                    sys_parts.append(f"    {body}")
+                    sys_parts.append("    " + " ".join(body.split()))
             sys_parts.append("")
         sys_parts.extend(_build_resume_mining_context(repo_path))
         _arm_offer(repo_path)
@@ -5281,6 +5356,8 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
     data = bootstrap.refresh_for_session(repo_path, data)
     decisions = [e for e in data.get("entries", []) if e["type"] == "decision"]
 
+    startup_credit: list[dict] = []
+
     def _rehydrate(full_local: list[dict], full_global: list[dict]) -> str:
         """Credit the rules this payload renders in full, and on compaction replay the rest.
 
@@ -5292,8 +5369,10 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
         if not session_id:
             return ""
         credit = _startup_receipts(data, full_local, full_global)
+        if (host == "claude" or claude_budget):
+            startup_credit.extend(credit)
         if source != "compact":
-            if credit:
+            if credit and host != "claude" and not claude_budget:
                 try:   # bookkeeping: a failed write must never cost the session its context
                     from contexer import working_set
                     working_set.record_deliveries(repo_path, session_id, credit)
@@ -5302,7 +5381,8 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
             return ""
         return _rehydrate_working_set(repo_path, session_id, local_snapshot=data,
                                       skip={(r["scope"], r["id"]) for r in credit},
-                                      credit=credit)
+                                      credit=credit,
+                                      credit_sink=startup_credit if (host == "claude" or claude_budget) else None)
 
     # A global rule with an open proposal renders standing-side only here, so it is not a
     # full delivery of the guidance the prompt router would show.
@@ -5323,7 +5403,8 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
             # This branch is reachable exactly when reconciliation stored no decision, which is
             # what a `partial`/`error` pass looks like from here - so it is the branch where
             # dropping the diagnostic would hide it in the case it was written for.
-            return {"status": reconcile_note.strip(), "context": _rehydrate([], [])}
+            return {"status": reconcile_note.strip(), "context": _rehydrate([], []),
+                    "_startup_credit": startup_credit}
         compact_rehydrated = _rehydrate([], global_full)
         _arm_offer(repo_path)
         lines = _build_bootstrap_context(repo_path)
@@ -5332,9 +5413,10 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
             sys_parts.append("## Global rules (apply to ALL repos):")
             for d in global_rules:
                 title, body = title_and_body(d)
-                sys_parts.append(f"- [{d.get('subtype', '')}] {title}")
+                sys_parts.append(f"- [{d.get('subtype', '')}] {title}"
+                                 + (f" (id={d['id'][:8]})" if (host == "claude" or claude_budget) and d.get("id") else ""))
                 if body is not None:
-                    sys_parts.append(f"    {body}")
+                    sys_parts.append("    " + " ".join(body.split()))
             sys_parts.append("")
         sys_parts.extend(lines)
         if compact_rehydrated:
@@ -5346,6 +5428,7 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
             "status": (f'Contexer: quick setup{global_note} - ask "Run Contexer bootstrap" to discover '
                        f"this repo's decisions, rules, and conventions.{reconcile_note}"),
             "context": "\n".join(sys_parts),
+            "_startup_credit": startup_credit,
         }
 
     # Separate decisions by status for injection and summary.
@@ -5367,9 +5450,10 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
         sys_parts.append("## Global rules (apply to ALL repos):")
         for d in global_rules:
             title, body = title_and_body(d)
-            sys_parts.append(f"- [{d.get('subtype', '')}] {title}")
+            sys_parts.append(f"- [{d.get('subtype', '')}] {title}"
+                                 + (f" (id={d['id'][:8]})" if (host == "claude" or claude_budget) and d.get("id") else ""))
             if body is not None:
-                sys_parts.append(f"    {body}")
+                sys_parts.append("    " + " ".join(body.split()))
     if pre_loaded:
         sys_parts.append("## Project rules - apply to ALL tasks in this repo:")
         any_clipped = False
@@ -5394,7 +5478,7 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
             # is meaningless without the standing side). Everything else is title-only -
             # full content stays one get_context / router fetch away.
             if body is not None and (d.get("subtype") == "constraint" or extras):
-                sys_parts.append(f"    {body}")
+                sys_parts.append("    " + " ".join(body.split()))
             elif body is not None:
                 any_clipped = True
             for extra in extras:
@@ -5415,7 +5499,7 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
         from contexer import bootstrap
         sys_parts.append("## Observed / AI-inferred context (not human-approved policy):")
         for d in inferred[:8]:
-            sys_parts.append(f"- {d['content']} (id={d['id'][:8]})")
+            sys_parts.append(f"- {' '.join(d['content'].split())} (id={d['id'][:8]})")
             sys_parts.extend("    " + line for line in bootstrap.render(d, repo_path))
         if len(inferred) > 8:
             sys_parts.append(f"{len(inferred) - 8} more inferred findings available via get_context.")
@@ -5482,7 +5566,8 @@ def _local_session_start_payload(repo_path: str, source: str = "", session_id: s
                              "'review pending' or run `contexer review`")
 
     status = f"Contexer: {'. '.join(sentences)}." if sentences else "Contexer: active."
-    return {"status": status + reconcile_note, "context": "\n".join(sys_parts)}
+    return {"status": status + reconcile_note, "context": "\n".join(sys_parts),
+            "_startup_credit": startup_credit}
 
 
 def get_session_start_context(repo_path: str, source: str = "", session_id: str = "",
@@ -5503,7 +5588,8 @@ def get_session_start_context(repo_path: str, source: str = "", session_id: str 
     adapter has. See `_with_console_url`."""
     from contexer.adapters import claude
     return claude.format_session_start(
-        session_start_payload(repo_path, source, session_id, host, console_url=True))
+        session_start_payload(repo_path, source, session_id, host, console_url=True, claude_budget=not host),
+        host=host or "claude")
 
 
 def prompt_from_hook_stdin(raw: str) -> str:
@@ -5987,7 +6073,8 @@ def _standing_topic_map(repo_path: str, decisions: list) -> str:
 def _rehydrate_working_set(repo_path: str, session_id: str,
                            *, local_snapshot: dict | None = None,
                            skip: set[tuple[str, str]] | None = None,
-                           credit: list[dict] | None = None) -> str:
+                           credit: list[dict] | None = None,
+                           credit_sink: list[dict] | None = None) -> str:
     """Reset pre-compaction credit and replay up to ten historical full deliveries.
 
     Selection uses history, including legacy ID-only hints. Credit is cleared before
@@ -6002,7 +6089,7 @@ def _rehydrate_working_set(repo_path: str, session_id: str,
     rows = list(state["records"])
     history = working_set.restoration_history(state)
     if not history:
-        if credit:
+        if credit and credit_sink is None:
             working_set.record_deliveries(repo_path, session_id, credit)
         return ""
 
@@ -6028,7 +6115,9 @@ def _rehydrate_working_set(repo_path: str, session_id: str,
         check_bootstrap_sources=True)
     # `credit` (rules the caller rendered in full) goes first, so the replay's own receipts
     # stay newest and are never the ones the bounded ledger evicts.
-    if credit or receipts:
+    if credit_sink is not None:
+        credit_sink.extend(receipts)
+    elif credit or receipts:
         working_set.record_deliveries(repo_path, session_id, [*(credit or []), *receipts])
     return "## Rehydrated working context:\n" + rendered if rendered else ""
 

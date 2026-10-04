@@ -327,3 +327,4 @@ Startup problems, port conflicts, expired links, and how to disable the console 
 in [troubleshooting](troubleshooting.md). The daemon's own output is in `~/.contexer/ui.log`.
 
 When secret redaction is disabled, share previews and results display a warning even if skip-confirm is enabled. Background queued sends and automatic proposals pause.
+**Erase content** permanently removes one decision’s local text and history after confirmation. Deleted entries can also be erased. Erasure records show the actor and date without the original content and have no Restore action. A decision already shared to a team is refused with an instruction to erase its team copy too.

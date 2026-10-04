@@ -13,7 +13,7 @@ benchmark already paid for twice.
 Four things are measured, one per section:
 
 1. **Append cost is FLAT.** The spool's whole design premise is that the cost of event N does
-   not depend on events 1..N-1 - one file, no listing, no lock. That is asserted as a RATIO
+   not depend on events 1..N-1 - one file, no listing, no serializing lock. That is asserted as a RATIO
    (the last 50 appends into a full spool against the first 50 into an empty one), which is
    the property itself rather than a machine-speed proxy, and it holds under concurrent
    writers because a uuid in the filename means two writers can never name one target.
@@ -82,7 +82,7 @@ def test_append_latency_does_not_grow_with_the_spool(tmp_repo):
     """The premise of one-file-per-event: appending is O(1) in what the spool already holds.
 
     Asserted as a RATIO rather than as a millisecond figure, because the ratio IS the property
-    - a listing, a re-read or a lock would make the last batch measurably dearer than the
+    - a listing or a re-read would make the last batch measurably dearer than the
     first, on any machine. The absolute bound beside it is the loose sanity check."""
     first = [_timed(lambda: spool.append_evidence(tmp_repo, _event())) for _ in range(50)]
     for _ in range(spool._MAX_PENDING_EVENTS - 100):
@@ -100,9 +100,10 @@ def test_append_latency_does_not_grow_with_the_spool(tmp_repo):
 
 @pytest.mark.perf
 def test_append_latency_under_concurrent_writers(tmp_repo):
-    """Eight writers, no lock anywhere. A uuid in the filename is what removes contention, so
+    """Eight concurrent writers share the nonblocking publication gate. A uuid in the filename
+    removes target contention, so
     the per-append distribution should look like the single-writer one rather than showing the
-    queueing a shared lock would produce."""
+    queueing a serializing lock would produce."""
     writers, per_writer = 8, 50
     samples: list[list[float]] = [[] for _ in range(writers)]
     barrier = threading.Barrier(writers)

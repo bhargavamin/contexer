@@ -31,6 +31,7 @@ Commands:
   retire        Retire one decision - it leaves active context, keeping its history:
                 retire <id> --reason <text> [--replaced-by <id>].
   restore       Bring one retired decision back: restore <id> [--reason <text>].
+  erase         Permanently remove one decision's local content: erase <id> [--yes].
   ui            Local web console over the stored decisions: ui [--open] [--stop]
                 [--status] [--port N] [--foreground] [--reset-token].
   pull          Fetch your team's decisions for this repo into the local team cache.
@@ -2305,6 +2306,32 @@ def _flag_value(args: list, flag: str, usage: str) -> str:
     return value
 
 
+def erase_cmd(rest: list) -> None:
+    from contexer import lifecycle
+
+    args = list(rest)
+    yes = "--yes" in args
+    if yes:
+        args.remove("--yes")
+    if len(args) != 1 or args[0].startswith("-"):
+        print("Usage: contexer erase <id> [--yes]", file=sys.stderr)
+        sys.exit(1)
+    repo = _cli_repo()
+    if not repo:
+        print("No repo detected - run this inside a project directory.", file=sys.stderr)
+        sys.exit(1)
+    if not yes:
+        if not sys.stdin.isatty():
+            print("Erasure needs explicit confirmation; pass --yes.", file=sys.stderr)
+            sys.exit(1)
+        if input("Permanently erase all local content for this decision? Type ERASE: ") != "ERASE":
+            return
+    ok, message = lifecycle.erase_decision(repo, args[0], confirm=True, actor="cli")
+    _safe_print(message)
+    if not ok:
+        sys.exit(1)
+
+
 def _lifecycle_cmd(rest: list, *, retiring: bool) -> None:
     """`contexer retire <id> --reason <text> [--replaced-by <id>]` and
     `contexer restore <id> [--reason <text>]`.
@@ -3062,6 +3089,7 @@ COMMANDS: tuple[Command, ...] = (
     Command(("review",), lambda rest: review(), guarded=False),
     Command(("retire",), lambda rest: _lifecycle_cmd(rest, retiring=True)),
     Command(("restore",), lambda rest: _lifecycle_cmd(rest, retiring=False)),
+    Command(("erase",), lambda rest: erase_cmd(rest), backstop=False),
     Command(("ui",), lambda rest: ui_cmd(rest)),
     # `status` already reports the available version on its own line; the aside would
     # say it twice, and from a cache rather than the live fetch status just made.
