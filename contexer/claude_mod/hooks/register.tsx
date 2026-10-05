@@ -11,19 +11,27 @@
 // It fails silent: no `contexer` answering, or a queue shape this mod does not know
 // (`protocol` mismatch after an upgrade mid-session), means no band and no pane content.
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { ReviewAction, ReviewItem, ReviewItemKind, ReviewQueue } from '../types'
+import type { Applicability, ConflictAction, ConflictSide, CurrentConflict, ReviewAction, ReviewItem, ReviewItemKind, ReviewQueue } from '../types'
 
 const PROTOCOL = 1
 const PANE = 'contexer-review'
 const COMMAND = 'contexer-review'
-const PREVIEW_CHARS = 480
+// The keyboard path from the prompt: the box's dim suggestion, which Tab takes and Enter runs.
+const SUGGESTION = `/${COMMAND}`
+// Tall enough for most cards whole; a longer one scrolls (arrows while the pane is focused),
+// and the person can still resize it. Decisions are shown in full: a review needs all of it.
+const PANE_ROWS = 32
+const OPEN = { id: PANE, title: 'Contexer review', focus: true, closeOnEscape: true, rows: PANE_ROWS } as const
 
 const queue = atom({ plugin: 'contexer-review', key: 'queue' } as const, null)
 const isHidden = atom({ plugin: 'contexer-review', key: 'isHidden' } as const, false)
+const isHandingOff = atom({ plugin: 'contexer-review', key: 'isHandingOff' } as const, false)
 const editing = atom({ plugin: 'contexer-review', key: 'editing' } as const, null)
 const note = atom({ plugin: 'contexer-review', key: 'note' } as const, null)
+const cursor = atom({ plugin: 'contexer-review', key: 'cursor' } as const, 0)
+const isPaneOpen = atom({ plugin: 'contexer-review', key: 'isPaneOpen' } as const, false)
 
 // The `contexer` that installed this mod: the console script of the same tool venv
 // (<venv>/lib/pythonX.Y/site-packages/contexer/claude_mod -> <venv>/bin/contexer), so another
@@ -72,11 +80,34 @@ function isQueue(value: unknown): value is ReviewQueue {
 async function refresh($: EngineInterface): Promise<void> {
   const out = await contexer($, [])
   await update($, queue, () => (isQueue(out) ? out : null))
+  if (await wantsSuggestion($)) await $.prompt.suggest({ text: SUGGESTION }).catch(() => undefined)
+}
+
+// Closing the pane gives the empty prompt back; offer the review again while decisions wait.
+async function suggestAgain($: EngineInterface): Promise<void> {
+  if (await wantsSuggestion($)) await $.prompt.suggest({ text: SUGGESTION }).catch(() => undefined)
+}
+
+// Our own close does not pass through our own `ui.close` hook, so it offers the review itself.
+async function closePane($: EngineInterface): Promise<void> {
+  await $.ui.close({ id: PANE })
+  await update($, isPaneOpen, () => false)
+  await suggestAgain($)
+}
+
+// Suggest the review only while the pane has something to settle and the developer has not
+// said Later; core itself declines while the box holds text or a turn runs.
+async function wantsSuggestion($: EngineInterface): Promise<boolean> {
+  return actionable(await read($, queue)) > 0 && !(await read($, isHidden))
 }
 
 // One process per click: the action's reply carries the queue as it stands afterwards.
-async function act($: EngineInterface, action: ReviewAction, id: string, content?: string): Promise<void> {
-  const args = content ? [action, id, '--content', content] : [action, id]
+type ActOptions = { content?: string; over?: string }
+
+async function act($: EngineInterface, action: ReviewAction | ConflictAction, id: string, options: ActOptions = {}): Promise<void> {
+  const args = [action, id]
+  if (options.content) args.push('--content', options.content)
+  if (options.over) args.push('--over', options.over)
   const out = await contexer($, args)
   const message = typeof out?.message === 'string' ? out.message : 'Contexer did not answer, so nothing changed.'
   await update($, note, () => message)
@@ -88,8 +119,43 @@ async function act($: EngineInterface, action: ReviewAction, id: string, content
 // Opens at once on the queue the last turn left, then redraws if it changed since.
 async function openPane($: EngineInterface): Promise<void> {
   await update($, note, () => null)
-  await $.ui.open({ id: PANE, title: 'Contexer review', focus: true, closeOnEscape: true })
+  await update($, cursor, () => 0)
+  await update($, isPaneOpen, () => true)
+  try {
+    await $.ui.open(OPEN)
+  } catch (error) {
+    await update($, isPaneOpen, () => false)
+    throw error
+  }
   await refresh($)
+}
+
+// The engine refuses a pane's focus request while the band holds the keys, so a pane opened by
+// the band's own button would open without the keyboard. The band steps aside (drawing nothing
+// hands the keys back to the prompt), and the pane re-asks for focus until the surface reports
+// it focused, bounded, instead of guessing how long the band takes to redraw.
+const HANDOFF_TRIES = 20
+const HANDOFF_STEP_MS = 25
+
+async function handOffToPane($: EngineInterface): Promise<void> {
+  try {
+    await openPane($)
+    for (let i = 0; i < HANDOFF_TRIES; i++) {
+      const pane = (await $.ui.panes()).find(open => open.id === PANE)
+      if (!pane || pane.isFocused) return
+      await $.clock.sleep(HANDOFF_STEP_MS)
+      await $.ui.open(OPEN)
+    }
+  } finally {
+    await update($, isHandingOff, () => false)
+  }
+}
+
+async function openPaneFromBand($: EngineInterface): Promise<void> {
+  await update($, isHandingOff, () => true)
+  $.clock.after(0, () => {
+    handOffToPane($).catch(() => undefined)
+  })
 }
 
 // A queue read is a Python process (~150ms). Never make the session start or a turn's end wait
@@ -98,12 +164,17 @@ function refreshSoon($: EngineInterface): void {
   $.clock.after(0, () => void refresh($))
 }
 
-const KIND_LABEL: Record<ReviewItemKind, string> = {
-  new: 'new',
-  update: 'suggested update',
-  retirement: 'retirement proposed',
-  reconsideration: 'reconsideration proposed',
+// Each card wears one badge naming what is asked, in the colour of its frame.
+type Badge = { label: string; color: string }
+
+const KIND_BADGE: Record<ReviewItemKind, Badge> = {
+  new: { label: 'NEW', color: 'green' },
+  update: { label: 'UPDATE', color: 'cyan' },
+  retirement: { label: 'RETIRE?', color: 'gray' },
+  reconsideration: { label: 'RECONSIDER?', color: 'gray' },
 }
+const CONFLICT_BADGE: Badge = { label: 'CONFLICT', color: 'yellow' }
+const CONTRADICTION_BADGE: Badge = { label: 'CONTRADICTION', color: 'red' }
 
 const ACTION_LABEL: Record<ReviewAction, string> = {
   approve: 'Approve',
@@ -112,16 +183,68 @@ const ACTION_LABEL: Record<ReviewAction, string> = {
   dismiss: 'Dismiss update',
 }
 
-const FIRST_ITEM_HOTKEY: Record<ReviewAction, string> = { approve: 'a', edit: 'e', ignore: 'i', dismiss: 'd' }
+const ACTION_HOTKEY: Record<ReviewAction, string> = { approve: 'a', edit: 'e', ignore: 'i', dismiss: 'd' }
 
-function preview(text: string): string {
-  const flat = text.replace(/\s+/g, ' ').trim()
-  return flat.length > PREVIEW_CHARS ? `${flat.slice(0, PREVIEW_CHARS - 1)}…` : flat
+// Whole text, trailing space trimmed per line; paragraph breaks kept.
+function full(text: string): string {
+  return text.split('\n').map(line => line.trimEnd()).join('\n').trim()
+}
+
+function applicability(when: Applicability | undefined): string {
+  return when?.length ? when.join('; ') : 'always'
+}
+
+// An earlier pick, worded for the pane's own buttons rather than the terminal's.
+const PICK_LINE: Record<'update' | 'standing', string> = {
+  update: 'You picked the update earlier.',
+  standing: 'You kept the current version earlier.',
+}
+
+// A conflicting update is the developer choosing between two versions, so its buttons say so.
+function actionLabel(item: ReviewItem, action: ReviewAction): string {
+  if (item.conflict && action === 'approve') return 'Take update'
+  if (item.conflict && action === 'dismiss') return 'Keep current'
+  return ACTION_LABEL[action]
+}
+
+// What the pane can settle: pending items with buttons, plus contradictions with a keepable side.
+// The band counts this, so it always matches the cards that have buttons.
+function actionable(q: ReviewQueue | null): number {
+  if (!q) return 0
+  return q.items.filter(item => item.actions.length > 0).length
+    + (q.conflicts ?? []).filter(pair => pair.actions.length > 0).length
+}
+
+// The pane shows one card at a time. Cards the pane can settle come first, so the first card
+// always has buttons; the ones only the terminal can settle wait at the end.
+type Card = { kind: 'item'; item: ReviewItem } | { kind: 'pair'; pair: CurrentConflict }
+
+function deck(q: ReviewQueue): Card[] {
+  const items: Card[] = q.items.map(item => ({ kind: 'item', item }))
+  const pairs: Card[] = (q.conflicts ?? []).map(pair => ({ kind: 'pair', pair }))
+  const settles = (card: Card) => (card.kind === 'item' ? card.item.actions : card.pair.actions).length > 0
+  const all = [...items, ...pairs]
+  return [...all.filter(settles), ...all.filter(card => !settles(card))]
+}
+
+function cardKey(card: Card): string {
+  return card.kind === 'item' ? card.item.id : pairKey(card.pair)
+}
+
+function pairKey(pair: CurrentConflict): string {
+  return `${pair.decisions[0].id}-${pair.decisions[1].id}`
+}
+
+// Dots while they fit on one line, then a plain count.
+function progress(at: number, total: number): string {
+  const count = `${at + 1}/${total}`
+  if (total > 12) return count
+  return `${Array.from({ length: total }, (_, i) => (i === at ? '●' : '○')).join(' ')}  ${count}`
 }
 
 function meta(item: ReviewItem): string {
   const date = item.timestamp ? item.timestamp.slice(0, 10) : ''
-  return [item.subtype || 'decision', KIND_LABEL[item.kind], item.origin, date].filter(Boolean).join(' · ')
+  return [item.subtype || 'decision', item.origin, date].filter(Boolean).join(' · ')
 }
 
 export const register: Register = on => {
@@ -143,24 +266,47 @@ export const register: Register = on => {
     return done
   })
 
+  // Claude Code proposes its own next prompt after a turn, which would replace ours. While
+  // decisions wait (and not after Later), its proposal becomes the review command instead.
+  on('prompt.suggest', async ($, e, next) => {
+    if (e.origin.kind === 'suggestion' && (await wantsSuggestion($))) return next({ ...e, text: SUGGESTION })
+    return next(e)
+  })
+
+  // The person's close (Esc, the pane's own close mark): offer the review again.
+  on('ui.close', { id: PANE }, async ($, e, next) => {
+    const closed = await next(e)
+    await update($, isPaneOpen, () => false)
+    await suggestAgain($)
+    return closed
+  })
+
   on('command.run', { command: COMMAND }, async $ => {
     await openPane($)
     return { text: 'Opened the Contexer review pane.' }
   })
 
-  // The band counts only what the pane can settle. Retirements and reconsiderations still show
-  // in the pane, but alone they would point the developer at a pane with no buttons in it.
+  // The band counts only what the pane can settle, and steps aside while the pane is open.
+  // Retirements and reconsiderations still show in the pane, but alone they would point the
+  // developer at a pane with no buttons in it.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const q = await read($, queue)
-    const n = q ? q.items.filter(item => item.actions.length > 0).length : 0
-    if (e.props.hasSurvey || n === 0 || (await read($, isHidden))) return next(e)
+    const n = actionable(q)
+    if (e.props.hasSurvey || n === 0 || (await read($, isHidden)) || (await read($, isHandingOff))
+      || (await read($, isPaneOpen))) {
+      return next(e)
+    }
 
+    // The band gets the keyboard from the prompt by Claude Code's `abovePrompt:focus` (ctrl+x tab
+    // by default); there Tab/arrows move, Enter presses, Esc leaves. The ring starts on Review,
+    // and r/l press the buttons while the band holds the keys. No digit hotkeys: a bare digit in
+    // an empty prompt presses a band button, and this band stays up while decisions wait.
     const { Box, Text, Button } = $.ui.resolve(e)
     return (
       <Box key="contexer-band" gap={1}>
         <Text>{`Contexer · ${n} decision${n === 1 ? ' needs' : 's need'} your call`}</Text>
-        <Button key="contexer-open" label="Review" variant="primary" onPress={() => openPane($)} />
-        <Button key="contexer-later" label="Later" dimColor onPress={() => update($, isHidden, () => true)} />
+        <Button key="contexer-open" label="Review" variant="primary" hotkey="r" autoFocus onPress={() => openPaneFromBand($)} />
+        <Button key="contexer-later" label="Later" hotkey="l" dimColor onPress={() => update($, isHidden, () => true)} />
       </Box>
     )
   })
@@ -172,77 +318,163 @@ export const register: Register = on => {
     const q = await read($, queue)
     const message = await read($, note)
     const editingId = await read($, editing)
-    const close = <Button key="close" label="Close" role="dismiss" onPress={() => $.ui.close({ id: PANE })} />
+    const close = <Button key="close" label="Close" role="dismiss" dimColor onPress={() => closePane($)} />
 
     if (!q) {
       return (
-        <Box flexDirection="column" gap={1}>
-          <Text dimColor>Contexer's review queue could not be read here. Run `contexer review` in a terminal.</Text>
+        <Box flexDirection="column" gap={1} paddingX={1}>
+          <Text color="yellow">{"Contexer's review queue could not be read here."}</Text>
+          <Text dimColor>Run `contexer review` in a terminal.</Text>
           {close}
         </Box>
       )
     }
-    if (q.count === 0) {
+    const cards = deck(q)
+    if (cards.length === 0) {
       return (
-        <Box flexDirection="column" gap={1}>
-          {message ? <Text dimColor>{message}</Text> : <Text dimColor>{' '}</Text>}
-          <Text>Nothing waits on you. Every decision is reviewed.</Text>
+        <Box flexDirection="column" gap={1} paddingX={1}>
+          {message ? <Text dimColor>{message}</Text> : null}
+          <Text bold color="green">✓ All clear</Text>
+          <Text dimColor>Nothing waits on you. Every decision is reviewed.</Text>
           {close}
         </Box>
       )
     }
 
-    const cards = q.items.map((item, index) => {
-      const lines = [
-        <Text key={`title-${item.id}`} bold>{`${index + 1}. ${item.title}`}</Text>,
-        <Text key={`meta-${item.id}`} dimColor>{meta(item)}</Text>,
-      ]
+    const at = Math.min(await read($, cursor), cards.length - 1)
+    const card = cards[at] as Card
+    const key = cardKey(card)
+
+    const badge = ({ label, color }: Badge) => (
+      <Text key={`badge-${label}`} bold color="black" backgroundColor={color}>{` ${label} `}</Text>
+    )
+    // A label column keeps the values aligned: NOW, PROPOSED, APPLIES.
+    const field = (name: string, value: string, dim = false) => (
+      <Box key={`${name}-${key}`} flexDirection="row">
+        <Box width={10} flexShrink={0}><Text dimColor>{name}</Text></Box>
+        <Box flexShrink={1}><Text dimColor={dim}>{value}</Text></Box>
+      </Box>
+    )
+
+    let frame: string
+    let badges: Badge[]
+    let body: RenderChildren[]
+    let actions: RenderChildren
+    if (card.kind === 'item') {
+      const { item } = card
+      const isConflict = item.kind === 'update' && !!item.conflict
+      frame = isConflict ? CONFLICT_BADGE.color : KIND_BADGE[item.kind].color
+      badges = isConflict ? [CONFLICT_BADGE, KIND_BADGE[item.kind]] : [KIND_BADGE[item.kind]]
+      body = [<Text key={`title-${key}`} bold>{item.title}</Text>]
       if (item.kind === 'update' && item.proposed) {
-        lines.push(<Text key={`now-${item.id}`}>{`Now: ${preview(item.content)}`}</Text>)
-        lines.push(<Text key={`new-${item.id}`}>{`Proposed: ${preview(item.proposed.content)}`}</Text>)
+        const before = applicability(item.applies_when)
+        const after = applicability(item.proposed.applies_when ?? item.applies_when)
+        body.push(
+          <Box key={`fields-${key}`} flexDirection="column">
+            {field('NOW', full(item.content), true)}
+            {field('PROPOSED', full(item.proposed.content))}
+            {field('APPLIES', before === after ? before : `${before} → ${after}`, true)}
+          </Box>,
+        )
+        if (item.pick) body.push(<Text key={`pick-${key}`} color="yellow">{PICK_LINE[item.pick]}</Text>)
       } else {
-        lines.push(<Text key={`body-${item.id}`}>{preview(item.content)}</Text>)
+        body.push(
+          <Box key={`fields-${key}`} flexDirection="column">
+            <Text>{full(item.content)}</Text>
+            {field('APPLIES', applicability(item.applies_when), true)}
+          </Box>,
+        )
       }
 
       if (editingId === item.id && Input) {
-        lines.push(
-          <Input
-            key={`edit-${item.id}`}
-            label="New wording: "
-            value={item.proposed?.content ?? item.content}
-            submitLabel="approve"
-            autoFocus
-            onSubmit={value => (value.trim()
-              ? act($, 'edit', item.id, value.trim())
-              : update($, note, () => 'Type the new wording, then press Enter.'))}
-          />,
-        )
-        lines.push(<Button key={`cancel-${item.id}`} label="Cancel" dimColor onPress={() => update($, editing, () => null)} />)
-      } else if (item.actions.length === 0) {
-        lines.push(<Text key={`terminal-${item.id}`} dimColor>Run `contexer review` in a terminal to decide this one.</Text>)
-      } else {
-        const buttons = item.actions
-          .filter(action => action !== 'edit' || Input)
-          .map(action => (
-            <Button
-              key={`${action}-${item.id}`}
-              label={ACTION_LABEL[action]}
-              variant={action === 'approve' ? 'primary' : undefined}
-              hotkey={index === 0 ? FIRST_ITEM_HOTKEY[action] : undefined}
-              onPress={() => (action === 'edit' ? update($, editing, () => item.id) : act($, action, item.id))}
+        actions = (
+          <Box key={`editing-${key}`} flexDirection="column">
+            <Input
+              key={`edit-${item.id}`}
+              label="New wording: "
+              value={item.proposed?.content ?? item.content}
+              submitLabel="approve"
+              autoFocus
+              onSubmit={value => (value.trim()
+                ? act($, 'edit', item.id, { content: value.trim() })
+                : update($, note, () => 'Type the new wording, then press Enter.'))}
             />
-          ))
-        lines.push(<Box key={`actions-${item.id}`} gap={1}>{buttons}</Box>)
+            <Button key={`cancel-${item.id}`} label="Cancel" dimColor onPress={() => update($, editing, () => null)} />
+          </Box>
+        )
+      } else if (item.actions.length === 0) {
+        actions = <Text key={`terminal-${key}`} dimColor>Decide this one with `contexer review` in a terminal.</Text>
+      } else {
+        actions = (
+          <Box key={`actions-${key}`} gap={1}>
+            {item.actions
+              .filter(action => action !== 'edit' || Input)
+              .map(action => (
+                <Button
+                  key={`${action}-${item.id}`}
+                  label={actionLabel(item, action)}
+                  variant={action === 'approve' ? 'primary' : undefined}
+                  hotkey={ACTION_HOTKEY[action]}
+                  onPress={() => (action === 'edit' ? update($, editing, () => item.id) : act($, action, item.id))}
+                />
+              ))}
+          </Box>
+        )
       }
-      return <Box key={`item-${item.id}`} flexDirection="column">{lines}</Box>
-    })
+    } else {
+      // Keep one side; the other is retired as superseded by it, with the reason recorded. Only an
+      // approved side can be kept, so an unratified capture never replaces an approved decision.
+      const { pair } = card
+      const [left, right] = pair.decisions
+      const sides: [ConflictSide, ConflictSide][] = [[left, right], [right, left]]
+      frame = CONTRADICTION_BADGE.color
+      badges = [CONTRADICTION_BADGE]
+      body = [
+        <Text key={`reason-${key}`} dimColor>{pair.reason}</Text>,
+        <Box key={`sides-${key}`} flexDirection="row" gap={1}>
+          {sides.map(([one, other]) => (
+            <Box key={`side-${key}-${one.id}`} width="50%" flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
+              <Text bold>{one.title}</Text>
+              <Text>{full(one.content)}</Text>
+              <Text dimColor>{`${one.status} · applies: ${applicability(one.applies_when)}`}</Text>
+              {/* Keyed by pair too: one decision can contradict two others, and presses are
+                  resolved by key, so a side-only key would let one press run another pair's Keep. */}
+              {one.can_keep
+                ? <Button key={`keep-${key}-${one.id}`} label="Keep this one" variant="primary" onPress={() => act($, 'keep', one.id, { over: other.id })} />
+                : <Text key={`unkeepable-${key}-${one.id}`} dimColor>Not approved by you, so it cannot replace the other.</Text>}
+            </Box>
+          ))}
+        </Box>,
+      ]
+      actions = pair.actions.length === 0
+        ? <Text key={`terminal-${key}`} dimColor>{'Neither side is one you approved. Retire one with `contexer retire <id> --reason <why>`, or edit one so they agree.'}</Text>
+        : null
+    }
 
+    const subtitle = card.kind === 'item' ? meta(card.item) : 'two current decisions disagree'
+    const many = cards.length > 1
     return (
-      <Box flexDirection="column" gap={1}>
-        <Text bold>{`${q.count} decision${q.count === 1 ? ' needs' : 's need'} your call`}</Text>
-        {message ? <Text dimColor>{message}</Text> : <Text dimColor>Settle each one here. Nothing changes until you press a button.</Text>}
-        {cards}
-        {close}
+      <Box flexDirection="column" gap={1} paddingX={1}>
+        <Box key="top" flexDirection="row" justifyContent="space-between">
+          <Box gap={1}>
+            {badges.map(badge)}
+            <Text dimColor>{subtitle}</Text>
+          </Box>
+          <Text dimColor>{progress(at, cards.length)}</Text>
+        </Box>
+        <Box key={`card-${key}`} flexDirection="column" borderStyle="round" borderColor={frame} paddingX={1} gap={1}>
+          {body}
+        </Box>
+        {actions}
+        {message ? <Text key="note" color="green">{`› ${message}`}</Text> : null}
+        <Box key="bottom" flexDirection="row" justifyContent="space-between">
+          <Text dimColor>{many ? 'tab move · enter press · ↑↓ scroll · n/p next/previous · esc close' : 'tab move · enter press · ↑↓ scroll · esc close'}</Text>
+          <Box gap={1}>
+            {many ? <Button key="prev" label="‹ Prev" hotkey="p" dimColor onPress={() => update($, cursor, () => (at + cards.length - 1) % cards.length)} /> : null}
+            {many ? <Button key="next" label="Next ›" hotkey="n" dimColor onPress={() => update($, cursor, () => (at + 1) % cards.length)} /> : null}
+            {close}
+          </Box>
+        </Box>
       </Box>
     )
   })
