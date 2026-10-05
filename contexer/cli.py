@@ -28,6 +28,8 @@ Commands:
   upgrade       Upgrade Contexer itself, then re-sync config. Add --dry-run to preview.
   review        Interactively approve, edit, ignore, or retire pending engineering
                 decisions; also surfaces possibly-overlapping rules for consolidation.
+                review --json [approve|edit|ignore|dismiss <id> [--content TEXT]]
+                prints the queue (or settles one item) as JSON for the Claude Code mod.
   retire        Retire one decision - it leaves active context, keeping its history:
                 retire <id> --reason <text> [--replaced-by <id>].
   restore       Bring one retired decision back: restore <id> [--reason <text>].
@@ -474,9 +476,78 @@ def _retire_from_review(repo_path: str, entry: dict, life: dict) -> tuple[bool, 
                                      life.get("replacement_decision_id"))
 
 
+def _review_json(rest: list) -> None:
+    """`contexer review --json [<action> <id> [--content TEXT]]` - the review queue for a
+    machine reader (the Claude Code mod's in-session pane), and one action per call.
+
+    With no action it prints `console_api.review_queue`. With one it settles one item through
+    the same store calls the interactive loop below makes, then prints `{ok, message, queue}`,
+    the queue as it stands afterwards, so a caller redraws from the one reply.
+    Every outcome is ONE JSON object on stdout, refusals and store failures included, and a
+    refusal exits 1: the caller is a program, so it must never see a prompt or a traceback.
+    Only the actions `review.item_actions` offers for that item's kind are accepted, so a
+    retirement or a reconsideration still goes through `contexer review`, which asks for the
+    reason or wording it needs."""
+    from contexer import console_api, review, store
+
+    def answer(ok: bool, message: str, repo_path: str | None = None) -> None:
+        out = {"ok": ok, "message": message}
+        if repo_path:
+            out["queue"] = console_api.review_queue(repo_path)
+        print(json.dumps(out))
+        if not ok:
+            sys.exit(1)
+
+    repo_path = store.git_root(os.getcwd())
+    if not repo_path:
+        answer(False, "Not inside a git repository.")
+        return
+    try:
+        if not rest:
+            print(json.dumps(console_api.review_queue(repo_path)))
+            return
+
+        action, args = rest[0], rest[1:]
+        if action not in ("approve", "edit", "ignore", "dismiss"):
+            answer(False, f"Unknown review action {action!r}: use approve, edit, ignore or dismiss.")
+            return
+        if not args or args[0].startswith("-"):
+            answer(False, f"`review --json {action}` needs a decision id.")
+            return
+        entry_id, content = args[0], ""
+        if "--content" in args:
+            at = args.index("--content")
+            content = args[at + 1].strip() if at + 1 < len(args) else ""
+        if action == "edit" and not content:
+            answer(False, "`review --json edit` needs the new wording: --content TEXT.")
+            return
+
+        entry = next((e for e in store.get_pending_decisions(repo_path)
+                      if e.get("id") == entry_id), None)
+        if entry is None:
+            answer(False, f"No pending decision with id {entry_id!r}.", repo_path)
+            return
+        kind = review.item_kind(entry)
+        if action not in review.item_actions(kind):
+            answer(False, f"A {kind} can't be settled with {action!r} here; "
+                          "run `contexer review` in a terminal.", repo_path)
+            return
+
+        ok, message = store.approve_decision(repo_path, entry_id, action, content)
+        if ok and action in ("approve", "edit"):
+            # Imported only here: it pulls in the Teams client, and the queue read the mod
+            # makes after every turn must not pay for it.
+            from contexer import share_policy
+            share_policy.enqueue_after_local_mutation(repo_path, entry_id)
+        answer(ok, message, repo_path)
+    except Exception as exc:   # a store that will not read or write: still one JSON refusal
+        answer(False, f"Contexer could not complete the review request: {exc}")
+
+
 def review() -> None:
-    """Interactively review and approve/ignore/edit/retire pending engineering decisions."""
-    from contexer import conflicts, lifecycle, review_impact, revisions, share_policy, store
+    """Interactively review and approve/ignore/edit/retire pending engineering decisions.
+    `contexer review --json` is the non-interactive machine mode (`_review_json`)."""
+    from contexer import conflicts, lifecycle, review, review_impact, revisions, share_policy, store
 
     repo_path = store.git_root(os.getcwd())
     if not repo_path:
@@ -498,14 +569,14 @@ def review() -> None:
     # per-decision rebuild would re-read the same three things once per screen.
     impact_context = review_impact.review_context(repo_path)
     for i, entry in enumerate(pending, 1):
-        recon = entry.get("proposed_reconsideration")
-        life = None if recon else entry.get("proposed_lifecycle")
-        # A retirement outranks a content question on the same decision: there is no point
-        # settling how a decision should read while its existence is in doubt. Dismissing the
-        # retirement leaves any Suggested Update pending for the next run, which the render says.
-        # A reconsideration outranks both, for the same reason one step further out: the
-        # decision is not live at all.
-        prop = None if (life or recon) else entry.get("proposed_revision")
+        # Which question this entry asks is `review.item_kind`'s call (reconsideration, then
+        # retirement, then a Suggested Update), the same precedence the `--json` mode and the
+        # Claude Code pane use. Dismissing a retirement leaves any Suggested Update pending for
+        # the next run, which the render says.
+        kind = review.item_kind(entry)
+        recon = entry.get("proposed_reconsideration") if kind == "reconsideration" else None
+        life = entry.get("proposed_lifecycle") if kind == "retirement" else None
+        prop = entry.get("proposed_revision") if kind == "update" else None
         print("─" * 66)
         eid = (entry.get("id") or "")[:8]
         heading = f"Decision {i} of {len(pending)}"
@@ -3093,7 +3164,9 @@ class Command(NamedTuple):
     names: tuple[str, ...]
     run: Callable[[list], None]
     guarded: bool = True        # wrap in _run_guarded (a mutating command)
-    backstop: bool = True       # the new-release aside may print after this command
+    # Whether the new-release aside may print after this command; a callable decides per argv,
+    # for a command whose output is sometimes a program's protocol (`review --json`).
+    backstop: bool | Callable[[list], bool] = True
 
 
 # The dispatch table. Data, not a chain of `elif cmd ==` branches: every fact about a
@@ -3111,7 +3184,12 @@ COMMANDS: tuple[Command, ...] = (
     Command(("reinstall",), lambda rest: reinstall()),
     # `upgrade` IS the remedy the aside would recommend.
     Command(("upgrade",), lambda rest: upgrade(rest), backstop=False),
-    Command(("review",), lambda rest: review(), guarded=False),
+    # `--json` output is read by a program (the Claude Code mod), which would consume the
+    # release notice unseen, so that mode never carries it.
+    Command(("review",),
+            lambda rest: _review_json([a for a in rest if a != "--json"]) if "--json" in rest
+            else review(),
+            guarded=False, backstop=lambda rest: "--json" not in rest),
     Command(("retire",), lambda rest: _lifecycle_cmd(rest, retiring=True)),
     Command(("restore",), lambda rest: _lifecycle_cmd(rest, retiring=False)),
     Command(("export",), lambda rest: export_cmd(rest), guarded=False, backstop=False),
@@ -3169,7 +3247,8 @@ def dispatch(argv: list) -> None:
         command.run(rest)
 
     # Reached only by a command that completed without exiting.
-    if command.backstop:
+    backstop = command.backstop(rest) if callable(command.backstop) else command.backstop
+    if backstop:
         _print_update_backstop()
 
 

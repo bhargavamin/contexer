@@ -2627,7 +2627,16 @@ class TestCommandTable:
     def test_the_update_aside_follows_exactly_the_rows_that_declare_it(self, name, recorders):
         cli.dispatch([name])
         fired = [c[0] for c in recorders if c[0] == "_print_update_backstop"]
-        assert bool(fired) is cli._BY_NAME[name].backstop, name
+        backstop = cli._BY_NAME[name].backstop
+        expected = backstop([]) if callable(backstop) else backstop
+        assert bool(fired) is expected, name
+
+    def test_review_json_output_never_carries_the_aside(self, recorders, monkeypatch):
+        # A program reads `review --json` (the Claude Code mod discards stderr), so the notice
+        # would be consumed where nobody sees it. The row decides per argv.
+        monkeypatch.setattr(cli, "_review_json", lambda rest: None)
+        cli.dispatch(["review", "--json"])
+        assert not [c for c in recorders if c[0] == "_print_update_backstop"]
 
     def test_only_guard_upgrade_and_status_opt_out_of_the_aside(self):
         """Pinned as a set, not per row: this is the rule the old `cmd not in (...)` line

@@ -220,7 +220,7 @@ def _grouped(rows: list) -> list[dict]:
 _NON_ANCHORING_SLOTS = ("proposed_reconsideration", "proposed_lifecycle")
 
 
-def _origin_label(source) -> str:
+def origin_label(source) -> str:
     """One provenance value in the developer's terms; an unknown one keeps its raw spelling
     rather than vanishing, since "captured by something this version does not know" is still
     more than nothing."""
@@ -409,8 +409,8 @@ def review_impact(repo_path: str, entry: dict, context: dict | None = None) -> d
     # ai-written rewrite of their own decision came from "your prompt" - the standing entry's
     # provenance attached to text they never wrote, which is the exact mistaken approval this
     # block exists to prevent. The standing origin is kept beside it, never replaced by it.
-    standing = _origin_label(entry.get("created_by"))
-    proposed = _origin_label(prop.get("source")) if prop else ""
+    standing = origin_label(entry.get("created_by"))
+    proposed = origin_label(prop.get("source")) if prop else ""
     from contexer import bootstrap
     return {
         "applicability": {"current": list(entry.get("applies_when") or []),

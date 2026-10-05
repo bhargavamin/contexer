@@ -13,7 +13,10 @@ sat inside the same line range in store.py: it has no console consumer at all (i
 is `contexer review`'s terminal output, via `cli._print_overlap_section`), it carries its own
 thresholds, and it reads store internals rather than projecting an entry for display. Adjacency
 in a file is not a boundary. Anything added here must have a console consumer, or the claim
-above stops being checkable.
+above stops being checkable. The one exception to "ui/api.py is the only caller" is
+`review_queue`, whose consumer is the other console: the Claude Code mod's in-session review
+pane, which reads it through `contexer review --json` (`cli._review_json`). What a queue item
+may be settled with is review policy, owned by `review.py`, not by this projection.
 
 The console must never open a store file itself (the same one-write-path rule the MCP surface
 follows), so every shape it renders is assembled here. Everything is a PURE READ except
@@ -45,6 +48,7 @@ from pathlib import Path
 
 from contexer import conflicts      # pure stdlib leaf (no cycle): open-conflict predicate
 from contexer import decision_impact
+from contexer import review         # pure leaf: which question a pending item asks, and its actions
 from contexer import review_impact  # the shared review block; reads store, never console_api
 from contexer import revisions      # pure stdlib leaf (no cycle): revision lifecycle
 from contexer import store          # module object, not `from`-imports: see docstring above
@@ -399,6 +403,31 @@ def dashboard_summary(repo_path: str) -> dict:
         "staleness": team["staleness"],
         "health": health,
     }
+
+
+REVIEW_PROTOCOL = 1
+"""Version of the `review_queue` shape. The Claude Code mod checks it and draws nothing on a
+mismatch, so a mod and a package from different releases (an upgrade mid-session, a stale
+registration) degrade to silence rather than to a pane that misreads the fields. Bump it on any
+change a mod built against the old shape would misread; adding a key is not one."""
+
+def review_queue(repo_path: str) -> dict:
+    """Everything that waits on the developer for one repo, as the in-session review pane
+    renders it: the same set `contexer review` walks (`store.get_pending_decisions`), one row
+    per decision, each naming the actions the pane may offer for it."""
+    items = []
+    for entry in store.get_pending_decisions(repo_path):
+        kind = review.item_kind(entry)
+        item = {
+            **_console_summary(entry),
+            "kind": kind,
+            "origin": review_impact.origin_label(entry.get("created_by", "ai")),
+            "actions": review.item_actions(kind),
+        }
+        if kind == "update":
+            item["proposed"] = _console_proposed(entry.get("proposed_revision") or {})
+        items.append(item)
+    return {"protocol": REVIEW_PROTOCOL, "repo": repo_path, "count": len(items), "items": items}
 
 
 def list_decisions(repo_path: str, *, query: str = "", subtype: str = "", status: str = "",
