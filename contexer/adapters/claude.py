@@ -588,6 +588,9 @@ def sync_memory(repo_path: str) -> int:
     until it has unconsumed evidence, so a quiet repo costs two lock-free sidecar reads.
     """
     stored = _import_memory_facts(repo_path)
+    # Rides the same entrypoint for the same reason: every installed hook already calls it, so
+    # existing installs get the repair with no hook-command change.
+    heal_mod_registration()
     _reconcile_evidence(repo_path)
     # SessionStart, PreCompact, and SessionEnd all call this entrypoint. Proposal scanning is
     # local and bounded; any uploader starts detached only after its intent is durable.
@@ -1073,6 +1076,14 @@ def install(home: Path) -> list[str]:
     else:
         log.append("  ! ~/.claude/commands/bootstrap.md exists and is not Contexer's — left untouched")
 
+    if _mod_opted_out():
+        _set_mod_registration(settings, False)
+        log.append(f"  - In-session review pane not registered ({MOD_OPT_OUT} is set)")
+    else:
+        _set_mod_registration(settings, True)
+        log.append("  ✓ In-session review pane registered as a Claude Code mod "
+                   "(restart Claude Code to load it)")
+
     _save(settings_json, settings)
     log.append("  ✓ Hooks and permissions written to ~/.claude/settings.json")
 
@@ -1086,6 +1097,90 @@ def install(home: Path) -> list[str]:
     if plugin_warning:
         log.append(plugin_warning)
     return log
+
+
+# ── the Claude Code mod (in-session review pane) ────────────────────────────────
+#
+# The mod ships inside the installed package and is registered by PATH, not copied: Claude Code
+# reads `CLAUDE_CODE_PLUGIN_DIRS` from the `env` block of ~/.claude/settings.json and loads every
+# folder it names. Because the folder is the package's own, `uv tool upgrade contexer` replaces
+# the mod together with the Python code and the next session loads it, with no reinstall. What
+# can still go stale is the PATH (a rebuilt tool venv on another Python), which is why
+# SessionStart repairs it. The variable is shared with any other tool's plugin folders, so every
+# write keeps the entries that are not Contexer's.
+
+MOD_ENV = "CLAUDE_CODE_PLUGIN_DIRS"
+MOD_OPT_OUT = "CONTEXER_NO_CLAUDE_MOD"
+
+
+def mod_dir() -> Path:
+    """The mod's folder inside this installed package (the one holding .claude-plugin/)."""
+    return Path(__file__).resolve().parent.parent / "claude_mod"
+
+
+def _is_our_mod_dir(entry: str) -> bool:
+    # Any Contexer install's mod folder, whichever venv or Python it lives under: that is what
+    # lets a stale registration be recognized as ours and replaced rather than kept beside it.
+    path = Path(entry)
+    return path.name == "claude_mod" and path.parent.name == "contexer"
+
+
+def _registered_mod_dirs(settings: dict) -> list[str]:
+    """The Contexer mod folders the settings register, in order (normally one)."""
+    value = _read(settings, "env").get(MOD_ENV)
+    if not isinstance(value, str):
+        return []
+    return [p for p in value.split(os.pathsep) if _is_our_mod_dir(p)]
+
+
+def _set_mod_registration(settings: dict, register: bool) -> bool:
+    """Put this package's mod folder in (or take every Contexer mod folder out of) the env
+    variable, keeping other tools' folders in order. Returns whether anything changed."""
+    env = settings.get("env")
+    if not isinstance(env, dict):
+        if not register:
+            return False
+        env = _section(settings, "env")
+    current = env.get(MOD_ENV)
+    current = current if isinstance(current, str) else ""
+    parts = [p for p in current.split(os.pathsep) if p and not _is_our_mod_dir(p)]
+    if register:
+        parts.append(str(mod_dir()))
+    value = os.pathsep.join(parts)
+    if value == current:
+        return False
+    if value:
+        env[MOD_ENV] = value
+    else:
+        env.pop(MOD_ENV, None)
+    return True
+
+
+def _mod_opted_out() -> bool:
+    return os.environ.get(MOD_OPT_OUT, "") not in ("", "0")
+
+
+def heal_mod_registration(home: Path | None = None) -> None:
+    """Session-checkpoint repair: when every Contexer mod folder the settings name is GONE (the
+    tool venv was rebuilt on another Python, or moved), point the registration at this package.
+
+    Repair only, never install: no Contexer entry means the developer never installed the mod
+    or removed it, and that choice stands. Opted out, nothing changes. A registered folder that
+    still exists is left alone, even when it is another install's, so two installs on one
+    machine never flip the setting back and forth. Bookkeeping, so it never raises and never
+    prints: the hook's stdout is the session context."""
+    try:
+        if _mod_opted_out():
+            return
+        path = (home or Path.home()) / ".claude" / "settings.json"
+        settings = _load(path)          # strict: never rewrite a file we could not parse
+        ours = _registered_mod_dirs(settings)
+        if not ours or any(Path(p).is_dir() for p in ours) or not mod_dir().is_dir():
+            return
+        if _set_mod_registration(settings, True):
+            _save(path, settings)
+    except Exception:
+        return
 
 
 def _stale_plugin_warning(home: Path) -> str | None:
@@ -1181,6 +1276,10 @@ def uninstall(home: Path) -> list[str]:
             permissions["allow"] = cleaned
             changed = True
 
+        if _set_mod_registration(settings, False):
+            changed = True
+            log.append("  ✓ In-session review pane unregistered")
+
         if changed:
             _save(settings_json, settings)
             log.append("  ✓ Hooks and permissions removed from ~/.claude/settings.json")
@@ -1226,10 +1325,21 @@ def status_lines(home: Path) -> list[str]:
     """Diagnostic lines for `contexer status`: MCP/hooks state for the Claude target."""
     mcp, hooks_ok = _mcp_and_hooks_ok(home)
     mcp_cmd = mcp.get("command", "?") if isinstance(mcp, dict) else "?"
+    ours = _registered_mod_dirs(_load_safe(home / ".claude" / "settings.json"))
+    live = [p for p in ours if Path(p).is_dir()]
+    if not ours:
+        mod = "not registered"
+    elif str(mod_dir()) in ours:
+        mod = f"registered → {mod_dir()}"
+    elif live:
+        mod = f"registered → {live[0]} (another Contexer install)"
+    else:
+        mod = f"STALE → {ours[0]} (the next session start repairs it)"
     return [
         "  [claude]",
         f"    MCP server: {'registered → ' + mcp_cmd if mcp else 'NOT registered'}",
         f"    hooks:      {'installed' if hooks_ok else 'missing or partial'}",
+        f"    review pane: {mod}",
     ]
 
 

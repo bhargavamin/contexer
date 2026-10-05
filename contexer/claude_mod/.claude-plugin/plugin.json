@@ -1,0 +1,9 @@
+{
+  "name": "contexer-review",
+  "version": "1.0.0",
+  "description": "Review Contexer's pending decisions without leaving the session: a band above the prompt and a review pane.",
+  "author": {
+    "name": "Bhargav Amin"
+  },
+  "types": "./types/index.d.ts"
+}
