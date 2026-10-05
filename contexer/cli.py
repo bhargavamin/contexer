@@ -477,18 +477,21 @@ def _retire_from_review(repo_path: str, entry: dict, life: dict) -> tuple[bool, 
 
 
 def _review_json(rest: list) -> None:
-    """`contexer review --json [<action> <id> [--content TEXT]]` - the review queue for a
-    machine reader (the Claude Code mod's in-session pane), and one action per call.
+    """`contexer review --json [<action> <id> [--content TEXT | --over ID]]` - the review queue
+    for a machine reader (the Claude Code mod's in-session pane), and one action per call.
 
     With no action it prints `console_api.review_queue`. With one it settles one item through
-    the same store calls the interactive loop below makes, then prints `{ok, message, queue}`,
+    the same store calls the interactive loop below makes (`keep <id> --over <id>` settles a
+    pair of contradicting current decisions through `conflicts.keep_current_side`), then prints `{ok, message, queue}`,
     the queue as it stands afterwards, so a caller redraws from the one reply.
     Every outcome is ONE JSON object on stdout, refusals and store failures included, and a
     refusal exits 1: the caller is a program, so it must never see a prompt or a traceback.
-    Only the actions `review.item_actions` offers for that item's kind are accepted, so a
+    `keep` is checked against the contradiction pair (`conflicts.keep_current_side`), not a
+    pending item. Otherwise only the actions `review.item_actions` offers for that item's kind
+    are accepted, so a
     retirement or a reconsideration still goes through `contexer review`, which asks for the
     reason or wording it needs."""
-    from contexer import console_api, review, store
+    from contexer import conflicts, console_api, review, store
 
     def answer(ok: bool, message: str, repo_path: str | None = None) -> None:
         out = {"ok": ok, "message": message}
@@ -508,16 +511,26 @@ def _review_json(rest: list) -> None:
             return
 
         action, args = rest[0], rest[1:]
-        if action not in ("approve", "edit", "ignore", "dismiss"):
-            answer(False, f"Unknown review action {action!r}: use approve, edit, ignore or dismiss.")
+        if action not in review.known_actions():
+            answer(False, f"Unknown review action {action!r}: use one of "
+                          f"{', '.join(sorted(review.known_actions()))}.")
             return
         if not args or args[0].startswith("-"):
             answer(False, f"`review --json {action}` needs a decision id.")
             return
-        entry_id, content = args[0], ""
-        if "--content" in args:
-            at = args.index("--content")
-            content = args[at + 1].strip() if at + 1 < len(args) else ""
+
+        def flag(name: str) -> str:
+            at = args.index(name) if name in args else -1
+            return args[at + 1].strip() if 0 <= at < len(args) - 1 else ""
+
+        entry_id, content = args[0], flag("--content")
+        if action in review.item_actions("current_conflict"):
+            other = flag("--over")
+            if not other:
+                answer(False, f"`review --json {action}` needs the other side: --over <id>.")
+                return
+            answer(*conflicts.keep_current_side(repo_path, entry_id, other), repo_path)
+            return
         if action == "edit" and not content:
             answer(False, "`review --json edit` needs the new wording: --content TEXT.")
             return

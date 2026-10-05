@@ -419,7 +419,8 @@ def dismiss_lifecycle(repo_path: str, entry_id: str) -> tuple[bool, str]:
 
 
 def tombstone_entry(repo_path: str, entry_id: str, *, reason: str, replacement_id: str | None,
-                    deleted_by: str, stale_guard: bool) -> tuple[bool, str, dict | None]:
+                    deleted_by: str, stale_guard: bool,
+                    precondition=None) -> tuple[bool, str, dict | None]:
     """Move ONE live decision into the tombstone sidecar with a lifecycle record.
     Returns (ok, error message, tombstoned entry) - the caller words its own success message,
     which is what lets `retire_decision` and store's console-facing `delete_decision` share one
@@ -436,9 +437,18 @@ def tombstone_entry(repo_path: str, entry_id: str, *, reason: str, replacement_i
     re-capture. A refusal is recoverable; that is not.
 
     An unresolved `proposed_revision` is ARCHIVED onto the tombstone rather than dropped: it is
-    unreviewed content nobody ever ruled on, and a retirement is not a ruling on it."""
+    unreviewed content nobody ever ruled on, and a retirement is not a ruling on it.
+
+    `precondition(entries)` (optional) is checked against the store as loaded INSIDE the lock and
+    returns a refusal message or None, so a caller whose permission to retire depends on the
+    store's state (a contradiction still standing) cannot act on a state that changed since it
+    looked."""
     with store.store_lock(store.repo_slug(repo_path)):
         data = store.load_for_update(repo_path)
+        if precondition is not None:
+            refusal = precondition(data["entries"])
+            if refusal:
+                return False, refusal, None
         entry = store.entry_by_id([e for e in data["entries"] if e.get("type") == "decision"],
                                   entry_id)
         if entry is None:
@@ -479,7 +489,7 @@ def tombstone_entry(repo_path: str, entry_id: str, *, reason: str, replacement_i
 
 
 def retire_decision(repo_path: str, entry_id: str, reason: str,
-                    replacement_id: str | None = None) -> tuple[bool, str]:
+                    replacement_id: str | None = None, *, precondition=None) -> tuple[bool, str]:
     """Retire a live decision: it leaves active context for the tombstone sidecar, keeping its
     full revision and lifecycle history. Returns (ok, message).
 
@@ -494,7 +504,7 @@ def retire_decision(repo_path: str, entry_id: str, reason: str,
     replacement_id = (replacement_id or "").strip() or None
     ok, message, entry = tombstone_entry(
         repo_path, entry_id, reason=reason.strip(), replacement_id=replacement_id,
-        deleted_by="human", stale_guard=True)
+        deleted_by="human", stale_guard=True, precondition=precondition)
     if not ok:
         return False, message
     what = "Superseded" if replacement_id else "Retired"

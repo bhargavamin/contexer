@@ -166,6 +166,7 @@ def _console_summary(entry: dict) -> dict:
         "confidence": rev.get("confidence_score", entry.get("confidence", 0)),
         "has_proposal": bool(entry.get("proposed_revision")),
         "source_files": list(entry.get("source_files") or []),
+        "applies_when": list(entry.get("applies_when") or []),
     }
 
 
@@ -413,8 +414,10 @@ change a mod built against the old shape would misread; adding a key is not one.
 
 def review_queue(repo_path: str) -> dict:
     """Everything that waits on the developer for one repo, as the in-session review pane
-    renders it: the same set `contexer review` walks (`store.get_pending_decisions`), one row
-    per decision, each naming the actions the pane may offer for it."""
+    renders it. `items` is the same set `contexer review` walks (`store.get_pending_decisions`),
+    one row per decision, each naming the actions the pane may offer for it. `conflicts` is the
+    pane's own addition, contradicting current decisions (`current_conflicts`), which the
+    terminal review does not list."""
     items = []
     for entry in store.get_pending_decisions(repo_path):
         kind = review.item_kind(entry)
@@ -425,9 +428,36 @@ def review_queue(repo_path: str) -> dict:
             "actions": review.item_actions(kind),
         }
         if kind == "update":
-            item["proposed"] = _console_proposed(entry.get("proposed_revision") or {})
+            prop = entry.get("proposed_revision") or {}
+            item["proposed"] = _console_proposed(prop)
+            if "applies_when" not in prop:
+                # No key means the proposal inherits the current applicability on approval
+                # (`revisions.append_revision`), not "always": say so instead of `[]`.
+                item["proposed"]["applies_when"] = None
+            item["conflict"] = conflicts.has_open_conflict(entry)
+            item["pick"] = conflicts.memo_pick(entry)
         items.append(item)
-    return {"protocol": REVIEW_PROTOCOL, "repo": repo_path, "count": len(items), "items": items}
+    return {"protocol": REVIEW_PROTOCOL, "repo": repo_path, "count": len(items), "items": items,
+            "conflicts": current_conflicts(repo_path)}
+
+
+def current_conflicts(repo_path: str) -> list[dict]:
+    """Pairs of CURRENT decisions that prescribe incompatible things (`conflicts.current_pairs`),
+    as the review pane offers them: both sides in full, which of them may be kept
+    (`conflicts.can_keep`), and the action that settles the pair (keep one side; the other is
+    retired as superseded by it). A pair with no keepable side offers no action. Not pending
+    decisions, so they are not in `items` and not in `count`."""
+    pairs = []
+    for left, right in conflicts.current_pairs(store.load(repo_path).get("entries", [])):
+        sides = [{**_console_summary(e), "can_keep": conflicts.can_keep(e)} for e in (left, right)]
+        pairs.append({
+            "kind": "current_conflict",
+            "reason": conflicts.CURRENT_PAIR_REASON,
+            "decisions": sides,
+            "actions": (review.item_actions("current_conflict")
+                        if any(side["can_keep"] for side in sides) else []),
+        })
+    return pairs
 
 
 def list_decisions(repo_path: str, *, query: str = "", subtype: str = "", status: str = "",

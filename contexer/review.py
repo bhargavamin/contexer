@@ -29,6 +29,9 @@ _ITEM_ACTIONS = {
     "update": ("approve", "edit", "dismiss"),
     "retirement": (),
     "reconsideration": (),
+    # Two CURRENT decisions that prescribe incompatible things (conflicts.current_pairs): the
+    # developer keeps one, and the other is retired as superseded by it.
+    "current_conflict": ("keep",),
 }
 
 
@@ -43,6 +46,11 @@ def item_kind(entry: dict) -> str:
     if entry.get("proposed_revision"):
         return "update"
     return "new"
+
+
+def known_actions() -> set[str]:
+    """Every action any kind of review item can be settled with outside the terminal."""
+    return {action for actions in _ITEM_ACTIONS.values() for action in actions}
 
 
 def item_actions(kind: str) -> list[str]:

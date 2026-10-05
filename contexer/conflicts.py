@@ -39,8 +39,12 @@ _CONFLICT_GUIDE = (
 )
 
 
+# What `current_pairs` detects, in one place: the guide, the review pane and the retirement
+# reason all say it, and a new contradiction class must change exactly this sentence.
+CURRENT_PAIR_REASON = "These current decisions prescribe incompatible version formats."
+
 _CURRENT_CONFLICT_GUIDE = (
-    "CONFLICT: these current decisions prescribe incompatible version formats. "
+    f"CONFLICT: {CURRENT_PAIR_REASON[0].lower()}{CURRENT_PAIR_REASON[1:]} "
     "Ask the developer which applies to this task before implementing either. "
     "Their status is unchanged; this marker does not approve or retire a decision."
 )
@@ -100,6 +104,50 @@ def current_pairs(entries: list[dict]) -> list[tuple[dict, dict]]:
                 seen.add(key)
                 pairs.append((left, right))
     return pairs
+
+
+def find_current_pair(entries: list[dict], first_id: str, second_id: str) -> tuple[dict, dict] | None:
+    """The current contradiction between exactly these two decisions, in either order."""
+    wanted = {first_id, second_id}
+    return next(((left, right) for left, right in current_pairs(entries)
+                 if {left.get("id"), right.get("id")} == wanted), None)
+
+
+def can_keep(entry: dict) -> bool:
+    """Whether a side of a contradiction may be kept over the other. Keeping retires the other
+    side as superseded by this one, so only a HUMAN-ratified decision may be kept: one the
+    developer stated (`created_by="human"`) or approved (`approved_by="human"`). Status alone is
+    not enough: scan facts and bootstrap conventions are born `approved` with no human act, and
+    such a capture must never replace a decision a developer ratified."""
+    return (store.entry_status(entry) == "approved"
+            and (entry.get("created_by") == "human" or entry.get("approved_by") == "human"))
+
+
+def keep_current_side(repo_path: str, kept_id: str, other_id: str) -> tuple[bool, str]:
+    """Settle a contradiction the developer chose a side of: retire `other_id` as superseded by
+    `kept_id`, recording why. The pair, and that the kept side is approved, are re-checked under
+    the retirement's own lock, so a pair that changed or vanished since it was shown is refused
+    rather than acted on. One decision per call; nothing here is reachable without a human pick."""
+    from contexer import lifecycle      # function-level: lifecycle reads the store this module renders
+
+    pair = find_current_pair(store.load(repo_path).get("entries", []), kept_id, other_id)
+    kept = next((e for e in pair or () if e.get("id") == kept_id), None)
+    title = (kept or {}).get("title") or kept_id[:8]
+
+    def still_keepable(entries: list[dict]) -> str | None:
+        live = find_current_pair(entries, kept_id, other_id)
+        if live is None:
+            return "Those two decisions are not a current conflict; nothing was retired."
+        if not can_keep(next(e for e in live if e.get("id") == kept_id)):
+            return ("Only a decision you stated or approved can be kept over a contradiction. "
+                    "Nothing was retired.")
+        return None
+
+    return lifecycle.retire_decision(
+        repo_path, other_id,
+        f"Contradicted {title!r} ({kept_id[:8]}): {CURRENT_PAIR_REASON} The developer kept "
+        "that one in the in-session review pane.",
+        replacement_id=kept_id, precondition=still_keepable)
 
 
 def render_current_pair(left: dict, right: dict, *, seen: set | None = None) -> list[str]:
@@ -204,16 +252,25 @@ def _conflict_view(entry: dict) -> tuple[str, str | None, list[str]]:
     ]
 
 
-def memo_steer_line(entry: dict) -> str | None:
-    """The one-line steer a still-valid resolution memo adds to a REVIEW surface — shared by
-    `store.format_pending_review` and `contexer review`, which render the same sentence with
-    their own indentation and leading capital. None when there is no memo, or it is bound to
-    a pair that no longer exists (same staleness rule as `_conflict_view`)."""
+def memo_pick(entry: dict) -> str | None:
+    """The side ("update" or "standing") a still-valid resolution memo records, else None (no
+    memo, or one bound to a pair that no longer exists - the `_conflict_view` staleness rule)."""
     memo = entry.get("conflict_memo") or {}
     if not memo or memo.get("pair") != _conflict_pair_key(entry):
         return None
-    date = (memo.get("created_at") or "")[:10]
-    if memo.get("choice") == "update":
+    # Exactly the two choices `_conflict_view` acts on; anything else is no pick at all.
+    return memo.get("choice") if memo.get("choice") in ("update", "standing") else None
+
+
+def memo_steer_line(entry: dict) -> str | None:
+    """The one-line steer a still-valid resolution memo adds to a REVIEW surface — shared by
+    `store.format_pending_review` and `contexer review`, which render the same sentence with
+    their own indentation and leading capital. None when `memo_pick` finds no valid memo."""
+    pick = memo_pick(entry)
+    if pick is None:
+        return None
+    date = ((entry.get("conflict_memo") or {}).get("created_at") or "")[:10]
+    if pick == "update":
         return (f"the update was picked with the developer on {date}"
                 " — approve to formalize (dismiss drops it)")
     return (f"the update was declined with the developer on {date}"
