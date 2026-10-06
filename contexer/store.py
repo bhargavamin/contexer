@@ -1346,11 +1346,12 @@ _SOFT_PROSE_EXCLUDE = re.compile(
 # last word tolerating a typo such as "adopt/dont adop". Two joined prohibitions ("Do not/should
 # not commit secrets", "use print/don't log secrets") keep their trigger.
 _NEGATION = r"do\s*n['’]?t|do\s+not"
-_BARE_OPTION_PAIR = re.compile(
-    rf"\bdo\s*/\s*(?:{_NEGATION})\b|\b(?:{_NEGATION})\s*/\s*do\b", re.IGNORECASE)
-_NEGATED_AFTER_SLASH = re.compile(rf"/\s*(?:{_NEGATION})\s+", re.IGNORECASE)
-_NEGATED_BEFORE_SLASH = re.compile(
-    rf"\b(?:{_NEGATION})\s+(?P<option>(?:\w+\s+){{0,2}}\w+)\s*/", re.IGNORECASE)
+_NEGATION_RE = re.compile(rf"\b(?:{_NEGATION})\b", re.IGNORECASE)
+# Bare pair: "do/don't" or "don't/do", but not the start of "don't/do not" (two prohibitions).
+_BARE_DO_BEFORE = re.compile(r"\bdo\s*/\s*$", re.IGNORECASE)
+_BARE_DO_AFTER = re.compile(r"\s*/\s*do\b(?!\s*n['’]?t|\s+not\b)", re.IGNORECASE)
+_SLASH_BEFORE = re.compile(r"/\s*$")
+_OPTION_BEFORE_SLASH = re.compile(r"\s+((?:\w+\s+){0,2}\w+)\s*/")
 _OPTION_PHRASE_WORDS = 3
 
 
@@ -1364,24 +1365,32 @@ def _same_option(a: list[str], b: list[str]) -> bool:
         and (last_a.startswith(last_b) or last_b.startswith(last_a))))
 
 
+def _is_option_negation(text: str, match: re.Match) -> bool:
+    """Whether this don't/do-not names one side of a slash option pair in `text`."""
+    before, after = text[:match.start()], text[match.end():]
+    if _BARE_DO_BEFORE.search(before) or _BARE_DO_AFTER.match(after):
+        return True
+    if _SLASH_BEFORE.search(before):                       # "go live/do not go live"
+        left, right = re.findall(r"\w+", before), re.findall(r"\w+", after)
+        return any(_same_option(left[-k:], right[:k])
+                   for k in range(1, _OPTION_PHRASE_WORDS + 1))
+    option = _OPTION_BEFORE_SLASH.match(after)             # "do not go live/go live"
+    if option is None:
+        return False
+    words = option.group(1).split()
+    return _same_option(words, re.findall(r"\w+", after[option.end():])[:len(words)])
+
+
 def _strip_option_pairs(text: str) -> str:
-    """Drop the negation from slash-joined option pairs, leaving other prohibitions intact."""
-    def after_slash(match: re.Match) -> str:   # "go live/do not go live"
-        before = re.findall(r"\w+", match.string[:match.start()])
-        after = re.findall(r"\w+", match.string[match.end():])
-        paired = any(_same_option(before[-k:], after[:k])
-                     for k in range(1, _OPTION_PHRASE_WORDS + 1))
-        return "/" if paired else match.group(0)
+    """Drop the negations that name slash-joined options, leaving every other prohibition.
 
-    def before_slash(match: re.Match) -> str:  # "do not go live/go live"
-        option = match.group("option").split()
-        after = re.findall(r"\w+", match.string[match.end():])
-        return (" ".join(option) + "/" if _same_option(option, after[:len(option)])
-                else match.group(0))
-
-    text = _BARE_OPTION_PAIR.sub("", text)
-    text = _NEGATED_AFTER_SLASH.sub(after_slash, text)
-    return _NEGATED_BEFORE_SLASH.sub(before_slash, text)
+    Each negation is judged against the original text and all are removed together, so
+    removing one cannot turn its neighbour into a pair ("Don't adopt/don't adopt ...").
+    """
+    spans = [m.span() for m in _NEGATION_RE.finditer(text) if _is_option_negation(text, m)]
+    for start, end in reversed(spans):
+        text = text[:start] + text[end:]
+    return text
 
 # Profanity and frustration words that carry no directive meaning.
 # These are stripped before storing so the rule itself is preserved cleanly.
