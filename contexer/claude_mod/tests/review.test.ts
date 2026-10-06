@@ -45,6 +45,8 @@ const PAIR: CurrentConflict = {
 const suggested: string[] = []
 // The mocked clock the timer-driven queue reads run on; made before the test's first `$` call.
 let clock: ReturnType<typeof mock.clock>
+// Settles an item from outside the pane (another session), for the next queue read to see.
+let settleElsewhere: (id: string) => void = () => {}
 
 // `held` holds the next queue read's reply (already snapshotted) until it resolves, to play a
 // process that answers late. `action` holds the next action before its write lands, to play a
@@ -62,6 +64,7 @@ function fakeContexer(on: On, items: ReviewItem[], protocol = 1, pairs: CurrentC
   let pending = [...items]
   let open = [...pairs]
   const queue = () => ({ protocol, repo: '/repo', count: pending.length, items: pending, conflicts: open })
+  settleElsewhere = id => { pending = pending.filter(item => item.id !== id) }
   on('process.run', async (_$, e) => {
     calls.push([...e.argv])
     const args = e.argv.slice(e.argv.indexOf('--json') + 1)
@@ -384,6 +387,19 @@ describe('review pane', () => {
       await pressing
       expect(await pane.find({ key: `approve-${NEW.id}` })).toBeUndefined()
       expect(await pane.find({ key: `approve-${UPDATE.id}` })).toBeDefined()
+    })
+
+    test(`the pane stays on its card when another session settles an earlier one (${surface})`, async ($, on) => {
+      const LATER: ReviewItem = { ...NEW, id: 'gggg7777', title: 'Log every skipped org' }
+      fakeContexer(on, [NEW, UPDATE, LATER])
+      await start($, on)
+      const pane = await mountPane($, surface)
+      await pane.press({ key: 'next' })
+      expect(await pane.find({ key: `approve-${UPDATE.id}` })).toBeDefined()
+      settleElsewhere(NEW.id)
+      await start($)
+      expect(await pane.find({ key: `approve-${UPDATE.id}` })).toBeDefined()
+      expect(await pane.find({ key: `approve-${LATER.id}` })).toBeUndefined()
     })
 
     test(`edit sends the developer's wording (${surface})`, async ($, on) => {

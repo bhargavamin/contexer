@@ -78,8 +78,8 @@ declare module 'claude-code' {
       isHandingOff: boolean
       editing: string | null
       note: string | null
-      /** The card the pane shows: an index into its deck, clamped as cards are settled. */
-      cursor: number
+      /** The card the pane shows: its key, and its position for when it has been settled. */
+      cursor: { key: string; at: number } | null
       /** The pane is up, so the band above the prompt steps aside. */
       isPaneOpen: boolean
     }

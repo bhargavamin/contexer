@@ -30,7 +30,7 @@ const isHidden = atom({ plugin: 'contexer-review', key: 'isHidden' } as const, f
 const isHandingOff = atom({ plugin: 'contexer-review', key: 'isHandingOff' } as const, false)
 const editing = atom({ plugin: 'contexer-review', key: 'editing' } as const, null)
 const note = atom({ plugin: 'contexer-review', key: 'note' } as const, null)
-const cursor = atom({ plugin: 'contexer-review', key: 'cursor' } as const, 0)
+const cursor = atom({ plugin: 'contexer-review', key: 'cursor' } as const, null)
 const isPaneOpen = atom({ plugin: 'contexer-review', key: 'isPaneOpen' } as const, false)
 
 // The `contexer` that installed this mod: the console script of the same tool venv
@@ -142,7 +142,7 @@ async function act($: EngineInterface, action: ReviewAction | ConflictAction, id
 async function openPane($: EngineInterface): Promise<void> {
   await update($, note, () => null)
   await update($, editing, () => null)
-  await update($, cursor, () => 0)
+  await update($, cursor, () => null)
   await update($, isPaneOpen, () => true)
   try {
     await $.ui.open(OPEN)
@@ -248,6 +248,14 @@ function deck(q: ReviewQueue): Card[] {
   const settles = (card: Card) => (card.kind === 'item' ? card.item.actions : card.pair.actions).length > 0
   const all = [...items, ...pairs]
   return [...all.filter(settles), ...all.filter(card => !settles(card))]
+}
+
+// The card the pane shows, by key: a refresh can shift the deck under it (another session
+// settles an earlier card), and the hotkeys must stay on the decision the developer is reading.
+// Gone (settled), it falls back to the same position, the next card in line.
+function cardAt(cards: Card[], want: { key: string; at: number } | null): number {
+  const found = want ? cards.findIndex(card => cardKey(card) === want.key) : -1
+  return found >= 0 ? found : Math.min(want?.at ?? 0, cards.length - 1)
 }
 
 function cardKey(card: Card): string {
@@ -365,7 +373,7 @@ export const register: Register = on => {
       )
     }
 
-    const at = Math.min(await read($, cursor), cards.length - 1)
+    const at = cardAt(cards, await read($, cursor))
     const card = cards[at] as Card
     const key = cardKey(card)
 
@@ -497,6 +505,7 @@ export const register: Register = on => {
 
     const subtitle = card.kind === 'item' ? meta(card.item) : 'two current decisions disagree'
     const many = cards.length > 1
+    const go = (to: number) => update($, cursor, () => ({ key: cardKey(cards[to] as Card), at: to }))
     return (
       <Box flexDirection="column" gap={1} paddingX={1}>
         <Box key="top" flexDirection="row" justifyContent="space-between">
@@ -514,8 +523,8 @@ export const register: Register = on => {
         <Box key="bottom" flexDirection="row" justifyContent="space-between">
           <Text dimColor>{many ? 'tab move · enter press · ↑↓ scroll · n/p next/previous · esc close' : 'tab move · enter press · ↑↓ scroll · esc close'}</Text>
           <Box gap={1}>
-            {many ? <Button key="prev" label="‹ Prev" hotkey="p" dimColor onPress={() => update($, cursor, () => (at + cards.length - 1) % cards.length)} /> : null}
-            {many ? <Button key="next" label="Next ›" hotkey="n" dimColor onPress={() => update($, cursor, () => (at + 1) % cards.length)} /> : null}
+            {many ? <Button key="prev" label="‹ Prev" hotkey="p" dimColor onPress={() => go((at + cards.length - 1) % cards.length)} /> : null}
+            {many ? <Button key="next" label="Next ›" hotkey="n" dimColor onPress={() => go((at + 1) % cards.length)} /> : null}
             {close}
           </Box>
         </Box>
