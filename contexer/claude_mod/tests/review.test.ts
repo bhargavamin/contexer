@@ -444,5 +444,16 @@ describe('review pane', () => {
       expect(calls[calls.length - 1]?.slice(-4))
         .toEqual(['edit', NEW.id, '--content', 'Log a warning instead of deleting rows'])
     })
+
+    test(`an edit sends back the basis of the card it was typed on (${surface})`, async ($, on) => {
+      const shown = { ...NEW, basis: '0123456789abcdef' }
+      const calls = fakeContexer(on, [shown])
+      await start($, surface)
+      const pane = await mountPane($, surface)
+      await pane.press({ key: `edit-${shown.id}` })
+      await pane.input({ key: `edit-${shown.id}`, text: 'Log a warning instead of deleting rows' })
+      expect(calls[calls.length - 1]?.slice(-6)).toEqual(
+        ['edit', shown.id, '--content', 'Log a warning instead of deleting rows', '--expect', shown.basis])
+    })
   }
 })

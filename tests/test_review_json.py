@@ -503,10 +503,25 @@ class TestRefusals:
         assert code == 0 and out["ok"] is True
         assert _entry(in_repo, eid)["content"] == UPDATE
 
-    def test_a_new_capture_whose_wording_changed_is_refused(self, in_repo, monkeypatch, capsys):
+    @pytest.mark.parametrize("action, status", [("approve", "approved"), ("ignore", "ignored")])
+    def test_a_new_capture_settles_with_the_basis_the_pane_showed(self, in_repo, capsys,
+                                                                  action, status):
         eid = _pending(in_repo)
         (shown,) = console_api.review_queue(in_repo)["items"]
-        monkeypatch.setattr(console_api, "review_basis", lambda _entry: "0" * 16)
+        code, out = _run(capsys, action, eid, "--expect", shown["basis"])
+        assert code == 0 and out["ok"] is True
+        assert store.entry_status(_entry(in_repo, eid)) == status
+
+    def test_a_new_capture_amended_since_it_was_shown_is_refused(self, in_repo, capsys):
+        # Another session corrects the pending draft's title in place (the store's own path for
+        # an untrusted decision): the card the developer saw no longer reads as the draft does.
+        eid = _pending(in_repo)
+        (shown,) = console_api.review_queue(in_repo)["items"]
+        ok, rid = store.update_decision(in_repo, RULE, "s2", "constraint", replace_id=eid,
+                                        title="Keep rows for organisations deleted in Clerk")
+        entry = _entry(in_repo, eid)
+        assert ok and rid == eid and entry["title"] != shown["title"]
+        assert store.entry_status(entry) == "pending_approval"
         code, out = _run(capsys, "approve", eid, "--expect", shown["basis"])
         assert code == 1 and out["ok"] is False
         assert store.entry_status(_entry(in_repo, eid)) == "pending_approval"
