@@ -97,9 +97,9 @@ function fakeContexer(on: On, items: ReviewItem[], protocol = 1, pairs: CurrentC
   return calls
 }
 
-// Starts the session and lets the timer-driven queue read land.
-async function start($: Engine, _on?: On): Promise<void> {
-  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+// Starts the session on `surface` and lets the timer-driven queue read land.
+async function start($: Engine, surface: Surface): Promise<void> {
+  await $.session.start({ cwd: '/repo', surface, isInteractive: true } as never)
   await clock.settle()
 }
 
@@ -117,7 +117,7 @@ describe('band above the prompt', () => {
   for (const surface of SURFACES) {
     test(`shows what the pane can settle and hides on Later (${surface})`, async ($, on) => {
       fakeContexer(on, [NEW, RETIRE])
-      await start($, on)
+      await start($, surface)
       const band = await mountBand($, surface)
       expect(await band.find({ type: 'Text', text: /1 decision needs your call/ })).toBeDefined()
       await band.press({ key: 'contexer-later' })
@@ -126,7 +126,7 @@ describe('band above the prompt', () => {
 
     test(`steps aside while the pane is open (${surface})`, async ($, on) => {
       fakeContexer(on, [NEW])
-      await start($, on)
+      await start($, surface)
       await $.command.run({ command: 'contexer-review', args: '' } as never)
       expect(await (await mountBand($, surface)).find({ key: 'contexer-open' })).toBeUndefined()
       const pane = await mountPane($, surface)
@@ -136,20 +136,20 @@ describe('band above the prompt', () => {
 
     test(`counts only items the pane can settle (${surface})`, async ($, on) => {
       fakeContexer(on, [RETIRE])
-      await start($, on)
+      await start($, surface)
       expect(await (await mountBand($, surface)).find({ key: 'contexer-open' })).toBeUndefined()
     })
 
     test(`counts contradictions the pane can settle (${surface})`, async ($, on) => {
       fakeContexer(on, [], 1, [PAIR])
-      await start($, on)
+      await start($, surface)
       const band = await mountBand($, surface)
       expect(await band.find({ type: 'Text', text: /1 decision needs your call/ })).toBeDefined()
     })
 
     test(`draws nothing of its own for an unknown queue protocol (${surface})`, async ($, on) => {
       fakeContexer(on, [NEW], 99)
-      await start($, on)
+      await start($, surface)
       expect(await (await mountBand($, surface)).find({ key: 'contexer-open' })).toBeUndefined()
     })
   }
@@ -159,19 +159,19 @@ describe('keyboard path from the prompt', () => {
   for (const surface of SURFACES) {
     test(`suggests the review command while something can be settled (${surface})`, async ($, on) => {
       fakeContexer(on, [NEW])
-      await start($, on)
+      await start($, surface)
       expect(suggested).toContain('/contexer-review')
     })
 
     test(`suggests nothing for items only the terminal can settle (${surface})`, async ($, on) => {
       fakeContexer(on, [RETIRE])
-      await start($, on)
+      await start($, surface)
       expect(suggested).toEqual([])
     })
 
     test(`replaces Claude Code's own suggestion while decisions wait (${surface})`, async ($, on) => {
       fakeContexer(on, [NEW])
-      await start($, on)
+      await start($, surface)
       suggested.length = 0
       await $.prompt.suggest({ text: 'fix lint errors', origin: { kind: 'suggestion' } })
       expect(suggested).toEqual(['/contexer-review'])
@@ -179,7 +179,7 @@ describe('keyboard path from the prompt', () => {
 
     test(`never rewrites another plugin's suggestion (${surface})`, async ($, on) => {
       fakeContexer(on, [NEW])
-      await start($, on)
+      await start($, surface)
       suggested.length = 0
       await $.prompt.suggest({ text: 'run the linter', origin: { kind: 'plugin', name: 'other' } })
       expect(suggested).toEqual(['run the linter'])
@@ -187,26 +187,26 @@ describe('keyboard path from the prompt', () => {
 
     test(`a later queue read never replaces another plugin's suggestion (${surface})`, async ($, on) => {
       fakeContexer(on, [NEW])
-      await start($, on)
+      await start($, surface)
       suggested.length = 0
       await $.prompt.suggest({ text: 'run the linter', origin: { kind: 'plugin', name: 'other' } })
-      await start($)
+      await start($, surface)
       expect(suggested).toEqual(['run the linter'])
     })
 
     test(`offers the review again after the next prompt is sent (${surface})`, async ($, on) => {
       fakeContexer(on, [NEW])
-      await start($, on)
+      await start($, surface)
       await $.prompt.suggest({ text: 'run the linter', origin: { kind: 'plugin', name: 'other' } })
       await $.prompt.submit({ text: 'run the linter' } as never)
       suggested.length = 0
-      await start($)
+      await start($, surface)
       expect(suggested).toEqual(['/contexer-review'])
     })
 
     test(`offers the review again when the pane closes (${surface})`, async ($, on) => {
       fakeContexer(on, [NEW])
-      await start($, on)
+      await start($, surface)
       const pane = await mountPane($, surface)
       suggested.length = 0
       await pane.press({ key: 'close' })
@@ -215,11 +215,11 @@ describe('keyboard path from the prompt', () => {
 
     test(`stops suggesting after Later (${surface})`, async ($, on) => {
       fakeContexer(on, [NEW])
-      await start($, on)
+      await start($, surface)
       const band = await mountBand($, surface)
       await band.press({ key: 'contexer-later' })
       suggested.length = 0
-      await start($)
+      await start($, surface)
       await $.prompt.suggest({ text: 'fix lint errors', origin: { kind: 'suggestion' } })
       expect(suggested).toEqual(['fix lint errors'])
     })
@@ -230,7 +230,7 @@ describe('review pane', () => {
   for (const surface of SURFACES) {
     test(`approves one item with one contexer call (${surface})`, async ($, on) => {
       const calls = fakeContexer(on, [NEW, RETIRE])
-      await start($, on)
+      await start($, surface)
       const pane = await mountPane($, surface)
       expect(await pane.find({ type: 'Text', text: /Never delete rows/ })).toBeDefined()
       expect(await pane.find({ type: 'Text', text: /captured by the assistant/ })).toBeDefined()
@@ -249,7 +249,7 @@ describe('review pane', () => {
 
     test(`shows one card at a time, settleable ones first (${surface})`, async ($, on) => {
       fakeContexer(on, [RETIRE, NEW, UPDATE])
-      await start($, on)
+      await start($, surface)
       const pane = await mountPane($, surface)
       expect(await pane.find({ key: `approve-${NEW.id}` })).toBeDefined()
       expect(await pane.find({ key: `approve-${UPDATE.id}` })).toBeUndefined()
@@ -265,7 +265,7 @@ describe('review pane', () => {
 
     test(`shows when each decision applies (${surface})`, async ($, on) => {
       fakeContexer(on, [NEW, UPDATE])
-      await start($, on)
+      await start($, surface)
       const pane = await mountPane($, surface)
       expect(await pane.find({ type: 'Text', text: 'deleting organisations' })).toBeDefined()
       await pane.press({ key: 'next' })
@@ -274,7 +274,7 @@ describe('review pane', () => {
 
     test(`a conflicting update offers Take update and Keep current (${surface})`, async ($, on) => {
       const calls = fakeContexer(on, [UPDATE])
-      await start($, on)
+      await start($, surface)
       const pane = await mountPane($, surface)
       expect(await pane.find({ type: 'Text', text: / CONFLICT / })).toBeDefined()
       expect((await pane.find({ key: `approve-${UPDATE.id}` }))?.text).toContain('Take update')
@@ -285,7 +285,7 @@ describe('review pane', () => {
 
     test(`keeping one side of a contradiction names the other (${surface})`, async ($, on) => {
       const calls = fakeContexer(on, [], 1, [PAIR])
-      await start($, on)
+      await start($, surface)
       const pane = await mountPane($, surface)
       expect(await pane.find({ type: 'Text', text: / CONTRADICTION / })).toBeDefined()
       expect(await pane.find({ type: 'Text', text: /These current decisions/ })).toBeDefined()
@@ -297,7 +297,7 @@ describe('review pane', () => {
     test(`a side the developer did not ratify cannot be kept (${surface})`, async ($, on) => {
       const mixed: CurrentConflict = { ...PAIR, decisions: [side('dddd4444', 'Prefix versions with v'), side('eeee5555', 'Publish bare versions', false)] }
       fakeContexer(on, [], 1, [mixed])
-      await start($, on)
+      await start($, surface)
       const pane = await mountPane($, surface)
       expect(await pane.find({ key: 'keep-dddd4444-eeee5555-dddd4444' })).toBeDefined()
       expect(await pane.find({ key: 'keep-dddd4444-eeee5555-eeee5555' })).toBeUndefined()
@@ -306,7 +306,7 @@ describe('review pane', () => {
     test(`an item from an older contexer without applicability still draws (${surface})`, async ($, on) => {
       const { applies_when: _dropped, ...older } = NEW
       fakeContexer(on, [older as ReviewItem])
-      await start($, on)
+      await start($, surface)
       const pane = await mountPane($, surface)
       expect(await pane.find({ type: 'Text', text: 'always' })).toBeDefined()
     })
@@ -314,7 +314,7 @@ describe('review pane', () => {
     test(`one decision in two contradictions keeps against the pair pressed (${surface})`, async ($, on) => {
       const second: CurrentConflict = { ...PAIR, decisions: [side('dddd4444', 'Prefix versions with v'), side('ffff6666', 'Use bare tags')] }
       const calls = fakeContexer(on, [], 1, [PAIR, second])
-      await start($, on)
+      await start($, surface)
       const pane = await mountPane($, surface)
       await pane.press({ key: 'next' })
       await pane.press({ key: 'keep-dddd4444-ffff6666-dddd4444' })
@@ -324,7 +324,7 @@ describe('review pane', () => {
     test(`an inherited proposal applicability shows the current scope (${surface})`, async ($, on) => {
       const inherits: ReviewItem = { ...UPDATE, proposed: { content: 'Use DynamoDB', title: 'DynamoDB', applies_when: null } }
       fakeContexer(on, [inherits])
-      await start($, on)
+      await start($, surface)
       const pane = await mountPane($, surface)
       expect(await pane.find({ type: 'Text', text: 'the decision store' })).toBeDefined()
     })
@@ -332,7 +332,7 @@ describe('review pane', () => {
     test(`shows a long decision in full (${surface})`, async ($, on) => {
       const long = `${'Read the store directory only through store.store_dir(). '.repeat(20)}The end.`
       fakeContexer(on, [{ ...UPDATE, content: long, proposed: { ...UPDATE.proposed!, content: `${long} Also sidecars.` } }])
-      await start($, on)
+      await start($, surface)
       const pane = await mountPane($, surface)
       expect(await pane.find({ type: 'Text', text: long })).toBeDefined()
       expect(await pane.find({ type: 'Text', text: /The end\. Also sidecars\.$/ })).toBeDefined()
@@ -340,7 +340,7 @@ describe('review pane', () => {
 
     test(`approval names the files it would anchor (${surface})`, async ($, on) => {
       fakeContexer(on, [{ ...NEW, anchors: ['src/orgs/delete.py', 'src/orgs/sync.py'] }])
-      await start($, on)
+      await start($, surface)
       const pane = await mountPane($, surface)
       expect(await pane.find({ type: 'Text', text: 'ANCHORS' })).toBeDefined()
       expect(await pane.find({ type: 'Text', text: 'src/orgs/delete.py\nsrc/orgs/sync.py' })).toBeDefined()
@@ -350,7 +350,7 @@ describe('review pane', () => {
       const retire: ReviewItem = { ...RETIRE, retirement: { reason: 'Superseded by DynamoDB', replacement_id: 'cccc3333-x' } }
       const recon: ReviewItem = { ...RETIRE, id: 'bbbb9999', kind: 'reconsideration', reconsideration: { content: 'Use Postgres again' } }
       fakeContexer(on, [retire, recon])
-      await start($, on)
+      await start($, surface)
       const pane = await mountPane($, surface)
       expect(await pane.find({ type: 'Text', text: 'Superseded by DynamoDB' })).toBeDefined()
       expect(await pane.find({ type: 'Text', text: 'cccc3333' })).toBeDefined()
@@ -361,14 +361,14 @@ describe('review pane', () => {
     test(`a contradiction side shows its unreviewed update (${surface})`, async ($, on) => {
       const pending = { ...side('dddd4444', 'Prefix versions with v'), proposed: { content: 'Prefix with v; annotate tags', title: 'x' } }
       fakeContexer(on, [], 1, [{ ...PAIR, decisions: [pending, side('eeee5555', 'Publish bare versions')] }])
-      await start($, on)
+      await start($, surface)
       const pane = await mountPane($, surface)
       expect(await pane.find({ type: 'Text', text: 'Unreviewed update: Prefix with v; annotate tags' })).toBeDefined()
     })
 
     test(`reopening the pane drops a half-done edit (${surface})`, async ($, on) => {
       fakeContexer(on, [NEW])
-      await start($, on)
+      await start($, surface)
       const pane = await mountPane($, surface)
       await pane.press({ key: `edit-${NEW.id}` })
       expect(await pane.find({ key: `cancel-${NEW.id}` })).toBeDefined()
@@ -381,7 +381,7 @@ describe('review pane', () => {
       let release = () => {}
       const gate: Gate = {}
       fakeContexer(on, [NEW, UPDATE], 1, [], gate)
-      await start($, on)
+      await start($, surface)
       gate.held = new Promise<void>(resolve => { release = resolve })
       const opening = $.command.run({ command: 'contexer-review', args: '' } as never)
       const pane = await mountPane($, surface)
@@ -397,7 +397,7 @@ describe('review pane', () => {
       let release = () => {}
       const gate: Gate = {}
       fakeContexer(on, [NEW, UPDATE], 1, [], gate)
-      await start($, on)
+      await start($, surface)
       const pane = await mountPane($, surface)
       gate.action = new Promise<void>(resolve => { release = resolve })
       const pressing = pane.press({ key: `approve-${NEW.id}` })
@@ -412,19 +412,19 @@ describe('review pane', () => {
     test(`the pane stays on its card when another session settles an earlier one (${surface})`, async ($, on) => {
       const LATER: ReviewItem = { ...NEW, id: 'gggg7777', title: 'Log every skipped org' }
       fakeContexer(on, [NEW, UPDATE, LATER])
-      await start($, on)
+      await start($, surface)
       const pane = await mountPane($, surface)
       await pane.press({ key: 'next' })
       expect(await pane.find({ key: `approve-${UPDATE.id}` })).toBeDefined()
       settleElsewhere(NEW.id)
-      await start($)
+      await start($, surface)
       expect(await pane.find({ key: `approve-${UPDATE.id}` })).toBeDefined()
       expect(await pane.find({ key: `approve-${LATER.id}` })).toBeUndefined()
     })
 
     test(`edit sends the developer's wording (${surface})`, async ($, on) => {
       const calls = fakeContexer(on, [NEW])
-      await start($, on)
+      await start($, surface)
       const pane = await mountPane($, surface)
       await pane.press({ key: `edit-${NEW.id}` })
       await pane.input({ key: `edit-${NEW.id}`, text: 'Log a warning instead of deleting rows' })
