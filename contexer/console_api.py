@@ -497,7 +497,8 @@ _IDENTIFIERS = frozenset({"id", "repo", "basis", "replacement_id"})
 def _printable(value):
     """`value` rebuilt with control characters left out of every display string in it, for the
     review pane only: the stored decision keeps its text verbatim. Identifiers (`_IDENTIFIERS`)
-    pass through untouched."""
+    pass through untouched. The pane's Edit field starts from this displayed text, so a pane
+    edit saves the wording without the stripped characters."""
     if isinstance(value, str):
         return _CONTROL.sub("", value)
     if isinstance(value, dict):
