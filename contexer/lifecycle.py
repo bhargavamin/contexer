@@ -48,6 +48,7 @@ import fnmatch
 import json
 import re
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timezone
 
 from contexer import revisions
@@ -420,7 +421,8 @@ def dismiss_lifecycle(repo_path: str, entry_id: str) -> tuple[bool, str]:
 
 def tombstone_entry(repo_path: str, entry_id: str, *, reason: str, replacement_id: str | None,
                     deleted_by: str, stale_guard: bool,
-                    precondition=None) -> tuple[bool, str, dict | None]:
+                    precondition: Callable[[list[dict]], str | None] | None = None,
+                    ) -> tuple[bool, str, dict | None]:
     """Move ONE live decision into the tombstone sidecar with a lifecycle record.
     Returns (ok, error message, tombstoned entry) - the caller words its own success message,
     which is what lets `retire_decision` and store's console-facing `delete_decision` share one
@@ -489,7 +491,8 @@ def tombstone_entry(repo_path: str, entry_id: str, *, reason: str, replacement_i
 
 
 def retire_decision(repo_path: str, entry_id: str, reason: str,
-                    replacement_id: str | None = None, *, precondition=None,
+                    replacement_id: str | None = None, *,
+                    precondition: Callable[[list[dict]], str | None] | None = None,
                     stale_guard: bool = True) -> tuple[bool, str]:
     """Retire a live decision: it leaves active context for the tombstone sidecar, keeping its
     full revision and lifecycle history. Returns (ok, message).
