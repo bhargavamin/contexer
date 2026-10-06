@@ -1806,6 +1806,25 @@ class TestAnchorCandidatesForBackfill:
         result = guard_engine.anchor_candidates_for_backfill(str(repo))
         assert result[0]["candidates"] == files[:store.MAX_SOURCE_FILES]
 
+    def test_siblings_under_the_cap_remain_exact_file_candidates(self, repo):
+        # Regression for #305: three named files once proposed the whole package.
+        files = ["contexer/store.py", "contexer/server.py", "contexer/cli.py"]
+        for path in files:
+            _write(repo, path, "x = 1\n")
+        _seed_entry(repo, "See contexer/store.py, contexer/server.py and contexer/cli.py "
+                          "for the split.")
+        result = guard_engine.anchor_candidates_for_backfill(str(repo))
+        assert result[0]["candidates"] == files
+
+    def test_siblings_collapse_only_when_the_list_exceeds_the_cap(self, repo):
+        siblings = [f"pkg/mod{i}.py" for i in range(3)]
+        others = [f"other{i}/mod.py" for i in range(store.MAX_SOURCE_FILES - 2)]
+        for path in siblings + others:
+            _write(repo, path, "x = 1\n")
+        _seed_entry(repo, "Module map: " + "; ".join(siblings + others))
+        result = guard_engine.anchor_candidates_for_backfill(str(repo))
+        assert result[0]["candidates"] == ["pkg/", *others]
+
     def test_two_siblings_remain_exact_file_candidates(self, repo):
         for path in ("pkg/a.py", "pkg/b.py"):
             _write(repo, path, "x = 1\n")

@@ -658,9 +658,12 @@ def _candidate_paths_for_entry(repo: str, repo_root: Path, content: str) -> list
     possible file spellings (_artifact_path_spellings), canonicalized, and kept
     only if the file exists in the working tree. Deduped (first-seen order)
     and capped at store.MAX_SOURCE_FILES - the same cap _anchor_sources
-    itself enforces on write. Three or more siblings collapse to their parent prefix:
-    the developer sees and ratifies the wider scope explicitly, while a genuinely broad
-    decision no longer loses arbitrary siblings at the ten-item cap."""
+    itself enforces on write. Only a list that would exceed that cap collapses three
+    or more siblings to their parent prefix, so a genuinely broad decision does not lose
+    arbitrary siblings at the cap; the developer sees and ratifies the wider scope
+    explicitly. A list that fits stays exact: a decision naming three files must not
+    propose a whole-package anchor, which pairs with every commit to the package and
+    marks the decision stale on any change below it (#305)."""
     seen: set[str] = set()
     results: list[str] = []
     for artifact in _guard_content_artifacts(content):
@@ -672,6 +675,8 @@ def _candidate_paths_for_entry(repo: str, repo_root: Path, content: str) -> list
                 continue
             seen.add(resolved)
             results.append(resolved)
+    if len(results) <= store.MAX_SOURCE_FILES:
+        return results
     by_parent: dict[str, list[str]] = {}
     for path in results:
         parent = path.rsplit("/", 1)[0] if "/" in path else ""
