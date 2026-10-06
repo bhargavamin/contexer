@@ -136,6 +136,21 @@ class TestQueueProjection:
         assert queue["count"] == len(queue["items"]) == 2
 
 
+    def test_control_characters_are_left_out_of_the_queue_but_kept_in_the_store(self, tmp_repo):
+        # The pane's engine refuses a whole render tree whose text holds a control character, so
+        # one stray escape in a captured decision would blank every card.
+        raw = "Never delete rows\x1b[8m hidden\x1b[0m; warn\x9b\x7f and count instead"
+        eid = _seed_entry(tmp_repo, raw, title="Rows\x07 stay", status="pending_approval")["id"]
+        assert _entry(tmp_repo, eid)["content"] == raw
+        (item,) = console_api.review_queue(tmp_repo)["items"]
+        assert item["content"] == "Never delete rows[8m hidden[0m; warn and count instead"
+        assert item["title"] == "Rows stay"
+        assert _entry(tmp_repo, eid)["content"] == raw, "display only"
+
+    def test_tab_and_newline_survive_the_control_character_filter(self):
+        assert console_api._printable({"a": ["x\ty\nz\r"]}) == {"a": ["x\ty\nz"]}
+
+
 class TestApplicability:
     def test_items_carry_their_applicability(self, tmp_repo):
         eid = _pending(tmp_repo)

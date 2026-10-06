@@ -43,6 +43,7 @@ PEP 562 `__getattr__`, so no existing caller had to change.
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -447,8 +448,25 @@ def review_queue(repo_path: str) -> dict:
         # Approve, so the pane names them as the terminal review does (`anchor_confirmation`).
         item["anchors"] = review_impact.confirmed_anchors(entry)
         items.append(item)
-    return {"protocol": REVIEW_PROTOCOL, "repo": repo_path, "count": len(items), "items": items,
-            "conflicts": current_conflicts(repo_path)}
+    return _printable({"protocol": REVIEW_PROTOCOL, "repo": repo_path, "count": len(items),
+                       "items": items, "conflicts": current_conflicts(repo_path)})
+
+
+# C0 controls except tab and newline, DEL, and C1: the mod's engine refuses a whole render tree
+# whose text holds one, so a stray escape in one captured decision would blank every card.
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def _printable(value):
+    """`value` rebuilt with control characters left out of every string in it, for the review
+    pane's display only: the stored decision keeps its text verbatim."""
+    if isinstance(value, str):
+        return _CONTROL.sub("", value)
+    if isinstance(value, dict):
+        return {key: _printable(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_printable(item) for item in value]
+    return value
 
 
 def current_conflicts(repo_path: str) -> list[dict]:
