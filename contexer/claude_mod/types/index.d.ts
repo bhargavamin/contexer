@@ -88,6 +88,8 @@ declare module 'claude-code' {
       isPaneOpen: boolean
       /** Another plugin's suggestion is in the prompt box since the last prompt was sent. */
       isOtherSuggested: boolean
+      /** Queue-read ordering: the last ticket taken, and the ticket of the reply that landed. */
+      order: { ticket: number; landed: number }
     }
   }
 }

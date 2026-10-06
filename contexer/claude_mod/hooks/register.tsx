@@ -82,23 +82,28 @@ function isQueue(value: unknown): value is ReviewQueue {
 // answer late. A read takes a ticket when it starts; an action takes one when its write has
 // returned, so a read that started while the write was in flight (and may have read the store
 // before it) ranks below it. A reply lands only if nothing ranked later has landed already, so
-// an old snapshot never brings a settled card back.
-let ticket = 0
-let landed = 0
+// an old snapshot never brings a settled card back. The counters live in `$.state`, not in
+// module variables: a hot reload starts the module over, and a read in flight across it must
+// still rank against what landed before.
+const order = atom({ plugin: 'contexer-review', key: 'order' } as const, { ticket: 0, landed: 0 })
 
-function take(): number {
-  return ++ticket
+async function take($: EngineInterface): Promise<number> {
+  return (await update($, order, o => ({ ...o, ticket: o.ticket + 1 }))).ticket
 }
 
 async function land($: EngineInterface, mine: number, next: ReviewQueue | null): Promise<boolean> {
-  if (mine < landed) return false
-  landed = mine
+  let isLatest = false
+  await update($, order, o => {
+    isLatest = mine >= o.landed
+    return isLatest ? { ...o, landed: mine } : o
+  })
+  if (!isLatest) return false
   await update($, queue, () => next)
   return true
 }
 
 async function refresh($: EngineInterface): Promise<void> {
-  const mine = take()
+  const mine = await take($)
   const out = await contexer($, [])
   if (!(await land($, mine, isQueue(out) ? out : null))) return
   await suggestAgain($)
@@ -141,7 +146,7 @@ async function act($: EngineInterface, action: ReviewAction | ConflictAction, id
   if (options.over) args.push('--over', options.over)
   if (options.expect) args.push('--expect', options.expect)
   const out = await contexer($, args)
-  const mine = take()
+  const mine = await take($)
   const message = typeof out?.message === 'string' ? out.message : 'Contexer did not answer, so nothing changed.'
   await update($, note, () => message)
   await update($, editing, () => null)
