@@ -25,6 +25,10 @@ export type ReviewItem = {
   /** Absent from a contexer older than the applicability change: read it as always. */
   applies_when?: Applicability
   actions: ReviewAction[]
+  /** What the card asks the developer to ratify, fingerprinted (console_api.review_basis); sent
+   * back as `--expect` so an action on a decision that changed since is refused. Absent when
+   * the pane cannot settle the item, and from a contexer older than the check. */
+  basis?: string
   /** `applies_when` null: the proposal inherits the current applicability on approval. */
   proposed?: { content: string; title: string; applies_when?: Applicability | null }
   /** A Suggested Update whose content differs from the approved version (conflicts.has_open_conflict). */

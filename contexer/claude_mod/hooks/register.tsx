@@ -131,13 +131,15 @@ async function wantsSuggestion($: EngineInterface): Promise<boolean> {
   return actionable(await read($, queue)) > 0 && !(await read($, isHidden))
 }
 
-// One process per click: the action's reply carries the queue as it stands afterwards.
-type ActOptions = { content?: string; over?: string }
+// One process per click: the action's reply carries the queue as it stands afterwards. `expect`
+// is the card's `basis`: the action is refused if the decision no longer reads as shown.
+type ActOptions = { content?: string; over?: string; expect?: string }
 
 async function act($: EngineInterface, action: ReviewAction | ConflictAction, id: string, options: ActOptions = {}): Promise<void> {
   const args = [action, id]
   if (options.content) args.push('--content', options.content)
   if (options.over) args.push('--over', options.over)
+  if (options.expect) args.push('--expect', options.expect)
   const out = await contexer($, args)
   const mine = take()
   const message = typeof out?.message === 'string' ? out.message : 'Contexer did not answer, so nothing changed.'
@@ -465,7 +467,7 @@ export const register: Register = on => {
               submitLabel="approve"
               autoFocus
               onSubmit={value => (value.trim()
-                ? act($, 'edit', item.id, { content: value.trim() })
+                ? act($, 'edit', item.id, { content: value.trim(), expect: item.basis })
                 : update($, note, () => 'Type the new wording, then press Enter.'))}
             />
             <Button key={`cancel-${item.id}`} label="Cancel" dimColor onPress={() => update($, editing, () => null)} />
@@ -484,7 +486,7 @@ export const register: Register = on => {
                   label={actionLabel(item, action)}
                   variant={action === 'approve' ? 'primary' : undefined}
                   hotkey={ACTION_HOTKEY[action]}
-                  onPress={() => (action === 'edit' ? update($, editing, () => item.id) : act($, action, item.id))}
+                  onPress={() => (action === 'edit' ? update($, editing, () => item.id) : act($, action, item.id, { expect: item.basis }))}
                 />
               ))}
           </Box>

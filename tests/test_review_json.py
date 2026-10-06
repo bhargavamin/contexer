@@ -101,6 +101,22 @@ class TestQueueProjection:
         (item,) = console_api.review_queue(tmp_repo)["items"]
         assert item["kind"] == "retirement" and item["actions"] == []
 
+    def test_a_settleable_item_carries_the_basis_of_what_it_shows(self, tmp_repo):
+        eid = _approved(tmp_repo)
+        _with_update(tmp_repo, eid)
+        new = _pending(tmp_repo)
+        items = {i["id"]: i for i in console_api.review_queue(tmp_repo)["items"]}
+        assert items[eid]["basis"] == console_api.review_basis(_entry(tmp_repo, eid))
+        assert items[new]["basis"] == console_api.review_basis(_entry(tmp_repo, new))
+        assert len(items[eid]["basis"]) == 16 and items[eid]["basis"] != items[new]["basis"]
+
+    def test_a_terminal_only_item_carries_no_basis(self, tmp_repo):
+        eid = _approved(tmp_repo)
+        assert lifecycle.propose_lifecycle(tmp_repo, eid, "retire", "superseded",
+                                           source="ai")["ok"]
+        (item,) = console_api.review_queue(tmp_repo)["items"]
+        assert "basis" not in item
+
     def test_a_retirement_carries_its_proposed_reason(self, tmp_repo):
         eid = _approved(tmp_repo)
         assert lifecycle.propose_lifecycle(tmp_repo, eid, "retire", "superseded by DynamoDB",
@@ -443,6 +459,39 @@ class TestRefusals:
         code, out = _run(capsys, "approve", eid)
         assert code == 1 and out["ok"] is False
         assert _entry(in_repo, eid)["content"] == STANDING, "nothing promoted"
+
+    def test_a_proposal_replaced_by_one_of_the_same_kind_is_refused(self, in_repo, capsys):
+        # The pane shows wording A; another session's update_context takes the proposal slot
+        # with wording B (a tie claims it). Take update must not approve B, which nobody saw.
+        eid = _approved(in_repo)
+        _with_update(in_repo, eid)
+        (shown,) = console_api.review_queue(in_repo)["items"]
+        other = "Switch to Cassandra for the decision store; DynamoDB costs too much at scale"
+        ok, rid = store.update_decision(in_repo, other, "s3", "architecture", replace_id=eid)
+        assert ok and rid == eid and _entry(in_repo, eid)["proposed_revision"]["content"] == other
+        code, out = _run(capsys, "approve", eid, "--expect", shown["basis"])
+        assert code == 1 and out["ok"] is False
+        assert out["message"] == ("This decision changed since the pane showed it; "
+                                  "nothing was changed.")
+        entry = _entry(in_repo, eid)
+        assert entry["content"] == STANDING, "nothing promoted"
+        assert entry["proposed_revision"]["content"] == other, "the proposal still waits"
+
+    def test_the_basis_the_pane_showed_lets_the_action_through(self, in_repo, capsys):
+        eid = _approved(in_repo)
+        _with_update(in_repo, eid)
+        (shown,) = console_api.review_queue(in_repo)["items"]
+        code, out = _run(capsys, "approve", eid, "--expect", shown["basis"])
+        assert code == 0 and out["ok"] is True
+        assert _entry(in_repo, eid)["content"] == UPDATE
+
+    def test_a_new_capture_whose_wording_changed_is_refused(self, in_repo, monkeypatch, capsys):
+        eid = _pending(in_repo)
+        (shown,) = console_api.review_queue(in_repo)["items"]
+        monkeypatch.setattr(console_api, "review_basis", lambda _entry: "0" * 16)
+        code, out = _run(capsys, "approve", eid, "--expect", shown["basis"])
+        assert code == 1 and out["ok"] is False
+        assert store.entry_status(_entry(in_repo, eid)) == "pending_approval"
 
     def test_an_action_without_an_id_is_refused(self, in_repo, capsys):
         code, out = _run(capsys, "approve")

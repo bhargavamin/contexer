@@ -41,6 +41,7 @@ import time. The public entrypoints stay reachable as `store.<name>` through sto
 PEP 562 `__getattr__`, so no existing caller had to change.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -413,6 +414,33 @@ mismatch, so a mod and a package from different releases (an upgrade mid-session
 registration) degrade to silence rather than to a pane that misreads the fields. Bump it on any
 change a mod built against the old shape would misread; adding a key is not one."""
 
+def review_basis(entry: dict) -> str | None:
+    """A short fingerprint of what a review card asks the developer to ratify, or None for an
+    item the pane cannot settle. `review --json <action> <id> --expect <basis>` recomputes it
+    inside the store lock and refuses on a mismatch, so a proposal another session replaced
+    with one of the same kind (`review.claim_proposal_slot`) is never approved unseen.
+
+    Covers the kind, the wording that would become current (a Suggested Update's proposal, else
+    the decision itself) with its title and applicability, the current wording beside it, and
+    the files approval would anchor. Taken from the STORED text, before `_printable`, so the
+    queue and the action read the same bytes."""
+    kind = review.item_kind(entry)
+    if not review.item_actions(kind):
+        return None
+    current = revisions.current_content(entry)
+    shown = {"kind": kind, "current": current,
+             "anchors": review_impact.confirmed_anchors(entry)}
+    if kind == "update":
+        prop = entry.get("proposed_revision") or {}
+        shown.update(content=prop.get("content", ""), title=prop.get("title", ""),
+                     applies_when=prop.get("applies_when"))
+    else:
+        shown.update(title=entry.get("title") or revisions.derive_title(current),
+                     applies_when=list(entry.get("applies_when") or []))
+    blob = json.dumps(shown, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
 def review_queue(repo_path: str) -> dict:
     """Everything that waits on the developer for one repo, as the in-session review pane
     renders it. `items` is the same set `contexer review` walks (`store.get_pending_decisions`),
@@ -428,6 +456,9 @@ def review_queue(repo_path: str) -> dict:
             "origin": review_impact.origin_label(entry.get("created_by", "ai")),
             "actions": review.item_actions(kind),
         }
+        basis = review_basis(entry)
+        if basis is not None:
+            item["basis"] = basis
         if kind == "update":
             prop = entry.get("proposed_revision") or {}
             item["proposed"] = _console_proposed(prop)

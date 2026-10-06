@@ -283,6 +283,19 @@ describe('review pane', () => {
       expect(calls[calls.length - 1]?.slice(-2)).toEqual(['dismiss', UPDATE.id])
     })
 
+    test(`an action sends back the basis of the card it was taken on (${surface})`, async ($, on) => {
+      const shown = { ...UPDATE, basis: '0123456789abcdef' }
+      const fresh = { ...NEW, basis: 'fedcba9876543210' }
+      const calls = fakeContexer(on, [fresh, shown])
+      await start($, surface)
+      const pane = await mountPane($, surface)
+      await pane.press({ key: `ignore-${fresh.id}` })
+      expect(calls[calls.length - 1]?.slice(-4)).toEqual(['ignore', fresh.id, '--expect', fresh.basis])
+      expect((await pane.find({ key: `approve-${shown.id}` }))?.text).toContain('Take update')
+      await pane.press({ key: `approve-${shown.id}` })
+      expect(calls[calls.length - 1]?.slice(-4)).toEqual(['approve', shown.id, '--expect', shown.basis])
+    })
+
     test(`keeping one side of a contradiction names the other (${surface})`, async ($, on) => {
       const calls = fakeContexer(on, [], 1, [PAIR])
       await start($, surface)

@@ -3687,9 +3687,11 @@ def approve_decision(repo_path: str, entry_id: str, action: str,
         anything to anchor.
     precondition: called with the entry as loaded INSIDE the store lock; a returned message
         refuses the action and nothing is written. For a caller that chose the action from an
-        earlier read (the review pane), so a decision another session settled or re-proposed
-        in between is not acted on as the question it no longer asks. Single decision id only;
-        an id that resolves to nothing is left to the usual "not found" refusal.
+        earlier read (the review pane). It decides only what the caller checks: this function
+        knows nothing of what was shown, so a caller that must not ratify a proposal replaced
+        in between by one of the same kind compares what it showed (the review pane's
+        `console_api.review_basis`); checking the kind alone misses that case. Single decision
+        id only; an id that resolves to nothing is left to the usual "not found" refusal.
     Returns (success, message).
     """
     if action not in ("approve", "ignore", "edit", "skip", "dismiss"):

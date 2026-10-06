@@ -29,8 +29,9 @@ Commands:
   review        Interactively approve, edit, ignore, or retire pending engineering
                 decisions; also surfaces possibly-overlapping rules for consolidation.
                 review --json [approve|edit|ignore|dismiss <id> [--content TEXT]
-                | keep <id> --over <id>] prints the queue (or settles one item) as JSON
-                for the Claude Code mod.
+                [--expect BASIS] | keep <id> --over <id>] prints the queue (or settles
+                one item) as JSON for the Claude Code mod; --expect refuses unless the
+                item still has the queue's `basis`.
   retire        Retire one decision - it leaves active context, keeping its history:
                 retire <id> --reason <text> [--replaced-by <id>].
   restore       Bring one retired decision back: restore <id> [--reason <text>].
@@ -478,8 +479,9 @@ def _retire_from_review(repo_path: str, entry: dict, life: dict) -> tuple[bool, 
 
 
 def _review_json(rest: list) -> None:
-    """`contexer review --json [<action> <id> [--content TEXT | --over ID]]` - the review queue
-    for a machine reader (the Claude Code mod's in-session pane), and one action per call.
+    """`contexer review --json [<action> <id> [--content TEXT | --over ID] [--expect BASIS]]` -
+    the review queue for a machine reader (the Claude Code mod's in-session pane), and one
+    action per call.
 
     With no action it prints `console_api.review_queue`. With one it settles one item through
     the same store calls the interactive loop below makes, then prints `{ok, message, queue}`,
@@ -492,7 +494,11 @@ def _review_json(rest: list) -> None:
     against that pair (`conflicts.keep_current_side`), not a pending item. Otherwise only the
     actions `review.item_actions` offers for the item's kind are accepted, re-checked inside
     the store lock, so a retirement or a reconsideration still goes through `contexer review`,
-    which asks for the reason or wording it needs."""
+    which asks for the reason or wording it needs. `--expect` takes the item's `basis` from the
+    queue the caller showed (`console_api.review_basis`): when given, the action is refused
+    unless the decision, re-read inside the lock, still asks exactly that, so a proposal
+    replaced by another of the same kind is never approved unseen. Optional, so a hand-run
+    command still works."""
     from contexer import conflicts, console_api, review, store
 
     def answer(ok: bool, message: str, repo_path: str | None = None) -> None:
@@ -530,7 +536,7 @@ def _review_json(rest: list) -> None:
             at = args.index(name) if name in args else -1
             return args[at + 1].strip() if 0 <= at < len(args) - 1 else ""
 
-        entry_id, content = args[0], flag("--content")
+        entry_id, content, expect = args[0], flag("--content"), flag("--expect")
         if action in review.item_actions("current_conflict"):
             other = flag("--over")
             if not other:
@@ -560,10 +566,14 @@ def _review_json(rest: list) -> None:
             # retire a decision that was just approved.
             now = review.item_kind(live)
             waiting = now != "new" or store.entry_status(live) == "pending_approval"
-            if now == kind and waiting and action in review.item_actions(now):
-                return None
-            return ("That decision changed since it was shown, so nothing was done. "
-                    "Review it again.")
+            if not (now == kind and waiting and action in review.item_actions(now)):
+                return ("That decision changed since it was shown, so nothing was done. "
+                        "Review it again.")
+            # Same kind is not the same question: a re-proposal of that kind swaps the wording
+            # the developer is ratifying, so with `--expect` the shown wording must still hold.
+            if expect and console_api.review_basis(live) != expect:
+                return "This decision changed since the pane showed it; nothing was changed."
+            return None
 
         ok, message = store.approve_decision(repo_path, entry_id, action, content,
                                              precondition=still_asks)
