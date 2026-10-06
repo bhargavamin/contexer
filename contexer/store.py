@@ -1339,6 +1339,59 @@ _SOFT_PROSE_EXCLUDE = re.compile(
     re.IGNORECASE,
 )
 
+# A slash-joined pair of one option and its negation names two choices ("the adopt/don't
+# adopt threshold", "do not go/go criteria"), not a prohibition. Unstripped, it stored a task
+# list as an approved constraint (#374). Only a real pair counts: the same phrase of up to
+# three words on both sides ("go live/do not go live"), with a shared 3+ letter prefix on its
+# last word tolerating a typo such as "adopt/dont adop". Two joined prohibitions ("Do not/should
+# not commit secrets", "use print/don't log secrets") keep their trigger.
+_NEGATION = r"do\s*n['’]?t|do\s+not"
+_NEGATION_RE = re.compile(rf"\b(?:{_NEGATION})\b", re.IGNORECASE)
+# Bare pair: "do/don't" or "don't/do", but not the start of "don't/do not" (two prohibitions).
+_BARE_DO_BEFORE = re.compile(r"\bdo\s*/\s*$", re.IGNORECASE)
+_BARE_DO_AFTER = re.compile(r"\s*/\s*do\b(?!\s*n['’]?t|\s+not\b)", re.IGNORECASE)
+_SLASH_BEFORE = re.compile(r"/\s*$")
+_OPTION_BEFORE_SLASH = re.compile(r"\s+((?:\w+\s+){0,2}\w+)\s*/")
+_OPTION_PHRASE_WORDS = 3
+
+
+def _same_option(a: list[str], b: list[str]) -> bool:
+    if not a or len(a) != len(b):
+        return False
+    *head_a, last_a = (w.lower() for w in a)
+    *head_b, last_b = (w.lower() for w in b)
+    return head_a == head_b and (last_a == last_b or (
+        min(len(last_a), len(last_b)) >= 3
+        and (last_a.startswith(last_b) or last_b.startswith(last_a))))
+
+
+def _is_option_negation(text: str, match: re.Match) -> bool:
+    """Whether this don't/do-not names one side of a slash option pair in `text`."""
+    before, after = text[:match.start()], text[match.end():]
+    if _BARE_DO_BEFORE.search(before) or _BARE_DO_AFTER.match(after):
+        return True
+    if _SLASH_BEFORE.search(before):                       # "go live/do not go live"
+        left, right = re.findall(r"\w+", before), re.findall(r"\w+", after)
+        return any(_same_option(left[-k:], right[:k])
+                   for k in range(1, _OPTION_PHRASE_WORDS + 1))
+    option = _OPTION_BEFORE_SLASH.match(after)             # "do not go live/go live"
+    if option is None:
+        return False
+    words = option.group(1).split()
+    return _same_option(words, re.findall(r"\w+", after[option.end():])[:len(words)])
+
+
+def _strip_option_pairs(text: str) -> str:
+    """Drop the negations that name slash-joined options, leaving every other prohibition.
+
+    Each negation is judged against the original text and all are removed together, so
+    removing one cannot turn its neighbour into a pair ("Don't adopt/don't adopt ...").
+    """
+    spans = [m.span() for m in _NEGATION_RE.finditer(text) if _is_option_negation(text, m)]
+    for start, end in reversed(spans):
+        text = text[:start] + text[end:]
+    return text
+
 # Profanity and frustration words that carry no directive meaning.
 # These are stripped before storing so the rule itself is preserved cleanly.
 # Covers both fully-spelled and asterisk/symbol-censored forms (f***, sh**).
@@ -2102,7 +2155,7 @@ def _is_prescriptive_constraint(text: str) -> tuple[bool, str]:
         return False, ""
     # Strip soft conversational prose ("don't worry", "I don't know"); if a broadened
     # prohibition trigger only matched inside that prose, it was not a directive.
-    deprosed = _SOFT_PROSE_EXCLUDE.sub("", t)
+    deprosed = _strip_option_pairs(_SOFT_PROSE_EXCLUDE.sub("", t))
     if not _CONSTRAINT_TRIGGER.search(deprosed):
         return False, ""
     # Strip descriptive personal instances; if nothing remains, it was purely descriptive
