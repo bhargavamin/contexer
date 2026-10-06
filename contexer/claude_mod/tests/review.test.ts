@@ -51,6 +51,17 @@ let settleElsewhere: (id: string) => void = () => {}
 // store lock another process holds.
 type Gate = { held?: Promise<void>; action?: Promise<void> }
 
+// Every pane open the plugin made, and whether the surface seats it: a narrow terminal leaves
+// an open the plugin makes on its own undrawn. `isOpenRefused` plays a `ui.open` that fails, and
+// `isFocusRefused` a pane the engine reports unfocused (the band still holds the keys).
+// `ui.panes` lists the pane from its first open until a close, placed while `placed` holds.
+const opens: string[] = []
+let isPaneUp = false
+let isPanesRefused = false
+let placed = true
+let isOpenRefused = false
+let isFocusRefused = false
+
 // A fake `contexer review --json`: lists `items`; an action removes its item and replies with
 // the queue as it stands afterwards. Records every argv it was run with.
 function fakeContexer(on: On, items: ReviewItem[], protocol = 1, pairs: CurrentConflict[] = [], gate?: Gate) {
@@ -88,8 +99,27 @@ function fakeContexer(on: On, items: ReviewItem[], protocol = 1, pairs: CurrentC
   on('prompt.submit', async (_$, e) => ({ text: e.text }))
   on('fs.stat', async () => ({ deny: 'no such file' }))
   on('command.register', async (_$, e) => ({ value: { command: e.name } }))
-  on('ui.open', async () => ({ value: { isPlaced: true } }))
-  on('ui.close', async () => ({ value: undefined }))
+  opens.length = 0
+  placed = true
+  isOpenRefused = false
+  isFocusRefused = false
+  isPaneUp = false
+  isPanesRefused = false
+  on('ui.open', async (_$, e) => {
+    if (isOpenRefused) return { deny: 'refused' }
+    opens.push(e.id)
+    isPaneUp = true
+    return { value: placed ? { isPlaced: true } : { isPlaced: false, reason: 'narrow terminal' } }
+  })
+  on('ui.panes', async () => (isPanesRefused ? { deny: 'refused' } : {
+    value: !isPaneUp ? [] : [{
+      id: 'contexer-review', title: 'Contexer review', isShown: placed, isFocused: !isFocusRefused, isPlaced: placed,
+    }],
+  }))
+  on('ui.close', async () => {
+    isPaneUp = false
+    return { value: undefined }
+  })
   on('ui.render', async ($, e) => {
     const { Box } = $.ui.resolve(e)
     return h(Box, {}) as RenderElement
@@ -132,6 +162,94 @@ describe('band above the prompt', () => {
       const pane = await mountPane($, surface)
       await pane.press({ key: 'close' })
       expect(await (await mountBand($, surface)).find({ key: 'contexer-open' })).toBeDefined()
+    })
+
+    test(`Review opens the pane during the press, so it is seated at any width (${surface})`, async ($, on) => {
+      fakeContexer(on, [NEW])
+      await start($, surface)
+      const band = await mountBand($, surface)
+      await band.press({ key: 'contexer-open' })
+      // No clock.settle: an open made later from a timer counts as the plugin's own and waits
+      // undrawn below 144 columns, which hid the band and showed nothing.
+      expect(opens).toContain('contexer-review')
+    })
+
+    test(`the band stays when the pane waits undrawn (${surface})`, async ($, on) => {
+      fakeContexer(on, [NEW])
+      await start($, surface)
+      placed = false
+      const band = await mountBand($, surface)
+      await band.press({ key: 'contexer-open' })
+      await clock.settle()
+      expect(await band.find({ key: 'contexer-open' })).toBeDefined()
+    })
+
+    test(`the band steps aside once a pane left undrawn is drawn by a resize (${surface})`, async ($, on) => {
+      fakeContexer(on, [NEW])
+      await start($, surface)
+      placed = false
+      const band = await mountBand($, surface)
+      await band.press({ key: 'contexer-open' })
+      await clock.settle()
+      expect(await band.find({ key: 'contexer-open' })).toBeDefined()
+      // The terminal widens: the surface seats the waiting pane, with no call of the mod's.
+      placed = true
+      expect(await (await mountBand($, surface)).find({ key: 'contexer-open' })).toBeUndefined()
+    })
+
+    test(`the band stays when the pane list cannot be read (${surface})`, async ($, on) => {
+      fakeContexer(on, [NEW])
+      await start($, surface)
+      isPanesRefused = true
+      expect(await (await mountBand($, surface)).find({ key: 'contexer-open' })).toBeDefined()
+    })
+
+    test(`Review asks for the keyboard before the queue read answers (${surface})`, async ($, on) => {
+      const gate: Gate = {}
+      fakeContexer(on, [NEW], 1, [], gate)
+      await start($, surface)
+      isFocusRefused = true
+      let release = () => {}
+      gate.held = new Promise<void>(resolve => { release = resolve })
+      const band = await mountBand($, surface)
+      const pressing = band.press({ key: 'contexer-open' })
+      await clock.advance(100)
+      // The pane is seated and re-asked for focus while the read is still out.
+      expect(opens.length).toBeGreaterThan(1)
+      release()
+      await pressing
+    })
+
+    test(`Review never re-opens a pane left waiting undrawn (${surface})`, async ($, on) => {
+      fakeContexer(on, [NEW])
+      await start($, surface)
+      placed = false
+      isFocusRefused = true
+      const band = await mountBand($, surface)
+      await band.press({ key: 'contexer-open' })
+      await clock.advance(1_000)
+      // A re-ask from a timer is the plugin's own open; only the press may seat the pane.
+      expect(opens).toEqual(['contexer-review'])
+    })
+
+    test(`a failed open stays silent and brings the band back (${surface})`, async ($, on) => {
+      fakeContexer(on, [NEW])
+      await start($, surface)
+      isOpenRefused = true
+      const band = await mountBand($, surface)
+      await band.press({ key: 'contexer-open' })
+      await clock.settle()
+      expect(await band.find({ key: 'contexer-open' })).toBeDefined()
+    })
+
+    test(`the command says when the pane is not drawn (${surface})`, async ($, on) => {
+      fakeContexer(on, [NEW])
+      await start($, surface)
+      placed = false
+      const ran = await $.command.run({ command: 'contexer-review', args: '' } as never)
+      expect(ran?.text).not.toMatch(/Opened/)
+      placed = true
+      expect((await $.command.run({ command: 'contexer-review', args: '' } as never))?.text).toMatch(/Opened/)
     })
 
     test(`counts only items the pane can settle (${surface})`, async ($, on) => {
@@ -302,6 +420,7 @@ describe('review pane', () => {
       const pane = await mountPane($, surface)
       expect(await pane.find({ type: 'Text', text: / CONTRADICTION / })).toBeDefined()
       expect(await pane.find({ type: 'Text', text: /These current decisions/ })).toBeDefined()
+      expect((await pane.find({ key: 'keep-dddd4444-eeee5555-eeee5555' }))?.text).toContain('Keep Publish bare versions')
       await pane.press({ key: 'keep-dddd4444-eeee5555-eeee5555' })
       expect(calls[calls.length - 1]?.slice(-4)).toEqual(['keep', 'eeee5555', '--over', 'dddd4444'])
       expect(await pane.find({ type: 'Text', text: /All clear/ })).toBeDefined()
@@ -314,6 +433,7 @@ describe('review pane', () => {
       const pane = await mountPane($, surface)
       expect(await pane.find({ key: 'keep-dddd4444-eeee5555-dddd4444' })).toBeDefined()
       expect(await pane.find({ key: 'keep-dddd4444-eeee5555-eeee5555' })).toBeUndefined()
+      expect(await pane.find({ type: 'Text', text: /cannot replace the other/ })).toBeDefined()
     })
 
     test(`an item from an older contexer without applicability still draws (${surface})`, async ($, on) => {
@@ -433,6 +553,46 @@ describe('review pane', () => {
       await start($, surface)
       expect(await pane.find({ key: `approve-${UPDATE.id}` })).toBeDefined()
       expect(await pane.find({ key: `approve-${LATER.id}` })).toBeUndefined()
+    })
+
+    test(`the focusable controls sit above the card's text (${surface})`, async ($, on) => {
+      // The surface keeps the focused element in view on each redraw; a ring below a long card
+      // pulled the window past its title after every action.
+      fakeContexer(on, [NEW, UPDATE])
+      await start($, surface)
+      const pane = await mountPane($, surface)
+      const drawn = JSON.stringify(await pane.drawn())
+      const title = drawn.indexOf(NEW.title)
+      for (const key of [`approve-${NEW.id}`, `ignore-${NEW.id}`, 'next', 'prev']) {
+        expect(drawn.indexOf(`"${key}"`)).toBeGreaterThan(-1)
+        expect(drawn.indexOf(`"${key}"`)).toBeLessThan(title)
+      }
+    })
+
+    test(`a contradiction's Keep buttons sit above its sides (${surface})`, async ($, on) => {
+      fakeContexer(on, [], 1, [PAIR])
+      await start($, surface)
+      const pane = await mountPane($, surface)
+      const drawn = JSON.stringify(await pane.drawn())
+      const pair = 'dddd4444-eeee5555'
+      const text = [drawn.indexOf(PAIR.reason), drawn.indexOf(`"side-${pair}-dddd4444"`), drawn.indexOf(`"side-${pair}-eeee5555"`)]
+      for (const at of text) expect(at).toBeGreaterThan(-1)
+      for (const id of ['dddd4444', 'eeee5555']) {
+        const keep = drawn.indexOf(`"keep-${pair}-${id}"`)
+        expect(keep).toBeGreaterThan(-1)
+        expect(keep).toBeLessThan(Math.min(...text))
+      }
+    })
+
+    test(`the files approval anchors sit directly above Approve (${surface})`, async ($, on) => {
+      // Approve signs them, so they stay in view whenever it holds the focus ring.
+      fakeContexer(on, [{ ...NEW, anchors: ['src/orgs/delete.py'] }])
+      await start($, surface)
+      const pane = await mountPane($, surface)
+      const drawn = JSON.stringify(await pane.drawn())
+      const anchors = drawn.indexOf('src/orgs/delete.py')
+      expect(anchors).toBeGreaterThan(-1)
+      expect(anchors).toBeLessThan(drawn.indexOf(`"approve-${NEW.id}"`))
     })
 
     test(`edit sends the developer's wording (${surface})`, async ($, on) => {

@@ -152,33 +152,58 @@ async function act($: EngineInterface, action: ReviewAction | ConflictAction, id
   await update($, editing, () => null)
   if (isQueue(out?.queue)) await land($, mine, out.queue as ReviewQueue)
   else await refresh($)
+  await showCardTop($)
 }
 
-// Opens at once on the queue the last turn left, then redraws if it changed since.
-async function openPane($: EngineInterface): Promise<void> {
+// A card is read from its title down, so a new card on screen starts at the top of the pane.
+// The item actions and the ‹/› nav are drawn above the card for the same reason: the surface
+// keeps the focused element in view on each redraw, and a ring at the bottom would pull a long
+// card's window down past its title. A contradiction card's Keep buttons, one per keepable side,
+// sit in that same row above the card.
+async function showCardTop($: EngineInterface): Promise<void> {
+  await $.ui.scroll({ in: PANE, to: 'start' }).catch(() => undefined)
+}
+
+// Opens at once on the queue the last turn left, then redraws if it changed since. Called from
+// the person's own command or press, so the surface seats it at any width; an open made later
+// from a timer counts as the plugin's own and waits undrawn on a narrow terminal. The pane only
+// counts as open (hiding the band) once it is drawn. `onSeated` runs once it is drawn, before
+// the queue read (a Python process) is waited on. Says whether the pane is drawn.
+async function openPane($: EngineInterface, onSeated?: () => void): Promise<boolean> {
   await update($, note, () => null)
   await update($, editing, () => null)
   await update($, cursor, () => null)
-  await update($, isPaneOpen, () => true)
-  try {
-    await $.ui.open(OPEN)
-  } catch (error) {
-    await update($, isPaneOpen, () => false)
-    throw error
-  }
+  const opened = await $.ui.open(OPEN)
+  await update($, isPaneOpen, () => opened.isPlaced)
+  if (!opened.isPlaced) return false
+  onSeated?.()
   await refresh($)
+  return true
+}
+
+// Whether the surface draws the pane now, by the engine's record: a pane left waiting undrawn
+// is seated later when the terminal widens, with no call of ours to see it. A failed read
+// counts as no pane drawn, so the band stays.
+async function isPaneDrawn($: EngineInterface): Promise<boolean> {
+  try {
+    return (await $.ui.panes()).some(pane => pane.id === PANE && pane.isPlaced)
+  } catch {
+    return false
+  }
 }
 
 // The engine refuses a pane's focus request while the band holds the keys, so a pane opened by
-// the band's own button would open without the keyboard. The band steps aside (drawing nothing
-// hands the keys back to the prompt), and the pane re-asks for focus until the surface reports
-// it focused, bounded, instead of guessing how long the band takes to redraw.
+// the band's own button would open without the keyboard. The press opens the pane itself (so it
+// counts as asked); the band steps aside (drawing nothing hands the keys back to the prompt),
+// and a timer re-asks for focus until the surface reports it focused, bounded, instead of
+// guessing how long the band takes to redraw. The re-asks start as soon as the pane is seated,
+// not after the queue read, so keys typed meanwhile reach the pane, and only for a seated pane:
+// a re-ask from a timer is the plugin's own open, which must never seat a pane by itself.
 const HANDOFF_TRIES = 20
 const HANDOFF_STEP_MS = 25
 
-async function handOffToPane($: EngineInterface): Promise<void> {
+async function focusPane($: EngineInterface): Promise<void> {
   try {
-    await openPane($)
     for (let i = 0; i < HANDOFF_TRIES; i++) {
       const pane = (await $.ui.panes()).find(open => open.id === PANE)
       if (!pane || pane.isFocused) return
@@ -190,11 +215,22 @@ async function handOffToPane($: EngineInterface): Promise<void> {
   }
 }
 
+// The handoff ends in `focusPane` once the pane is seated, else here: the band comes back for a
+// pane left waiting undrawn or an open that failed. A failure stays silent.
 async function openPaneFromBand($: EngineInterface): Promise<void> {
-  await update($, isHandingOff, () => true)
-  $.clock.after(0, () => {
-    handOffToPane($).catch(() => undefined)
-  })
+  let isSeated = false
+  try {
+    await update($, isHandingOff, () => true)
+    await openPane($, () => {
+      isSeated = true
+      $.clock.after(0, () => {
+        focusPane($).catch(() => undefined)
+      })
+    })
+  } catch {
+    // fail silent, as the whole mod does
+  }
+  if (!isSeated) await update($, isHandingOff, () => false).catch(() => undefined)
 }
 
 // A queue read is a Python process (~150ms). Never make the session start or a turn's end wait
@@ -227,6 +263,14 @@ const ACTION_HOTKEY: Record<ReviewAction, string> = { approve: 'a', edit: 'e', i
 // Whole text, trailing space trimmed per line; paragraph breaks kept.
 function full(text: string): string {
   return text.split('\n').map(line => line.trimEnd()).join('\n').trim()
+}
+
+// A button names the side it keeps; a long title is cut to keep both buttons on one line.
+const KEEP_TITLE_CHARS = 32
+
+function clip(text: string, max: number): string {
+  const line = text.replace(/\s+/g, ' ').trim()
+  return line.length <= max ? line : `${line.slice(0, max - 1).trimEnd()}…`
 }
 
 function applicability(when: Applicability | undefined): string {
@@ -342,18 +386,22 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: COMMAND }, async $ => {
-    await openPane($)
-    return { text: 'Opened the Contexer review pane.' }
+    const isPlaced = await openPane($)
+    return { text: isPlaced ? 'Opened the Contexer review pane.' : 'The Contexer review pane is open but not drawn here yet.' }
   })
 
-  // The band counts only what the pane can settle, and steps aside while the pane is open.
+  // The band counts only what the pane can settle, and steps aside while the pane is drawn (it
+  // stays for a pane the surface leaves waiting undrawn).
   // Retirements and reconsiderations still show in the pane, but alone they would point the
   // developer at a pane with no buttons in it.
+  // `isPaneOpen` (state, so writing it redraws the band) covers an open that drew at once; the
+  // engine's own record covers a pane the surface drew later, when the terminal widened (a
+  // resize redraws the band too).
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const q = await read($, queue)
     const n = actionable(q)
     if (e.props.hasSurvey || n === 0 || (await read($, isHidden)) || (await read($, isHandingOff))
-      || (await read($, isPaneOpen))) {
+      || (await read($, isPaneOpen)) || (await isPaneDrawn($))) {
       return next(e)
     }
 
@@ -420,6 +468,7 @@ export const register: Register = on => {
     let badges: Badge[]
     let body: RenderChildren[]
     let actions: RenderChildren
+    let anchors: RenderChildren = null
     if (card.kind === 'item') {
       const { item } = card
       const isConflict = isOpenConflict(item)
@@ -457,9 +506,10 @@ export const register: Register = on => {
       if (item.reconsideration) {
         body.push(<Box key={`proposal-${key}`} flexDirection="column">{field('RESTATED', full(item.reconsideration.content))}</Box>)
       }
-      // Approving signs these anchors, so they are named in full before the button is pressed.
+      // Approving signs these anchors, so they sit outside the card, directly above the button
+      // that signs them: in view whenever it is focused, however long the card.
       if (item.actions.includes('approve') && item.anchors?.length) {
-        body.push(<Box key={`anchors-${key}`} flexDirection="column">{field('ANCHORS', item.anchors.join('\n'))}</Box>)
+        anchors = <Box key={`anchors-${key}`} flexDirection="column">{field('ANCHORS', item.anchors.join('\n'))}</Box>
       }
 
       if (editingId === item.id && Input) {
@@ -509,7 +559,7 @@ export const register: Register = on => {
       body = [
         <Text key={`reason-${key}`} dimColor>{pair.reason}</Text>,
         <Box key={`sides-${key}`} flexDirection="row" gap={1}>
-          {sides.map(([one, other]) => (
+          {sides.map(([one]) => (
             <Box key={`side-${key}-${one.id}`} width="50%" flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
               <Text bold>{one.title}</Text>
               <Text>{full(one.content)}</Text>
@@ -517,23 +567,40 @@ export const register: Register = on => {
               {one.proposed
                 ? <Text color="yellow">{`Unreviewed update: ${full(one.proposed.content)}`}</Text>
                 : null}
-              {/* Keyed by pair too: one decision can contradict two others, and presses are
-                  resolved by key, so a side-only key would let one press run another pair's Keep. */}
               {one.can_keep
-                ? <Button key={`keep-${key}-${one.id}`} label="Keep this one" variant="primary" onPress={() => act($, 'keep', one.id, { over: other.id })} />
+                ? null
                 : <Text key={`unkeepable-${key}-${one.id}`} dimColor>Not approved by you, so it cannot replace the other.</Text>}
             </Box>
           ))}
         </Box>,
       ]
+      // One Keep per keepable side, named by its title, in the action row above the card like
+      // every other card's buttons: a ring inside a side, below its content, pulled the card's
+      // window past its reason line. The sides themselves are text only.
       actions = pair.actions.length === 0
         ? <Text key={`terminal-${key}`} dimColor>{'Neither side is one you approved. Retire one with `contexer retire <id> --reason <why>`, or edit one so they agree.'}</Text>
-        : null
+        : (
+          <Box key={`actions-${key}`} gap={1} flexWrap="wrap">
+            {sides.filter(([one]) => one.can_keep).map(([one, other]) => (
+              // Keyed by pair too: one decision can contradict two others, and presses are
+              // resolved by key, so a side-only key would let one press run another pair's Keep.
+              <Button
+                key={`keep-${key}-${one.id}`}
+                label={`Keep ${clip(one.title, KEEP_TITLE_CHARS)}`}
+                variant="primary"
+                onPress={() => act($, 'keep', one.id, { over: other.id })}
+              />
+            ))}
+          </Box>
+        )
     }
 
     const subtitle = card.kind === 'item' ? meta(card.item) : 'two current decisions disagree'
     const many = cards.length > 1
-    const go = (to: number) => update($, cursor, () => ({ key: cardKey(cards[to] as Card), at: to }))
+    const go = async (to: number) => {
+      await update($, cursor, () => ({ key: cardKey(cards[to] as Card), at: to }))
+      await showCardTop($)
+    }
     return (
       <Box flexDirection="column" gap={1} paddingX={1}>
         <Box key="top" flexDirection="row" justifyContent="space-between">
@@ -541,20 +608,21 @@ export const register: Register = on => {
             {badges.map(badge)}
             <Text dimColor>{subtitle}</Text>
           </Box>
-          <Text dimColor>{progress(at, cards.length)}</Text>
+          <Box gap={1}>
+            {many ? <Button key="prev" label="‹" hotkey="p" dimColor onPress={() => go((at + cards.length - 1) % cards.length)} /> : null}
+            <Text dimColor>{progress(at, cards.length)}</Text>
+            {many ? <Button key="next" label="›" hotkey="n" dimColor onPress={() => go((at + 1) % cards.length)} /> : null}
+          </Box>
         </Box>
+        {anchors}
+        {actions}
+        {message ? <Text key="note" color="green">{`› ${message}`}</Text> : null}
         <Box key={`card-${key}`} flexDirection="column" borderStyle="round" borderColor={frame} paddingX={1} gap={1}>
           {body}
         </Box>
-        {actions}
-        {message ? <Text key="note" color="green">{`› ${message}`}</Text> : null}
         <Box key="bottom" flexDirection="row" justifyContent="space-between">
           <Text dimColor>{many ? 'tab move · enter press · ↑↓ scroll · n/p next/previous · esc close' : 'tab move · enter press · ↑↓ scroll · esc close'}</Text>
-          <Box gap={1}>
-            {many ? <Button key="prev" label="‹ Prev" hotkey="p" dimColor onPress={() => go((at + cards.length - 1) % cards.length)} /> : null}
-            {many ? <Button key="next" label="Next ›" hotkey="n" dimColor onPress={() => go((at + 1) % cards.length)} /> : null}
-            {close}
-          </Box>
+          {close}
         </Box>
       </Box>
     )
