@@ -57,7 +57,7 @@ def test_report_schema_and_version_provenance(report):
     assert len(report["code_revision"]) == 40
     assert len(report["fixture_sha256"]) == 64
     assert len(report["runner_sha256"]) == 64
-    assert report["fixture_version"] == "1.1.4"
+    assert report["fixture_version"] == "1.1.5"
     assert report["runner_version"] == "4"
 
 
@@ -344,6 +344,10 @@ def test_r03_uses_production_title_and_content_ranker(report):
     assert lookups["capped"]["prompt_rank_calls"] == 1
     assert lookups["uncapped"]["ranked_ids"][:2] == ["r03-best", "r03-incidental"]
     assert _assertion(report, "R03", "capped-retains-relevant-winner")["status"] == "passed"
+    # A literal phrase hit is ranked too, so the cap no longer keeps the entrenched match.
+    assert lookups["literal-capped"]["prompt_rank_calls"] == 1
+    assert _assertion(report, "R03", "literal-capped-retains-relevant-winner")["status"] == "passed"
+    assert _assertion(report, "R03", "literal-capped-drops-entrenched-incidental")["status"] == "passed"
 
 
 def test_approved_revision_identity_comes_from_rendered_store_state(report):

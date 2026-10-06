@@ -6194,8 +6194,9 @@ class TestTopicAliasRetry:
             assert "Unreviewed update" in result and proposal in result
             assert "picked with the developer" not in result
 
-    def test_literal_and_alias_routes_still_use_keep_top_before_fallback(
-            self, tmp_repo, monkeypatch):
+    def test_literal_and_alias_relevance_ties_keep_entrenchment_order(self, tmp_repo):
+        # Literal hits are relevance-ranked before the cap (#352); when relevance ties,
+        # the more entrenched decision still wins the cap, as it did before ranking.
         data = store.load(tmp_repo)
         literal_low = store._new_decision_entry(
             "LITERAL_LOW exact route phrase one", "routes", "architecture",
@@ -6211,9 +6212,6 @@ class TestTopicAliasRetry:
         alias_high["occurrence_count"] = 8
         data["entries"] = [literal_low, literal_high, alias_low, alias_high]
         store.save(tmp_repo, data)
-        monkeypatch.setattr(
-            retrieval, "prompt_rank",
-            lambda *_args, **_kwargs: pytest.fail("literal/alias route reached fallback"))
 
         literal = store.get_context(tmp_repo, query="exact route phrase", limit=1)
         alias = store.get_context(tmp_repo, query="db", limit=1)
@@ -6328,6 +6326,46 @@ class TestTopicAliasRetry:
         result = store.get_context(tmp_repo, query="retrieval bm25")
         assert "Use BM25 for prompt retrieval" in result
         assert "No matching decisions" not in result
+
+    def _seed_literal_cap_corpus(self, repo):
+        # Both decisions contain the literal phrase; the incidental one is far more
+        # entrenched, so a recurrence-ordered cap of 1 keeps it and cuts the winner (#352).
+        ids = _seed_rv1(repo, [
+            ("Encrypt webhook payload archives with rotating envelope keys", "architecture"),
+            ("Encrypt webhook payload archives only for legacy export samples", "architecture"),
+        ])
+        data = store.load(repo)
+        for entry in data["entries"]:
+            if "legacy export" in entry["content"]:
+                entry["occurrence_count"] = 12
+        store.save(repo, data)
+        return ids
+
+    def test_literal_matches_rank_by_relevance_before_cap(self, tmp_repo):
+        self._seed_literal_cap_corpus(tmp_repo)
+        result = store.get_context(tmp_repo, query="webhook payload archives", limit=1)
+        assert "rotating envelope keys" in result
+        assert "legacy export samples" not in result
+        assert "showing 1 of 2" in result
+
+    def test_literal_matches_keep_entrenchment_cap_without_index(self, tmp_repo):
+        self._seed_literal_cap_corpus(tmp_repo)
+        store._index_path(tmp_repo).unlink()
+        result = store.get_context(tmp_repo, query="webhook payload archives", limit=1)
+        assert "legacy export samples" in result
+        assert "rotating envelope keys" not in result
+
+    def test_literal_matches_unscored_by_index_follow_ranked_ones(self, tmp_repo, monkeypatch):
+        # The index scores only the later-seeded decision, so the earlier one must still be
+        # shown, after it, rather than restoring chronological order or being dropped.
+        ids = self._seed_literal_cap_corpus(tmp_repo)
+        scored = ids["Encrypt webhook payload archives only for legacy export samples"]
+        real_rank = retrieval.prompt_rank
+        monkeypatch.setattr(retrieval, "prompt_rank", lambda terms, index: [
+            row for row in real_rank(terms, index) if row[0] == scored])
+        result = store.get_context(tmp_repo, query="webhook payload archives")
+        assert "showing" not in result
+        assert result.index("legacy export samples") < result.index("rotating envelope keys")
 
     def test_no_result_query_logs_no_followup(self, tmp_repo):
         _seed_rv1(tmp_repo, RV1_CORPUS)

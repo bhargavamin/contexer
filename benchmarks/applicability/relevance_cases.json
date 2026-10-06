@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "fixture_version": "1.1.4",
+  "fixture_version": "1.1.5",
   "reference_revision": "5676247f358dc6a0c099d8eb8eb94623bad04bb0",
   "cases": [
     {
@@ -245,6 +245,13 @@
           "query": "webhook archives rotating keys",
           "limit": 1,
           "trace_prompt_rank": true
+        },
+        {
+          "action_id": "literal-capped",
+          "kind": "lookup",
+          "query": "webhook payload archives",
+          "limit": 1,
+          "trace_prompt_rank": true
         }
       ],
       "applicable": [
@@ -292,6 +299,26 @@
           "decision_id": "r03-best",
           "revision_id": "rev-r03-best-a",
           "tier": "tool_result"
+        },
+        {
+          "key": "literal-capped-uses-production-bm25",
+          "kind": "prompt_rank_call_count",
+          "action_id": "literal-capped",
+          "minimum": 1
+        },
+        {
+          "key": "literal-capped-retains-relevant-winner",
+          "kind": "contains_decision",
+          "action_id": "literal-capped",
+          "decision_id": "r03-best",
+          "revision_id": "rev-r03-best-a",
+          "tier": "tool_result"
+        },
+        {
+          "key": "literal-capped-drops-entrenched-incidental",
+          "kind": "omits_decision",
+          "action_id": "literal-capped",
+          "decision_id": "r03-incidental"
         }
       ],
       "forbidden_outputs": [],
