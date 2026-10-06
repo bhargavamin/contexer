@@ -7098,6 +7098,33 @@ def _team_display_cap() -> int:
     return team_context._TEAM_DISPLAY
 
 
+def _rank_literal_matches(repo_path: str, query: str, matched: list) -> list | None:
+    """`matched` in `prompt_rank` relevance order, or None when the index scores none of them.
+
+    None keeps get_context's historical entrenchment cap (missing/corrupt index, or a query
+    with no indexable terms). Equal scores fall back to that entrenchment order, and matches
+    the ranker does not return follow the ranked ones, most-entrenched first, so they stay
+    visible rather than vanishing behind the cap.
+    """
+    index = _read_retrieval_index(repo_path)
+    query_terms = retrieval.index_tokens(query)
+    if index is None or not query_terms:
+        return None
+
+    def entrenchment(d: dict) -> tuple:
+        return (d.get("occurrence_count", 1), d.get("updated_at") or d.get("timestamp", ""))
+
+    by_id = {d.get("id"): d for d in matched if d.get("id")}
+    rows = [row for row in retrieval.prompt_rank(query_terms, index) if row[0] in by_id]
+    if not rows:
+        return None
+    rows.sort(key=lambda row: (row[1], entrenchment(by_id[row[0]])), reverse=True)
+    ranked = [by_id[row[0]] for row in rows]
+    seen = {id(d) for d in ranked}
+    rest = sorted((d for d in matched if id(d) not in seen), key=entrenchment, reverse=True)
+    return ranked + rest
+
+
 def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: int = 0,
                 files: list[str] | None = None, _active_only: bool = False,
                 _include_staleness: bool = True,
@@ -7202,6 +7229,14 @@ def get_context(repo_path: str, query: str = "", entry_type: str = "", limit: in
                                       for phrase in (index.get("docs", {}).get(row[0]) or {}).get("applies_phrases", []))]
                 matched = [allowed[did] for did in dict.fromkeys(ranked_ids) if did in allowed]
                 relevance_ordered = bool(matched)
+        elif len(matched) > 1:
+            # A literal hit says only that the phrase occurs, so rank the hits by relevance
+            # before the display cap: a broad query must not lose the best match to entrenched
+            # recurrence (#352). Hits the index cannot score (stale sidecar, a conflict
+            # proposal's text) keep the entrenchment order, after the ranked ones.
+            ranked = _rank_literal_matches(repo_path, query, matched)
+            if ranked is not None:
+                matched, relevance_ordered = ranked, True
         decisions = matched
 
     display_limit = limit if limit > 0 else (_FILTERED_DISPLAY if is_filtered else _UNFILTERED_DISPLAY)
