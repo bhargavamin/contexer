@@ -32,6 +32,7 @@ const editing = atom({ plugin: 'contexer-review', key: 'editing' } as const, nul
 const note = atom({ plugin: 'contexer-review', key: 'note' } as const, null)
 const cursor = atom({ plugin: 'contexer-review', key: 'cursor' } as const, null)
 const isPaneOpen = atom({ plugin: 'contexer-review', key: 'isPaneOpen' } as const, false)
+const isOtherSuggested = atom({ plugin: 'contexer-review', key: 'isOtherSuggested' } as const, false)
 
 // The `contexer` that installed this mod: the console script of the same tool venv
 // (<venv>/lib/pythonX.Y/site-packages/contexer/claude_mod -> <venv>/bin/contexer), so another
@@ -100,11 +101,13 @@ async function refresh($: EngineInterface): Promise<void> {
   const mine = take()
   const out = await contexer($, [])
   if (!(await land($, mine, isQueue(out) ? out : null))) return
-  if (await wantsSuggestion($)) await $.prompt.suggest({ text: SUGGESTION }).catch(() => undefined)
+  await suggestAgain($)
 }
 
-// Closing the pane gives the empty prompt back; offer the review again while decisions wait.
+// Offer the review as the box's suggestion while decisions wait, unless another plugin's
+// suggestion is in the box since the last prompt: ours would replace it.
 async function suggestAgain($: EngineInterface): Promise<void> {
+  if (await read($, isOtherSuggested)) return
   if (await wantsSuggestion($)) await $.prompt.suggest({ text: SUGGESTION }).catch(() => undefined)
 }
 
@@ -299,8 +302,17 @@ export const register: Register = on => {
 
   // Claude Code proposes its own next prompt after a turn, which would replace ours. While
   // decisions wait (and not after Later), its proposal becomes the review command instead.
+  // Another plugin's suggestion is noted, so a queue read landing later does not replace it.
   on('prompt.suggest', async ($, e, next) => {
     if (e.origin.kind === 'suggestion' && (await wantsSuggestion($))) return next({ ...e, text: SUGGESTION })
+    const shown = await next(e)
+    if (e.origin.kind === 'plugin' && shown.isShown) await update($, isOtherSuggested, () => true)
+    return shown
+  })
+
+  // Sending a prompt clears the box, and with it any other plugin's suggestion.
+  on('prompt.submit', async ($, e, next) => {
+    await update($, isOtherSuggested, () => false)
     return next(e)
   })
 

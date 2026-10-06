@@ -82,6 +82,8 @@ declare module 'claude-code' {
       cursor: { key: string; at: number } | null
       /** The pane is up, so the band above the prompt steps aside. */
       isPaneOpen: boolean
+      /** Another plugin's suggestion is in the prompt box since the last prompt was sent. */
+      isOtherSuggested: boolean
     }
   }
 }

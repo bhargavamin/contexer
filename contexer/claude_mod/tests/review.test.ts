@@ -85,6 +85,7 @@ function fakeContexer(on: On, items: ReviewItem[], protocol = 1, pairs: CurrentC
   })
   on('session.start', async (_$, e) => ({ cwd: e.cwd }))
   on('session.cwd', async () => ({ value: '/repo' }))
+  on('prompt.submit', async (_$, e) => ({ text: e.text }))
   on('fs.stat', async () => ({ deny: 'no such file' }))
   on('command.register', async (_$, e) => ({ value: { command: e.name } }))
   on('ui.open', async () => ({ value: { isPlaced: true } }))
@@ -182,6 +183,25 @@ describe('keyboard path from the prompt', () => {
       suggested.length = 0
       await $.prompt.suggest({ text: 'run the linter', origin: { kind: 'plugin', name: 'other' } })
       expect(suggested).toEqual(['run the linter'])
+    })
+
+    test(`a later queue read never replaces another plugin's suggestion (${surface})`, async ($, on) => {
+      fakeContexer(on, [NEW])
+      await start($, on)
+      suggested.length = 0
+      await $.prompt.suggest({ text: 'run the linter', origin: { kind: 'plugin', name: 'other' } })
+      await start($)
+      expect(suggested).toEqual(['run the linter'])
+    })
+
+    test(`offers the review again after the next prompt is sent (${surface})`, async ($, on) => {
+      fakeContexer(on, [NEW])
+      await start($, on)
+      await $.prompt.suggest({ text: 'run the linter', origin: { kind: 'plugin', name: 'other' } })
+      await $.prompt.submit({ text: 'run the linter' } as never)
+      suggested.length = 0
+      await start($)
+      expect(suggested).toEqual(['/contexer-review'])
     })
 
     test(`offers the review again when the pane closes (${surface})`, async ($, on) => {
