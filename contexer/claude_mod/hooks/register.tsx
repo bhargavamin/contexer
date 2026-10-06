@@ -111,12 +111,18 @@ async function suggestAgain($: EngineInterface): Promise<void> {
   if (await wantsSuggestion($)) await $.prompt.suggest({ text: SUGGESTION }).catch(() => undefined)
 }
 
-// Our own close does not pass through our own `ui.close` hook, so it offers the review itself.
-async function closePane($: EngineInterface): Promise<void> {
-  await $.ui.close({ id: PANE })
+// However the pane closed: the band comes back, a half-done edit is dropped, and the empty
+// prompt offers the review again.
+async function paneClosed($: EngineInterface): Promise<void> {
   await update($, isPaneOpen, () => false)
   await update($, editing, () => null)
   await suggestAgain($)
+}
+
+// Our own close does not pass through our own `ui.close` hook, so it settles the pane itself.
+async function closePane($: EngineInterface): Promise<void> {
+  await $.ui.close({ id: PANE })
+  await paneClosed($)
 }
 
 // Suggest the review only while the pane has something to settle and the developer has not
@@ -319,9 +325,7 @@ export const register: Register = on => {
   // The person's close (Esc, the pane's own close mark): offer the review again.
   on('ui.close', { id: PANE }, async ($, e, next) => {
     const closed = await next(e)
-    await update($, isPaneOpen, () => false)
-    await update($, editing, () => null)
-    await suggestAgain($)
+    await paneClosed($)
     return closed
   })
 
