@@ -1,8 +1,11 @@
 {
   "schema_version": 1,
-  "fixture_version": "1.13.0",
+  "fixture_version": "1.13.1",
   "required_case_ids": [
-    "P01-always", "P01-task-list-handoff", "P01-always-squash-merge", "P01-task-staging-repro", "P01-session-handler", "P01-task-runner",
+    "P01-always", "P01-task-list-handoff", "P01-always-squash-merge",
+    "P01-slash-option-label-reversed", "P01-slash-option-label-multiword",
+    "P01-slash-joined-prohibitions", "P01-slash-joined-prohibitions-reversed",
+    "P01-slash-repeated-prohibition", "P01-task-staging-repro", "P01-session-handler", "P01-task-runner",
     "P01-and-durable-sibling", "P01-task-unpunctuated", "P01-and-durable-continuation",
     "P01-labeled-task-rule", "P01-task-only", "P01-task-at-hand", "P01-lasting-object-list",
     "P01-never-permanently", "P01-trailing-task-action", "P01-object-list-then-local-action",
