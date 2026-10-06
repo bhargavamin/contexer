@@ -194,10 +194,12 @@ def test_default_preserves_auth_policy_words_while_scrubbing_password(tmp_repo, 
 
 @pytest.mark.parametrize("format", ["md", "adr"])
 def test_default_redacts_short_lowercase_tokens(tmp_repo, format):
-    entry = store._new_decision_entry("Use token=admin and auth=abc; password=monkey.", "s", "constraint", status="approved")
+    # Secrets must not be hex-only: the rendered decision id is a random UUID, and a value
+    # such as "abc" occurs in it often enough to fail this test on unrelated changes.
+    entry = store._new_decision_entry("Use token=admin and auth=xyz; password=monkey.", "s", "constraint", status="approved")
     store.save(tmp_repo, {"entries": [entry]})
     output = "\n".join(export.render(tmp_repo, format=format).values())
-    assert "admin" not in output and "abc" not in output and "monkey" not in output
+    assert "admin" not in output and "xyz" not in output and "monkey" not in output
 
 
 def test_interrupted_export_resumes_without_overwriting_user_edits(tmp_repo, tmp_path, monkeypatch):
