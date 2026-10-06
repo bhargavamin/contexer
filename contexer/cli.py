@@ -497,7 +497,12 @@ def _review_json(rest: list) -> None:
     def answer(ok: bool, message: str, repo_path: str | None = None) -> None:
         out = {"ok": ok, "message": message}
         if repo_path:
-            out["queue"] = console_api.review_queue(repo_path)
+            # An action may already have written: a queue read failing after it must not turn
+            # that into a refusal. Without `queue` the caller re-reads it itself.
+            try:
+                out["queue"] = console_api.review_queue(repo_path)
+            except Exception:
+                pass
         print(json.dumps(out))
         if not ok:
             sys.exit(1)

@@ -294,6 +294,17 @@ class TestMachineOutputStaysMachineReadable:
         code, out = _run(capsys, "approve", eid)
         assert code == 1 and out["ok"] is False and "store is unreadable" in out["message"]
 
+    def test_an_action_that_wrote_stays_ok_when_the_queue_read_after_it_fails(
+            self, in_repo, monkeypatch, capsys):
+        eid = _pending(in_repo)
+
+        def broken(_repo):
+            raise RuntimeError("queue unreadable")
+        monkeypatch.setattr(console_api, "review_queue", broken)
+        code, out = _run(capsys, "approve", eid)
+        assert code == 0 and out["ok"] is True and "queue" not in out
+        assert store.entry_status(_entry(in_repo, eid)) == "approved"
+
     def test_json_output_never_carries_the_release_notice(self, in_repo, monkeypatch, capsys):
         # The mod discards stderr, so a notice printed after --json would be consumed unseen.
         shown = []
