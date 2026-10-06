@@ -488,13 +488,21 @@ def review_queue(repo_path: str) -> dict:
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
+# Keys whose value the mod sends back as an action argument (or matches against the store), so
+# it must reach the mod byte for byte: a stripped id would name no decision, a stripped basis
+# would never match.
+_IDENTIFIERS = frozenset({"id", "repo", "basis", "replacement_id"})
+
+
 def _printable(value):
-    """`value` rebuilt with control characters left out of every string in it, for the review
-    pane's display only: the stored decision keeps its text verbatim."""
+    """`value` rebuilt with control characters left out of every display string in it, for the
+    review pane only: the stored decision keeps its text verbatim. Identifiers (`_IDENTIFIERS`)
+    pass through untouched."""
     if isinstance(value, str):
         return _CONTROL.sub("", value)
     if isinstance(value, dict):
-        return {key: _printable(item) for key, item in value.items()}
+        return {key: item if key in _IDENTIFIERS else _printable(item)
+                for key, item in value.items()}
     if isinstance(value, list):
         return [_printable(item) for item in value]
     return value

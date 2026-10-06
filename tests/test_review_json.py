@@ -163,6 +163,24 @@ class TestQueueProjection:
         assert item["title"] == "Rows stay"
         assert _entry(tmp_repo, eid)["content"] == raw, "display only"
 
+    def test_identifiers_pass_through_while_display_text_is_stripped(self, tmp_repo):
+        # The mod sends an id back as an action argument: stripped, it would name no decision.
+        eid = _seed_entry(tmp_repo, "Never delete rows\x1b in Clerk", status="pending_approval")["id"]
+        odd = f"{eid}\x07"
+        data = store.load(tmp_repo)
+        next(e for e in data["entries"] if e["id"] == eid)["id"] = odd
+        store.save(tmp_repo, data)
+        (item,) = console_api.review_queue(tmp_repo)["items"]
+        assert item["id"] == odd
+        assert item["content"] == "Never delete rows in Clerk"
+        shaped = {"repo": "r\x07", "basis": "b\x07", "title": "t\x07",
+                  "retirement": {"replacement_id": "x\x07", "reason": "y\x07"},
+                  "decisions": [{"id": "d\x07", "content": "c\x07"}]}
+        assert console_api._printable(shaped) == {
+            "repo": "r\x07", "basis": "b\x07", "title": "t",
+            "retirement": {"replacement_id": "x\x07", "reason": "y"},
+            "decisions": [{"id": "d\x07", "content": "c"}]}
+
     def test_tab_and_newline_survive_the_control_character_filter(self):
         assert console_api._printable({"a": ["x\ty\nz\r"]}) == {"a": ["x\ty\nz"]}
 
