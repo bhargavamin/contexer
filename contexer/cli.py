@@ -564,16 +564,15 @@ def _review_json(rest: list) -> None:
             # have settled or re-proposed this decision since, and an action picked for one
             # question must not answer another: an `ignore` meant for a new capture would
             # retire a decision that was just approved.
+            # Same kind is not the same question either: a re-proposal of that kind swaps the
+            # wording the developer is ratifying, so with `--expect` the shown wording must hold.
             now = review.item_kind(live)
             waiting = now != "new" or store.entry_status(live) == "pending_approval"
-            if not (now == kind and waiting and action in review.item_actions(now)):
-                return ("That decision changed since it was shown, so nothing was done. "
-                        "Review it again.")
-            # Same kind is not the same question: a re-proposal of that kind swaps the wording
-            # the developer is ratifying, so with `--expect` the shown wording must still hold.
-            if expect and console_api.review_basis(live) != expect:
-                return "This decision changed since the pane showed it; nothing was changed."
-            return None
+            if (now == kind and waiting and action in review.item_actions(now)
+                    and not (expect and console_api.review_basis(live) != expect)):
+                return None
+            return ("That decision changed since it was shown, so nothing was done. "
+                    "Review it again.")
 
         ok, message = store.approve_decision(repo_path, entry_id, action, content,
                                              precondition=still_asks)

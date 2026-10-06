@@ -489,8 +489,8 @@ class TestRefusals:
         assert ok and rid == eid and _entry(in_repo, eid)["proposed_revision"]["content"] == other
         code, out = _run(capsys, "approve", eid, "--expect", shown["basis"])
         assert code == 1 and out["ok"] is False
-        assert out["message"] == ("This decision changed since the pane showed it; "
-                                  "nothing was changed.")
+        assert out["message"] == ("That decision changed since it was shown, so nothing was "
+                                  "done. Review it again.")
         entry = _entry(in_repo, eid)
         assert entry["content"] == STANDING, "nothing promoted"
         assert entry["proposed_revision"]["content"] == other, "the proposal still waits"
