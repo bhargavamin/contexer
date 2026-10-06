@@ -1125,12 +1125,19 @@ def _is_our_mod_dir(entry: str) -> bool:
     return path.name == "claude_mod" and path.parent.name == "contexer"
 
 
+def _mod_env_parts(env_value) -> tuple[list[str], list[str]]:
+    """The env variable's folders split into (Contexer's mod folders, everyone else's), each in
+    order, empty entries dropped. A value that is not a string names no folder."""
+    if not isinstance(env_value, str):
+        return [], []
+    entries = [p for p in env_value.split(os.pathsep) if p]
+    return ([p for p in entries if _is_our_mod_dir(p)],
+            [p for p in entries if not _is_our_mod_dir(p)])
+
+
 def _registered_mod_dirs(settings: dict) -> list[str]:
     """The Contexer mod folders the settings register, in order (normally one)."""
-    value = _read(settings, "env").get(MOD_ENV)
-    if not isinstance(value, str):
-        return []
-    return [p for p in value.split(os.pathsep) if _is_our_mod_dir(p)]
+    return _mod_env_parts(_read(settings, "env").get(MOD_ENV))[0]
 
 
 def _set_mod_registration(settings: dict, register: bool) -> bool:
@@ -1142,8 +1149,8 @@ def _set_mod_registration(settings: dict, register: bool) -> bool:
             return False
         env = _section(settings, "env")
     current = env.get(MOD_ENV)
+    _ours, parts = _mod_env_parts(current)
     current = current if isinstance(current, str) else ""
-    parts = [p for p in current.split(os.pathsep) if p and not _is_our_mod_dir(p)]
     if register:
         parts.append(str(mod_dir()))
     value = os.pathsep.join(parts)
