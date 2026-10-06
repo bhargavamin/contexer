@@ -46,9 +46,10 @@ const suggested: string[] = []
 // The mocked clock the timer-driven queue reads run on; made before the test's first `$` call.
 let clock: ReturnType<typeof mock.clock>
 
-// Holds the next queue read's reply (already snapshotted) until `release` runs, to play a
-// process that answers late.
-type Gate = { held?: Promise<void> }
+// `held` holds the next queue read's reply (already snapshotted) until it resolves, to play a
+// process that answers late. `action` holds the next action before its write lands, to play a
+// store lock another process holds.
+type Gate = { held?: Promise<void>; action?: Promise<void> }
 
 function fakeContexer(on: On, items: ReviewItem[], protocol = 1, pairs: CurrentConflict[] = [], gate?: Gate) {
   const calls: string[][] = []
@@ -64,6 +65,11 @@ function fakeContexer(on: On, items: ReviewItem[], protocol = 1, pairs: CurrentC
   on('process.run', async (_$, e) => {
     calls.push([...e.argv])
     const args = e.argv.slice(e.argv.indexOf('--json') + 1)
+    if (args.length > 0 && gate?.action) {
+      const held = gate.action
+      gate.action = undefined
+      await held
+    }
     if (args.length > 0) pending = pending.filter(item => item.id !== args[1])
     if (args[0] === 'keep') open = open.filter(pair => !pair.decisions.some(d => d.id === args[1]))
     const out = args.length === 0 ? queue() : { ok: true, message: `${args[0]} done`, queue: queue() }
@@ -360,6 +366,22 @@ describe('review pane', () => {
       expect(await pane.find({ key: `approve-${NEW.id}` })).toBeUndefined()
       release()
       await opening
+      expect(await pane.find({ key: `approve-${NEW.id}` })).toBeUndefined()
+      expect(await pane.find({ key: `approve-${UPDATE.id}` })).toBeDefined()
+    })
+
+    test(`a queue read started while an action runs never brings its card back (${surface})`, async ($, on) => {
+      let release = () => {}
+      const gate: Gate = {}
+      fakeContexer(on, [NEW, UPDATE], 1, [], gate)
+      await start($, on)
+      const pane = await mountPane($, surface)
+      gate.action = new Promise<void>(resolve => { release = resolve })
+      const pressing = pane.press({ key: `approve-${NEW.id}` })
+      // A turn ends mid-press: its read answers first, from before the action's write.
+      await $.command.run({ command: 'contexer-review', args: '' } as never)
+      release()
+      await pressing
       expect(await pane.find({ key: `approve-${NEW.id}` })).toBeUndefined()
       expect(await pane.find({ key: `approve-${UPDATE.id}` })).toBeDefined()
     })

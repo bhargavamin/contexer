@@ -78,8 +78,10 @@ function isQueue(value: unknown): value is ReviewQueue {
 }
 
 // Queue reads and actions overlap (a turn ends while a button is pressed), and a process can
-// answer late. Each takes a ticket when it starts; a reply lands only if nothing that started
-// later has landed already, so an old snapshot never brings a settled card back.
+// answer late. A read takes a ticket when it starts; an action takes one when its write has
+// returned, so a read that started while the write was in flight (and may have read the store
+// before it) ranks below it. A reply lands only if nothing ranked later has landed already, so
+// an old snapshot never brings a settled card back.
 let ticket = 0
 let landed = 0
 
@@ -127,8 +129,8 @@ async function act($: EngineInterface, action: ReviewAction | ConflictAction, id
   const args = [action, id]
   if (options.content) args.push('--content', options.content)
   if (options.over) args.push('--over', options.over)
-  const mine = take()
   const out = await contexer($, args)
+  const mine = take()
   const message = typeof out?.message === 'string' ? out.message : 'Contexer did not answer, so nothing changed.'
   await update($, note, () => message)
   await update($, editing, () => null)
