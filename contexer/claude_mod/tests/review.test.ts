@@ -39,8 +39,6 @@ const PAIR: CurrentConflict = {
   actions: ['keep'],
 }
 
-// A fake `contexer review --json`: lists `items`; an action removes its item and replies with
-// the queue as it stands afterwards. Records every argv it was run with.
 // What reached the prompt box's suggestion, beneath the plugin.
 const suggested: string[] = []
 // The mocked clock the timer-driven queue reads run on; made before the test's first `$` call.
@@ -53,6 +51,8 @@ let settleElsewhere: (id: string) => void = () => {}
 // store lock another process holds.
 type Gate = { held?: Promise<void>; action?: Promise<void> }
 
+// A fake `contexer review --json`: lists `items`; an action removes its item and replies with
+// the queue as it stands afterwards. Records every argv it was run with.
 function fakeContexer(on: On, items: ReviewItem[], protocol = 1, pairs: CurrentConflict[] = [], gate?: Gate) {
   const calls: string[][] = []
   suggested.length = 0
