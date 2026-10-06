@@ -232,10 +232,15 @@ const PICK_LINE: Record<'update' | 'standing', string> = {
   standing: 'You kept the current version earlier.',
 }
 
+// A Suggested Update whose wording differs from the approved one (conflicts.has_open_conflict).
+function isOpenConflict(item: ReviewItem): boolean {
+  return item.kind === 'update' && !!item.conflict
+}
+
 // A conflicting update is the developer choosing between two versions, so its buttons say so.
 function actionLabel(item: ReviewItem, action: ReviewAction): string {
-  if (item.conflict && action === 'approve') return 'Take update'
-  if (item.conflict && action === 'dismiss') return 'Keep current'
+  if (isOpenConflict(item) && action === 'approve') return 'Take update'
+  if (isOpenConflict(item) && action === 'dismiss') return 'Keep current'
   return ACTION_LABEL[action]
 }
 
@@ -410,7 +415,7 @@ export const register: Register = on => {
     let actions: RenderChildren
     if (card.kind === 'item') {
       const { item } = card
-      const isConflict = item.kind === 'update' && !!item.conflict
+      const isConflict = isOpenConflict(item)
       frame = isConflict ? CONFLICT_BADGE.color : KIND_BADGE[item.kind].color
       badges = isConflict ? [CONFLICT_BADGE, KIND_BADGE[item.kind]] : [KIND_BADGE[item.kind]]
       body = [<Text key={`title-${key}`} bold>{item.title}</Text>]
