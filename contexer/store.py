@@ -1335,7 +1335,12 @@ _SOFT_PROSE_EXCLUDE = re.compile(
     r"have\s+to|need\s+to|get|understand)\b"
     r"|do\s+not\s+(?:worry|hesitate|bother|forget|mind|know|think|see|understand)\b"
     r"|i\s+do\s*n['’]?t\b"     # "I don't ..." - speaking about self, not a rule
-    r")",
+    r")"
+    # A slash-joined alternative names a pair of options ("the adopt/don't adopt threshold",
+    # "go/do not go criteria"), not a prohibition. Unstripped, it stored a task list as an
+    # approved constraint (#374).
+    r"|/\s*do(?:\s*n['’]?t|\s+not)\b"
+    r"|\bdo(?:\s*n['’]?t|\s+not)\s*/",
     re.IGNORECASE,
 )
 
