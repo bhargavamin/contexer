@@ -216,7 +216,7 @@ class TestConflicts:
         assert sides[left]["proposed"]["content"].endswith("Tags stay annotated.")
         assert "proposed" not in sides[right]
 
-    def test_only_an_approved_side_can_be_kept(self, tmp_repo):
+    def test_only_a_human_ratified_side_can_be_kept(self, tmp_repo):
         left, right = _conflicting_pair(tmp_repo, right_status="suggested")
         (pair,) = console_api.current_conflicts(tmp_repo)
         keepable = {side["id"]: side["can_keep"] for side in pair["decisions"]}
@@ -228,7 +228,7 @@ class TestConflicts:
         (pair,) = console_api.current_conflicts(tmp_repo)
         assert {s["id"]: s["can_keep"] for s in pair["decisions"]} == {human: True, scan: False}
 
-    def test_a_pair_with_no_approved_side_offers_no_action(self, tmp_repo):
+    def test_a_pair_with_no_human_ratified_side_offers_no_action(self, tmp_repo):
         _conflicting_pair(tmp_repo, left_status="suggested", right_status="suggested")
         (pair,) = console_api.current_conflicts(tmp_repo)
         assert pair["actions"] == []

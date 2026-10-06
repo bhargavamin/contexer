@@ -460,8 +460,9 @@ export const register: Register = on => {
         )
       }
     } else {
-      // Keep one side; the other is retired as superseded by it, with the reason recorded. Only an
-      // approved side can be kept, so an unratified capture never replaces an approved decision.
+      // Keep one side; the other is retired as superseded by it, with the reason recorded. Only a
+      // human-ratified side (one the developer stated or approved) can be kept, so an unratified
+      // capture never replaces a decision the developer ratified.
       const { pair } = card
       const [left, right] = pair.decisions
       const sides: [ConflictSide, ConflictSide][] = [[left, right], [right, left]]

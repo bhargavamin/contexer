@@ -47,7 +47,7 @@ export type ConflictSide = {
   status: string
   timestamp: string | null
   applies_when?: Applicability
-  /** Only an approved decision may be kept over its contradiction (conflicts.can_keep). */
+  /** Only a human-ratified decision (stated or approved by the developer) may be kept over its contradiction (conflicts.can_keep). */
   can_keep: boolean
   /** A Suggested Update waiting on this side, if any: unapproved wording. */
   proposed?: { content: string; title: string; applies_when?: Applicability }

@@ -125,9 +125,9 @@ def can_keep(entry: dict) -> bool:
 
 def keep_current_side(repo_path: str, kept_id: str, other_id: str) -> tuple[bool, str]:
     """Settle a contradiction the developer chose a side of: retire `other_id` as superseded by
-    `kept_id`, recording why. The pair, and that the kept side is approved, are re-checked under
-    the retirement's own lock, so a pair that changed or vanished since it was shown is refused
-    rather than acted on. One decision per call; nothing here is reachable without a human pick."""
+    `kept_id`, recording why. The pair, and that the kept side is human-ratified (`can_keep`), are
+    re-checked under the retirement's own lock, so a pair that changed or vanished since it was
+    shown is refused rather than acted on. One decision per call; nothing here is reachable without a human pick."""
     from contexer import lifecycle      # function-level: lifecycle reads the store this module renders
 
     pair = find_current_pair(store.load(repo_path).get("entries", []), kept_id, other_id)

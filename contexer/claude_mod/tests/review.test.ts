@@ -265,7 +265,7 @@ describe('review pane', () => {
       expect(await pane.find({ type: 'Text', text: /All clear/ })).toBeDefined()
     })
 
-    test(`an unapproved side cannot be kept over an approved one (${surface})`, async ($, on) => {
+    test(`a side the developer did not ratify cannot be kept (${surface})`, async ($, on) => {
       const mixed: CurrentConflict = { ...PAIR, decisions: [side('dddd4444', 'Prefix versions with v'), side('eeee5555', 'Publish bare versions', false)] }
       fakeContexer(on, [], 1, [mixed])
       await start($, on)
