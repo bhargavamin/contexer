@@ -46,7 +46,11 @@ const suggested: string[] = []
 // The mocked clock the timer-driven queue reads run on; made before the test's first `$` call.
 let clock: ReturnType<typeof mock.clock>
 
-function fakeContexer(on: On, items: ReviewItem[], protocol = 1, pairs: CurrentConflict[] = []) {
+// Holds the next queue read's reply (already snapshotted) until `release` runs, to play a
+// process that answers late.
+type Gate = { held?: Promise<void> }
+
+function fakeContexer(on: On, items: ReviewItem[], protocol = 1, pairs: CurrentConflict[] = [], gate?: Gate) {
   const calls: string[][] = []
   suggested.length = 0
   clock = mock.clock(on)
@@ -63,6 +67,11 @@ function fakeContexer(on: On, items: ReviewItem[], protocol = 1, pairs: CurrentC
     if (args.length > 0) pending = pending.filter(item => item.id !== args[1])
     if (args[0] === 'keep') open = open.filter(pair => !pair.decisions.some(d => d.id === args[1]))
     const out = args.length === 0 ? queue() : { ok: true, message: `${args[0]} done`, queue: queue() }
+    if (args.length === 0 && gate?.held) {
+      const held = gate.held
+      gate.held = undefined
+      await held
+    }
     return { value: { exitCode: 0, stdout: JSON.stringify(out), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('session.start', async (_$, e) => ({ cwd: e.cwd }))
@@ -298,6 +307,61 @@ describe('review pane', () => {
       const pane = await mountPane($, surface)
       expect(await pane.find({ type: 'Text', text: long })).toBeDefined()
       expect(await pane.find({ type: 'Text', text: /The end\. Also sidecars\.$/ })).toBeDefined()
+    })
+
+    test(`approval names the files it would anchor (${surface})`, async ($, on) => {
+      fakeContexer(on, [{ ...NEW, anchors: ['src/orgs/delete.py', 'src/orgs/sync.py'] }])
+      await start($, on)
+      const pane = await mountPane($, surface)
+      expect(await pane.find({ type: 'Text', text: 'ANCHORS' })).toBeDefined()
+      expect(await pane.find({ type: 'Text', text: 'src/orgs/delete.py\nsrc/orgs/sync.py' })).toBeDefined()
+    })
+
+    test(`a terminal-only card shows what is proposed (${surface})`, async ($, on) => {
+      const retire: ReviewItem = { ...RETIRE, retirement: { reason: 'Superseded by DynamoDB', replacement_id: 'cccc3333-x' } }
+      const recon: ReviewItem = { ...RETIRE, id: 'bbbb9999', kind: 'reconsideration', reconsideration: { content: 'Use Postgres again' } }
+      fakeContexer(on, [retire, recon])
+      await start($, on)
+      const pane = await mountPane($, surface)
+      expect(await pane.find({ type: 'Text', text: 'Superseded by DynamoDB' })).toBeDefined()
+      expect(await pane.find({ type: 'Text', text: 'cccc3333' })).toBeDefined()
+      await pane.press({ key: 'next' })
+      expect(await pane.find({ type: 'Text', text: 'Use Postgres again' })).toBeDefined()
+    })
+
+    test(`a contradiction side shows its unreviewed update (${surface})`, async ($, on) => {
+      const pending = { ...side('dddd4444', 'Prefix versions with v'), proposed: { content: 'Prefix with v; annotate tags', title: 'x' } }
+      fakeContexer(on, [], 1, [{ ...PAIR, decisions: [pending, side('eeee5555', 'Publish bare versions')] }])
+      await start($, on)
+      const pane = await mountPane($, surface)
+      expect(await pane.find({ type: 'Text', text: 'Unreviewed update: Prefix with v; annotate tags' })).toBeDefined()
+    })
+
+    test(`reopening the pane drops a half-done edit (${surface})`, async ($, on) => {
+      fakeContexer(on, [NEW])
+      await start($, on)
+      const pane = await mountPane($, surface)
+      await pane.press({ key: `edit-${NEW.id}` })
+      expect(await pane.find({ key: `cancel-${NEW.id}` })).toBeDefined()
+      await pane.press({ key: 'close' })
+      await $.command.run({ command: 'contexer-review', args: '' } as never)
+      expect(await pane.find({ key: `approve-${NEW.id}` })).toBeDefined()
+    })
+
+    test(`a late queue read never brings a settled card back (${surface})`, async ($, on) => {
+      let release = () => {}
+      const gate: Gate = {}
+      fakeContexer(on, [NEW, UPDATE], 1, [], gate)
+      await start($, on)
+      gate.held = new Promise<void>(resolve => { release = resolve })
+      const opening = $.command.run({ command: 'contexer-review', args: '' } as never)
+      const pane = await mountPane($, surface)
+      await pane.press({ key: `approve-${NEW.id}` })
+      expect(await pane.find({ key: `approve-${NEW.id}` })).toBeUndefined()
+      release()
+      await opening
+      expect(await pane.find({ key: `approve-${NEW.id}` })).toBeUndefined()
+      expect(await pane.find({ key: `approve-${UPDATE.id}` })).toBeDefined()
     })
 
     test(`edit sends the developer's wording (${surface})`, async ($, on) => {

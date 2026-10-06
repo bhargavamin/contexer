@@ -77,9 +77,27 @@ function isQueue(value: unknown): value is ReviewQueue {
   return !!v && v.protocol === PROTOCOL && Array.isArray(v.items) && typeof v.count === 'number'
 }
 
+// Queue reads and actions overlap (a turn ends while a button is pressed), and a process can
+// answer late. Each takes a ticket when it starts; a reply lands only if nothing that started
+// later has landed already, so an old snapshot never brings a settled card back.
+let ticket = 0
+let landed = 0
+
+function take(): number {
+  return ++ticket
+}
+
+async function land($: EngineInterface, mine: number, next: ReviewQueue | null): Promise<boolean> {
+  if (mine < landed) return false
+  landed = mine
+  await update($, queue, () => next)
+  return true
+}
+
 async function refresh($: EngineInterface): Promise<void> {
+  const mine = take()
   const out = await contexer($, [])
-  await update($, queue, () => (isQueue(out) ? out : null))
+  if (!(await land($, mine, isQueue(out) ? out : null))) return
   if (await wantsSuggestion($)) await $.prompt.suggest({ text: SUGGESTION }).catch(() => undefined)
 }
 
@@ -92,6 +110,7 @@ async function suggestAgain($: EngineInterface): Promise<void> {
 async function closePane($: EngineInterface): Promise<void> {
   await $.ui.close({ id: PANE })
   await update($, isPaneOpen, () => false)
+  await update($, editing, () => null)
   await suggestAgain($)
 }
 
@@ -108,17 +127,19 @@ async function act($: EngineInterface, action: ReviewAction | ConflictAction, id
   const args = [action, id]
   if (options.content) args.push('--content', options.content)
   if (options.over) args.push('--over', options.over)
+  const mine = take()
   const out = await contexer($, args)
   const message = typeof out?.message === 'string' ? out.message : 'Contexer did not answer, so nothing changed.'
   await update($, note, () => message)
   await update($, editing, () => null)
-  if (isQueue(out?.queue)) await update($, queue, () => out.queue as ReviewQueue)
+  if (isQueue(out?.queue)) await land($, mine, out.queue as ReviewQueue)
   else await refresh($)
 }
 
 // Opens at once on the queue the last turn left, then redraws if it changed since.
 async function openPane($: EngineInterface): Promise<void> {
   await update($, note, () => null)
+  await update($, editing, () => null)
   await update($, cursor, () => 0)
   await update($, isPaneOpen, () => true)
   try {
@@ -277,6 +298,7 @@ export const register: Register = on => {
   on('ui.close', { id: PANE }, async ($, e, next) => {
     const closed = await next(e)
     await update($, isPaneOpen, () => false)
+    await update($, editing, () => null)
     await suggestAgain($)
     return closed
   })
@@ -385,6 +407,22 @@ export const register: Register = on => {
           </Box>,
         )
       }
+      // What is being asked, for the cards only the terminal settles: the proposal itself.
+      if (item.retirement) {
+        body.push(
+          <Box key={`proposal-${key}`} flexDirection="column">
+            {field('RETIRE', full(item.retirement.reason) || 'no reason given')}
+            {item.retirement.replacement_id ? field('REPLACED', item.retirement.replacement_id.slice(0, 8), true) : null}
+          </Box>,
+        )
+      }
+      if (item.reconsideration) {
+        body.push(<Box key={`proposal-${key}`} flexDirection="column">{field('RESTATED', full(item.reconsideration.content))}</Box>)
+      }
+      // Approving signs these anchors, so they are named in full before the button is pressed.
+      if (item.actions.includes('approve') && item.anchors?.length) {
+        body.push(<Box key={`anchors-${key}`} flexDirection="column">{field('ANCHORS', item.anchors.join('\n'))}</Box>)
+      }
 
       if (editingId === item.id && Input) {
         actions = (
@@ -437,6 +475,9 @@ export const register: Register = on => {
               <Text bold>{one.title}</Text>
               <Text>{full(one.content)}</Text>
               <Text dimColor>{`${one.status} · applies: ${applicability(one.applies_when)}`}</Text>
+              {one.proposed
+                ? <Text color="yellow">{`Unreviewed update: ${full(one.proposed.content)}`}</Text>
+                : null}
               {/* Keyed by pair too: one decision can contradict two others, and presses are
                   resolved by key, so a side-only key would let one press run another pair's Keep. */}
               {one.can_keep

@@ -31,6 +31,12 @@ export type ReviewItem = {
   conflict?: boolean
   /** The side picked earlier with the developer (conflicts.memo_pick), if any. */
   pick?: 'update' | 'standing' | null
+  /** The files approving would anchor, in full (review_impact.confirmed_anchors). */
+  anchors?: string[]
+  /** A proposed retirement: why, and what replaces it. */
+  retirement?: { reason: string; replacement_id: string | null }
+  /** A proposed restoration: the developer's restated wording. */
+  reconsideration?: { content: string }
 }
 
 /** One side of a pair of contradicting current decisions. */
@@ -43,6 +49,8 @@ export type ConflictSide = {
   applies_when?: Applicability
   /** Only an approved decision may be kept over its contradiction (conflicts.can_keep). */
   can_keep: boolean
+  /** A Suggested Update waiting on this side, if any: unapproved wording. */
+  proposed?: { content: string; title: string; applies_when?: Applicability }
 }
 
 /** Two current decisions that prescribe incompatible things (console_api.current_conflicts). */

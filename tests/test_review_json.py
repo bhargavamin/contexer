@@ -101,6 +101,26 @@ class TestQueueProjection:
         (item,) = console_api.review_queue(tmp_repo)["items"]
         assert item["kind"] == "retirement" and item["actions"] == []
 
+    def test_a_retirement_carries_its_proposed_reason(self, tmp_repo):
+        eid = _approved(tmp_repo)
+        assert lifecycle.propose_lifecycle(tmp_repo, eid, "retire", "superseded by DynamoDB",
+                                           source="ai")["ok"]
+        (item,) = console_api.review_queue(tmp_repo)["items"]
+        assert item["retirement"] == {"reason": "superseded by DynamoDB", "replacement_id": None}
+
+    def test_approval_names_the_files_it_would_anchor(self, tmp_repo):
+        ok, eid, _ = store.update_decision_with_meta(
+            tmp_repo, RULE, "s1", "constraint", created_by="ai",
+            anchor_candidates=["src/orgs/delete.py"], anchor_candidates_confirmed=True)
+        assert ok
+        (item,) = console_api.review_queue(tmp_repo)["items"]
+        assert item["id"] == eid and item["anchors"] == ["src/orgs/delete.py"]
+
+    def test_no_confirmed_files_means_no_anchors(self, tmp_repo):
+        _pending(tmp_repo)
+        (item,) = console_api.review_queue(tmp_repo)["items"]
+        assert item["anchors"] == []
+
     def test_a_suggested_decision_is_not_a_review_item(self, tmp_repo):
         # `suggested` is an ACTIVE status (AI-captured, already replayed), not a backlog: the
         # pane must not turn deliberately unratified context into a nag.
@@ -184,6 +204,17 @@ class TestConflicts:
         assert pair["reason"] == conflicts.CURRENT_PAIR_REASON
         assert all(side["can_keep"] for side in pair["decisions"])
         assert queue["items"] == [], "a current conflict is not a pending decision"
+
+    def test_a_side_with_a_pending_update_shows_it(self, tmp_repo):
+        left, right = _conflicting_pair(tmp_repo)
+        data = store.load(tmp_repo)
+        side = next(e for e in data["entries"] if e.get("id") == left)
+        side["proposed_revision"] = {"content": PREFIX + " Tags stay annotated.", "source": "ai"}
+        store.save(tmp_repo, data)
+        (pair,) = console_api.review_queue(tmp_repo)["conflicts"]
+        sides = {d["id"]: d for d in pair["decisions"]}
+        assert sides[left]["proposed"]["content"].endswith("Tags stay annotated.")
+        assert "proposed" not in sides[right]
 
     def test_only_an_approved_side_can_be_kept(self, tmp_repo):
         left, right = _conflicting_pair(tmp_repo, right_status="suggested")

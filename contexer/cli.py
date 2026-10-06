@@ -28,8 +28,9 @@ Commands:
   upgrade       Upgrade Contexer itself, then re-sync config. Add --dry-run to preview.
   review        Interactively approve, edit, ignore, or retire pending engineering
                 decisions; also surfaces possibly-overlapping rules for consolidation.
-                review --json [approve|edit|ignore|dismiss <id> [--content TEXT]]
-                prints the queue (or settles one item) as JSON for the Claude Code mod.
+                review --json [approve|edit|ignore|dismiss <id> [--content TEXT]
+                | keep <id> --over <id>] prints the queue (or settles one item) as JSON
+                for the Claude Code mod.
   retire        Retire one decision - it leaves active context, keeping its history:
                 retire <id> --reason <text> [--replaced-by <id>].
   restore       Bring one retired decision back: restore <id> [--reason <text>].

@@ -436,6 +436,16 @@ def review_queue(repo_path: str) -> dict:
                 item["proposed"]["applies_when"] = None
             item["conflict"] = conflicts.has_open_conflict(entry)
             item["pick"] = conflicts.memo_pick(entry)
+        elif kind == "retirement":
+            life = entry.get("proposed_lifecycle") or {}
+            item["retirement"] = {"reason": life.get("reason") or "",
+                                  "replacement_id": life.get("replacement_decision_id")}
+        elif kind == "reconsideration":
+            recon = entry.get("proposed_reconsideration") or {}
+            item["reconsideration"] = {"content": recon.get("content") or ""}
+        # The files approving would anchor, in full: the developer signs them by pressing
+        # Approve, so the pane names them as the terminal review does (`anchor_confirmation`).
+        item["anchors"] = review_impact.confirmed_anchors(entry)
         items.append(item)
     return {"protocol": REVIEW_PROTOCOL, "repo": repo_path, "count": len(items), "items": items,
             "conflicts": current_conflicts(repo_path)}
@@ -449,7 +459,7 @@ def current_conflicts(repo_path: str) -> list[dict]:
     decisions, so they are not in `items` and not in `count`."""
     pairs = []
     for left, right in conflicts.current_pairs(store.load(repo_path).get("entries", [])):
-        sides = [{**_console_summary(e), "can_keep": conflicts.can_keep(e)} for e in (left, right)]
+        sides = [_conflict_side(e) for e in (left, right)]
         pairs.append({
             "kind": "current_conflict",
             "reason": conflicts.CURRENT_PAIR_REASON,
@@ -458,6 +468,15 @@ def current_conflicts(repo_path: str) -> list[dict]:
                         if any(side["can_keep"] for side in sides) else []),
         })
     return pairs
+
+
+def _conflict_side(entry: dict) -> dict:
+    """One side of a contradiction, with its pending Suggested Update when it has one: keeping
+    a side must not hide that its wording may be about to change."""
+    side = {**_console_summary(entry), "can_keep": conflicts.can_keep(entry)}
+    if entry.get("proposed_revision"):
+        side["proposed"] = _console_proposed(entry["proposed_revision"])
+    return side
 
 
 def list_decisions(repo_path: str, *, query: str = "", subtype: str = "", status: str = "",
