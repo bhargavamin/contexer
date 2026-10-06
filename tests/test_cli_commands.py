@@ -1505,10 +1505,11 @@ class TestGuardAnchors:
             self, guard_repo, capsys):
         """A collapsed prefix governs every file below it, and [Y] is one keystroke - the
         trailing slash alone must not be the only thing carrying that."""
-        for name in ("store.py", "server.py", "cli.py"):
-            _gwrite(guard_repo, f"contexer/{name}", "x = 0\n")
-        _gseed(guard_repo, "See contexer/store.py, contexer/server.py and contexer/cli.py "
-                           "for the module split")
+        # A prefix is proposed only when the exact files would exceed the anchor cap.
+        files = [f"contexer/mod{i}.py" for i in range(11)]
+        for path in files:
+            _gwrite(guard_repo, path, "x = 0\n")
+        _gseed(guard_repo, "Module split: " + "; ".join(files))
         _run_main("guard", "anchors", "--list")
         out = capsys.readouterr().out
         assert "contexer/" in out

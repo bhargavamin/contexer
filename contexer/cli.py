@@ -2598,8 +2598,9 @@ def _anchor_candidate_line(path: str) -> str:
     """One candidate anchor as the developer sees it, in both the --list preview and the
     interactive card. A directory prefix is spelled out rather than left as a bare path:
     the trailing slash is the only thing separating "this one file" from "every file below
-    here", and _candidate_paths_for_entry collapses three or more siblings onto their parent,
-    so a decision that named three files can arrive here proposing a whole package."""
+    here". _candidate_paths_for_entry proposes a parent only when the exact files would exceed
+    the anchor cap, collapsing three or more siblings, so an over-cap decision can arrive here
+    proposing a whole package."""
     return f"{path}   (directory - governs every file below)" if path.endswith("/") else path
 
 
