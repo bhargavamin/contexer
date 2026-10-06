@@ -482,16 +482,17 @@ def _review_json(rest: list) -> None:
     for a machine reader (the Claude Code mod's in-session pane), and one action per call.
 
     With no action it prints `console_api.review_queue`. With one it settles one item through
-    the same store calls the interactive loop below makes (`keep <id> --over <id>` settles a
-    pair of contradicting current decisions through `conflicts.keep_current_side`), then prints `{ok, message, queue}`,
-    the queue as it stands afterwards, so a caller redraws from the one reply.
-    Every outcome is ONE JSON object on stdout, refusals and store failures included, and a
-    refusal exits 1: the caller is a program, so it must never see a prompt or a traceback.
-    `keep` is checked against the contradiction pair (`conflicts.keep_current_side`), not a
-    pending item. Otherwise only the actions `review.item_actions` offers for that item's kind
-    are accepted, so a
-    retirement or a reconsideration still goes through `contexer review`, which asks for the
-    reason or wording it needs."""
+    the same store calls the interactive loop below makes, then prints `{ok, message, queue}`,
+    the queue as it stands afterwards, so a caller redraws from the one reply (`queue` is left
+    out when that read fails after the action). Every outcome is ONE JSON object on stdout,
+    refusals and store failures included, and a refusal exits 1: the caller is a program, so it
+    must never see a prompt or a traceback.
+
+    `keep <id> --over <id>` settles a pair of contradicting current decisions and is checked
+    against that pair (`conflicts.keep_current_side`), not a pending item. Otherwise only the
+    actions `review.item_actions` offers for the item's kind are accepted, re-checked inside
+    the store lock, so a retirement or a reconsideration still goes through `contexer review`,
+    which asks for the reason or wording it needs."""
     from contexer import conflicts, console_api, review, store
 
     def answer(ok: bool, message: str, repo_path: str | None = None) -> None:
