@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.50.1](https://github.com/bhargavamin/contexer/compare/v0.50.0...v0.50.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **guard:** collapse anchor siblings only when the list exceeds the cap ([#394](https://github.com/bhargavamin/contexer/issues/394)) ([d180d81](https://github.com/bhargavamin/contexer/commit/d180d81e8526dd40af9b43055d11fd010a1e4708))
+* **prompt-capture:** exclude slash option pairs from prohibition detection ([#392](https://github.com/bhargavamin/contexer/issues/392)) ([d938a95](https://github.com/bhargavamin/contexer/commit/d938a95f30dcde55bd3f74dfdbc8dcf67f650a65))
+* **retrieval:** rank literal get_context matches by relevance before the cap ([#393](https://github.com/bhargavamin/contexer/issues/393)) ([853f7f1](https://github.com/bhargavamin/contexer/commit/853f7f183cb13133167ece0675d614bb907bb0b3)), closes [#352](https://github.com/bhargavamin/contexer/issues/352)
+
 ## [0.50.0](https://github.com/bhargavamin/contexer/compare/v0.49.5...v0.50.0) (2026-10-04)
 
 
