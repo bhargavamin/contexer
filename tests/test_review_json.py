@@ -377,6 +377,28 @@ class TestRefusals:
         code, out = _run(capsys, "retire", eid)
         assert code == 1 and out["ok"] is False
 
+    def test_an_action_picked_before_another_session_approved_is_refused(
+            self, in_repo, monkeypatch, capsys):
+        # The pane shows a new capture; another session approves it before the click lands.
+        eid = _pending(in_repo)
+        shown = store.get_pending_decisions(in_repo)
+        assert store.approve_decision(in_repo, eid, "approve")[0]
+        monkeypatch.setattr(store, "get_pending_decisions", lambda _repo: shown)
+        code, out = _run(capsys, "ignore", eid)
+        assert code == 1 and out["ok"] is False and "changed since" in out["message"]
+        assert store.entry_status(_entry(in_repo, eid)) == "approved", "not retired"
+
+    def test_an_action_picked_before_a_proposal_arrived_is_refused(
+            self, in_repo, monkeypatch, capsys):
+        eid = _approved(in_repo)
+        _with_update(in_repo, eid)
+        shown = store.get_pending_decisions(in_repo)
+        assert store.approve_decision(in_repo, eid, "dismiss")[0]
+        monkeypatch.setattr(store, "get_pending_decisions", lambda _repo: shown)
+        code, out = _run(capsys, "approve", eid)
+        assert code == 1 and out["ok"] is False
+        assert _entry(in_repo, eid)["content"] == STANDING, "nothing promoted"
+
     def test_an_action_without_an_id_is_refused(self, in_repo, capsys):
         code, out = _run(capsys, "approve")
         assert code == 1 and out["ok"] is False

@@ -547,7 +547,20 @@ def _review_json(rest: list) -> None:
                           "run `contexer review` in a terminal.", repo_path)
             return
 
-        ok, message = store.approve_decision(repo_path, entry_id, action, content)
+        def still_asks(live: dict) -> str | None:
+            # The kind and actions above came from a read before the lock. Another session may
+            # have settled or re-proposed this decision since, and an action picked for one
+            # question must not answer another: an `ignore` meant for a new capture would
+            # retire a decision that was just approved.
+            now = review.item_kind(live)
+            waiting = now != "new" or store.entry_status(live) == "pending_approval"
+            if now == kind and waiting and action in review.item_actions(now):
+                return None
+            return ("That decision changed since it was shown, so nothing was done. "
+                    "Review it again.")
+
+        ok, message = store.approve_decision(repo_path, entry_id, action, content,
+                                             precondition=still_asks)
         if ok and action in ("approve", "edit"):
             # Imported only here: it pulls in the Teams client, and the queue read the mod
             # makes after every turn must not pay for it.
