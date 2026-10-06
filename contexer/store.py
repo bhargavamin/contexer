@@ -1341,30 +1341,47 @@ _SOFT_PROSE_EXCLUDE = re.compile(
 
 # A slash-joined pair of one option and its negation names two choices ("the adopt/don't
 # adopt threshold", "do not go/go criteria"), not a prohibition. Unstripped, it stored a task
-# list as an approved constraint (#374). Only a real pair counts, the same word on both sides
-# (a shared 3+ letter prefix tolerates a typo such as "adopt/dont adop"), so two joined
-# prohibitions ("Do not/should not commit secrets") keep their trigger.
+# list as an approved constraint (#374). Only a real pair counts: the same phrase of up to
+# three words on both sides ("go live/do not go live"), with a shared 3+ letter prefix on its
+# last word tolerating a typo such as "adopt/dont adop". Two joined prohibitions ("Do not/should
+# not commit secrets", "use print/don't log secrets") keep their trigger.
 _NEGATION = r"do\s*n['’]?t|do\s+not"
-_OPTION_PAIR = re.compile(
-    rf"\bdo\s*/\s*(?:{_NEGATION})\b"   # first: "do/don't list" is the bare pair, not do vs list
-    rf"|\b(?P<a>\w+)\s*/\s*(?:{_NEGATION})\s+(?P<b>\w+)"
-    rf"|\b(?:{_NEGATION})\s+(?P<c>\w+)\s*/\s*(?P<d>\w+)",
-    re.IGNORECASE,
-)
+_BARE_OPTION_PAIR = re.compile(
+    rf"\bdo\s*/\s*(?:{_NEGATION})\b|\b(?:{_NEGATION})\s*/\s*do\b", re.IGNORECASE)
+_NEGATED_AFTER_SLASH = re.compile(rf"/\s*(?:{_NEGATION})\s+", re.IGNORECASE)
+_NEGATED_BEFORE_SLASH = re.compile(
+    rf"\b(?:{_NEGATION})\s+(?P<option>(?:\w+\s+){{0,2}}\w+)\s*/", re.IGNORECASE)
+_OPTION_PHRASE_WORDS = 3
 
 
-def _same_option(a: str, b: str) -> bool:
-    a, b = a.lower(), b.lower()
-    return a == b or (min(len(a), len(b)) >= 3 and (a.startswith(b) or b.startswith(a)))
+def _same_option(a: list[str], b: list[str]) -> bool:
+    if not a or len(a) != len(b):
+        return False
+    *head_a, last_a = (w.lower() for w in a)
+    *head_b, last_b = (w.lower() for w in b)
+    return head_a == head_b and (last_a == last_b or (
+        min(len(last_a), len(last_b)) >= 3
+        and (last_a.startswith(last_b) or last_b.startswith(last_a))))
 
 
 def _strip_option_pairs(text: str) -> str:
-    def strip(match: re.Match) -> str:
-        first, second = (match.group("a"), match.group("b")) if match.group("a") else (
-            match.group("c"), match.group("d"))
-        # No captured words means the bare "do/don't" pair matched.
-        return "" if first is None or _same_option(first, second) else match.group(0)
-    return _OPTION_PAIR.sub(strip, text)
+    """Drop the negation from slash-joined option pairs, leaving other prohibitions intact."""
+    def after_slash(match: re.Match) -> str:   # "go live/do not go live"
+        before = re.findall(r"\w+", match.string[:match.start()])
+        after = re.findall(r"\w+", match.string[match.end():])
+        paired = any(_same_option(before[-k:], after[:k])
+                     for k in range(1, _OPTION_PHRASE_WORDS + 1))
+        return "/" if paired else match.group(0)
+
+    def before_slash(match: re.Match) -> str:  # "do not go live/go live"
+        option = match.group("option").split()
+        after = re.findall(r"\w+", match.string[match.end():])
+        return (" ".join(option) + "/" if _same_option(option, after[:len(option)])
+                else match.group(0))
+
+    text = _BARE_OPTION_PAIR.sub("", text)
+    text = _NEGATED_AFTER_SLASH.sub(after_slash, text)
+    return _NEGATED_BEFORE_SLASH.sub(before_slash, text)
 
 # Profanity and frustration words that carry no directive meaning.
 # These are stripped before storing so the rule itself is preserved cleanly.
