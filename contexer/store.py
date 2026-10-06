@@ -1335,14 +1335,36 @@ _SOFT_PROSE_EXCLUDE = re.compile(
     r"have\s+to|need\s+to|get|understand)\b"
     r"|do\s+not\s+(?:worry|hesitate|bother|forget|mind|know|think|see|understand)\b"
     r"|i\s+do\s*n['’]?t\b"     # "I don't ..." - speaking about self, not a rule
-    r")"
-    # A slash-joined alternative names a pair of options ("the adopt/don't adopt threshold",
-    # "go/do not go criteria"), not a prohibition. Unstripped, it stored a task list as an
-    # approved constraint (#374).
-    r"|/\s*do(?:\s*n['’]?t|\s+not)\b"
-    r"|\bdo(?:\s*n['’]?t|\s+not)\s*/",
+    r")",
     re.IGNORECASE,
 )
+
+# A slash-joined pair of one option and its negation names two choices ("the adopt/don't
+# adopt threshold", "do not go/go criteria"), not a prohibition. Unstripped, it stored a task
+# list as an approved constraint (#374). Only a real pair counts, the same word on both sides
+# (a shared 3+ letter prefix tolerates a typo such as "adopt/dont adop"), so two joined
+# prohibitions ("Do not/should not commit secrets") keep their trigger.
+_NEGATION = r"do\s*n['’]?t|do\s+not"
+_OPTION_PAIR = re.compile(
+    rf"\bdo\s*/\s*(?:{_NEGATION})\b"   # first: "do/don't list" is the bare pair, not do vs list
+    rf"|\b(?P<a>\w+)\s*/\s*(?:{_NEGATION})\s+(?P<b>\w+)"
+    rf"|\b(?:{_NEGATION})\s+(?P<c>\w+)\s*/\s*(?P<d>\w+)",
+    re.IGNORECASE,
+)
+
+
+def _same_option(a: str, b: str) -> bool:
+    a, b = a.lower(), b.lower()
+    return a == b or (min(len(a), len(b)) >= 3 and (a.startswith(b) or b.startswith(a)))
+
+
+def _strip_option_pairs(text: str) -> str:
+    def strip(match: re.Match) -> str:
+        first, second = (match.group("a"), match.group("b")) if match.group("a") else (
+            match.group("c"), match.group("d"))
+        # No captured words means the bare "do/don't" pair matched.
+        return "" if first is None or _same_option(first, second) else match.group(0)
+    return _OPTION_PAIR.sub(strip, text)
 
 # Profanity and frustration words that carry no directive meaning.
 # These are stripped before storing so the rule itself is preserved cleanly.
@@ -2107,7 +2129,7 @@ def _is_prescriptive_constraint(text: str) -> tuple[bool, str]:
         return False, ""
     # Strip soft conversational prose ("don't worry", "I don't know"); if a broadened
     # prohibition trigger only matched inside that prose, it was not a directive.
-    deprosed = _SOFT_PROSE_EXCLUDE.sub("", t)
+    deprosed = _strip_option_pairs(_SOFT_PROSE_EXCLUDE.sub("", t))
     if not _CONSTRAINT_TRIGGER.search(deprosed):
         return False, ""
     # Strip descriptive personal instances; if nothing remains, it was purely descriptive

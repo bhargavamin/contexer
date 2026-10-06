@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "fixture_version": "1.10.0",
+  "fixture_version": "1.11.0",
   "required_case_ids": [
     "P01-always", "P01-task-list-handoff", "P01-always-squash-merge", "P01-task-staging-repro", "P01-session-handler", "P01-task-runner",
     "P01-and-durable-sibling", "P01-task-unpunctuated", "P01-and-durable-continuation",
@@ -72,6 +72,10 @@
     {"case_id":"P01-task-list-delegated","family":"P01","kind":"capture","prompt":"I gave those to another agent; now fix the flaky retry test","expected":{"result_status":null,"entry_count":0}},
     {"case_id":"P01-slash-option-label","family":"P01","kind":"capture","prompt":"Draft the adopt/don't adopt thresholds for the pilot","expected":{"result_status":null,"entry_count":0}},
     {"case_id":"P01-slash-option-label-do-not","family":"P01","kind":"capture","prompt":"Write up the go/do not go criteria for the billing service launch","expected":{"result_status":null,"entry_count":0}},
+    {"case_id":"P01-slash-option-label-reversed","family":"P01","kind":"capture","prompt":"Draft the don't adopt/adopt thresholds for the pilot","expected":{"result_status":null,"entry_count":0}},
+    {"case_id":"P01-slash-option-label-reversed-do-not","family":"P01","kind":"capture","prompt":"Write up the do not go/go criteria for the billing service launch","expected":{"result_status":null,"entry_count":0}},
+    {"case_id":"P01-slash-option-label-bare-do","family":"P01","kind":"capture","prompt":"Write the do/don't list for onboarding new engineers","expected":{"result_status":null,"entry_count":0}},
+    {"case_id":"P01-slash-joined-prohibitions","family":"P01","kind":"capture","prompt":"Do not/should not commit secrets","expected":{"result_status":"approved","result_content":"Do not/should not commit secrets","entry_count":1,"live_status":"approved","live_content":"Do not/should not commit secrets"}},
     {"case_id":"P01-always-squash-merge","family":"P01","kind":"capture","prompt":"Always merge PRs by squash","expected":{"result_status":"approved","result_content":"Always merge PRs by squash","entry_count":1,"live_status":"approved","live_content":"Always merge PRs by squash"}},
     {"case_id":"P01-dont-adopt-unlicensed","family":"P01","kind":"capture","prompt":"Don't adopt a dependency without a license review","expected":{"result_status":"approved","result_content":"Don't adopt a dependency without a license review","entry_count":1,"live_status":"approved","live_content":"Don't adopt a dependency without a license review"}},
 
