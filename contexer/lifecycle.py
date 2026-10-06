@@ -489,7 +489,8 @@ def tombstone_entry(repo_path: str, entry_id: str, *, reason: str, replacement_i
 
 
 def retire_decision(repo_path: str, entry_id: str, reason: str,
-                    replacement_id: str | None = None, *, precondition=None) -> tuple[bool, str]:
+                    replacement_id: str | None = None, *, precondition=None,
+                    stale_guard: bool = True) -> tuple[bool, str]:
     """Retire a live decision: it leaves active context for the tombstone sidecar, keeping its
     full revision and lifecycle history. Returns (ok, message).
 
@@ -497,14 +498,16 @@ def retire_decision(repo_path: str, entry_id: str, reason: str,
     the explicit human action, so the lifecycle actor is "human" either way. A proposal made
     against a superseded revision is refused here rather than applied blind (see
     `lifecycle_proposal_stale`); a direct retirement with no sitting proposal has no staleness
-    question to answer."""
+    question to answer. `stale_guard=False` is for a caller whose retirement does not act on
+    the sitting proposal at all (`conflicts.keep_current_side`, whose basis is the developer's
+    pick of the other side): the proposal is dropped with the retirement either way."""
     if not (reason or "").strip():
         return False, ("A retirement needs a reason - it is recorded permanently as the "
                        "decision's lifecycle history.")
     replacement_id = (replacement_id or "").strip() or None
     ok, message, entry = tombstone_entry(
         repo_path, entry_id, reason=reason.strip(), replacement_id=replacement_id,
-        deleted_by="human", stale_guard=True, precondition=precondition)
+        deleted_by="human", stale_guard=stale_guard, precondition=precondition)
     if not ok:
         return False, message
     what = "Superseded" if replacement_id else "Retired"

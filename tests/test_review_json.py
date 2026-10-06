@@ -358,6 +358,25 @@ class TestKeepOneSideOfAConflict:
         assert code == 1 and out["ok"] is False
         assert b in [e["id"] for e in store.load(in_repo)["entries"]], "nothing retired"
 
+    def test_keep_retires_a_side_carrying_a_stale_retirement_proposal(self, in_repo, capsys):
+        # The pane cannot dismiss that proposal, and the keep is not acting on it: the
+        # developer's pick is the basis, so a proposal judged on an older revision must not
+        # block it.
+        left, right = _conflicting_pair(in_repo)
+        assert lifecycle.propose_lifecycle(in_repo, right, "retire", "superseded",
+                                           source="ai")["ok"]
+        with store.store_lock(store.repo_slug(in_repo)):
+            data = store.load_for_update(in_repo)
+            store.entry_by_id(data["entries"], right)["proposed_lifecycle"][
+                "basis_revision_id"] = "an-earlier-revision"
+            store.save(in_repo, data)
+        assert lifecycle.lifecycle_proposal_stale(_entry(in_repo, right))
+        code, out = _run(capsys, "keep", left, "--over", right)
+        assert code == 0 and out["ok"] is True, out["message"]
+        graveyard, _ = store.read_deleted(in_repo)
+        retired = next(e for e in graveyard["entries"] if e["id"] == right)
+        assert "proposed_lifecycle" not in retired
+
     def test_keep_needs_the_other_side(self, in_repo, capsys):
         left, _right = _conflicting_pair(in_repo)
         code, out = _run(capsys, "keep", left)

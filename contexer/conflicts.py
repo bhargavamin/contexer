@@ -147,7 +147,9 @@ def keep_current_side(repo_path: str, kept_id: str, other_id: str) -> tuple[bool
         repo_path, other_id,
         f"Contradicted {title!r} ({kept_id[:8]}): {CURRENT_PAIR_REASON} The developer kept "
         "that one in the in-session review pane.",
-        replacement_id=kept_id, precondition=still_keepable)
+        # The developer's pick is the basis here, not a retirement proposal sitting on the other
+        # side; a stale one must not refuse the keep with advice the pane cannot act on.
+        replacement_id=kept_id, precondition=still_keepable, stale_guard=False)
 
 
 def render_current_pair(left: dict, right: dict, *, seen: set | None = None) -> list[str]:
