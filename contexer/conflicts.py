@@ -19,6 +19,7 @@ documents at its own top: they're looked up at call time, so anything a test mon
 """
 
 import hashlib
+import json
 import re
 from datetime import datetime, timezone
 
@@ -123,7 +124,26 @@ def can_keep(entry: dict) -> bool:
             and (entry.get("created_by") == "human" or entry.get("approved_by") == "human"))
 
 
-def keep_current_side(repo_path: str, kept_id: str, other_id: str) -> tuple[bool, str]:
+def pair_basis(left: dict, right: dict) -> str:
+    """A short fingerprint of a contradiction as the review pane shows it: each side's wording,
+    title, applicability, status, whether it may be kept, and any pending Suggested Update.
+    `keep_current_side` recomputes it inside the retirement's lock, so a Keep pressed on a card
+    whose sides another session has since changed is refused instead of retiring a decision in
+    favour of wording the developer never saw. Order-independent: the pair is the same pair
+    whichever side comes first."""
+    def side(entry: dict) -> dict:
+        return {"id": entry.get("id"), "current": revisions.current_content(entry),
+                "title": entry.get("title") or "", "status": store.entry_status(entry),
+                "applies_when": list(entry.get("applies_when") or []),
+                "can_keep": can_keep(entry),
+                "proposed": (entry.get("proposed_revision") or {}).get("content")}
+    shown = sorted((side(left), side(right)), key=lambda one: str(one["id"]))
+    blob = json.dumps(shown, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def keep_current_side(repo_path: str, kept_id: str, other_id: str,
+                      expect: str = "") -> tuple[bool, str]:
     """Settle a contradiction the developer chose a side of: retire `other_id` as superseded by
     `kept_id`, recording why. The pair, and that the kept side is human-ratified (`can_keep`), are
     re-checked under the retirement's own lock, so a pair that changed or vanished since it was
@@ -141,6 +161,8 @@ def keep_current_side(repo_path: str, kept_id: str, other_id: str) -> tuple[bool
         if not can_keep(next(e for e in live if e.get("id") == kept_id)):
             return ("Only a decision you stated or approved can be kept over a contradiction. "
                     "Nothing was retired.")
+        if expect and pair_basis(*live) != expect:
+            return "Those decisions changed since they were shown, so nothing was retired. Review them again."
         return None
 
     return lifecycle.retire_decision(

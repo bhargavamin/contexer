@@ -91,14 +91,22 @@ async function take($: EngineInterface): Promise<number> {
   return (await update($, order, o => ({ ...o, ticket: o.ticket + 1 }))).ticket
 }
 
+// The snapshot the ranking last accepted. Set inside the same synchronous updater that takes
+// the ranking's decision, and read inside the queue write's own updater, so the write always
+// stores the newest accepted snapshot: an older reply that passed its check, then lost the
+// race to a newer one's write, rewrites the newer snapshot instead of its own.
+let accepted: ReviewQueue | null = null
+
 async function land($: EngineInterface, mine: number, next: ReviewQueue | null): Promise<boolean> {
   let isLatest = false
   await update($, order, o => {
     isLatest = mine >= o.landed
-    return isLatest ? { ...o, landed: mine } : o
+    if (!isLatest) return o
+    accepted = next
+    return { ...o, landed: mine }
   })
   if (!isLatest) return false
-  await update($, queue, () => next)
+  await update($, queue, () => accepted)
   return true
 }
 
@@ -588,7 +596,7 @@ export const register: Register = on => {
                 key={`keep-${key}-${one.id}`}
                 label={`Keep ${clip(one.title, KEEP_TITLE_CHARS)}`}
                 variant="primary"
-                onPress={() => act($, 'keep', one.id, { over: other.id })}
+                onPress={() => act($, 'keep', one.id, { over: other.id, expect: pair.basis })}
               />
             ))}
           </Box>

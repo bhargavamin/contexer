@@ -29,9 +29,9 @@ Commands:
   review        Interactively approve, edit, ignore, or retire pending engineering
                 decisions; also surfaces possibly-overlapping rules for consolidation.
                 review --json [approve|edit|ignore|dismiss <id> [--content TEXT]
-                [--expect BASIS] | keep <id> --over <id>] prints the queue (or settles
-                one item) as JSON for the Claude Code mod; --expect refuses unless the
-                item still has the queue's `basis`.
+                [--expect BASIS] | keep <id> --over <id> [--expect BASIS]] prints the
+                queue (or settles one item) as JSON for the Claude Code mod; --expect
+                refuses unless the item or pair still has the queue's `basis`.
   retire        Retire one decision - it leaves active context, keeping its history:
                 retire <id> --reason <text> [--replaced-by <id>].
   restore       Bring one retired decision back: restore <id> [--reason <text>].
@@ -491,7 +491,8 @@ def _review_json(rest: list) -> None:
     must never see a prompt or a traceback.
 
     `keep <id> --over <id>` settles a pair of contradicting current decisions and is checked
-    against that pair (`conflicts.keep_current_side`), not a pending item. Otherwise only the
+    against that pair (`conflicts.keep_current_side`, with `--expect` the pair's `basis` from
+    `conflicts.pair_basis`), not a pending item. Otherwise only the
     actions `review.item_actions` offers for the item's kind are accepted, re-checked inside
     the store lock, so a retirement or a reconsideration still goes through `contexer review`,
     which asks for the reason or wording it needs. `--expect` takes the item's `basis` from the
@@ -542,7 +543,7 @@ def _review_json(rest: list) -> None:
             if not other:
                 answer(False, f"`review --json {action}` needs the other side: --over <id>.")
                 return
-            answer(*conflicts.keep_current_side(repo_path, entry_id, other), repo_path)
+            answer(*conflicts.keep_current_side(repo_path, entry_id, other, expect), repo_path)
             return
         if action == "edit" and not content:
             answer(False, "`review --json edit` needs the new wording: --content TEXT.")

@@ -225,6 +225,22 @@ class TestConflicts:
         (item,) = console_api.review_queue(tmp_repo)["items"]
         assert item["proposed"]["applies_when"] is None, "inherits on approval, not 'always'"
 
+    def test_an_inherited_scope_is_part_of_the_basis(self, tmp_repo):
+        # The card shows the current scope beside an inheriting proposal, and approving adopts
+        # it, so a change to that scope alone must change the basis.
+        eid = _approved(tmp_repo)
+        _with_update(tmp_repo, eid)
+        data = store.load(tmp_repo)
+        entry = next(e for e in data["entries"] if e["id"] == eid)
+        entry["applies_when"] = ["the decision store"]
+        entry["proposed_revision"].pop("applies_when", None)
+        store.save(tmp_repo, data)
+        shown = console_api.review_basis(_entry(tmp_repo, eid))
+        data = store.load(tmp_repo)
+        next(e for e in data["entries"] if e["id"] == eid)["applies_when"] = ["team sync"]
+        store.save(tmp_repo, data)
+        assert console_api.review_basis(_entry(tmp_repo, eid)) != shown
+
     def test_an_unknown_memo_choice_is_no_pick(self, tmp_repo):
         eid = _approved(tmp_repo)
         _with_update(tmp_repo, eid)
@@ -399,6 +415,33 @@ class TestKeepOneSideOfAConflict:
         code, out = _run(capsys, "keep", left, "--over", right)
         assert code == 1 and out["ok"] is False
         assert third in [e["id"] for e in store.load(in_repo)["entries"]]
+
+    def test_a_pair_carries_the_basis_of_what_it_shows(self, tmp_repo):
+        left, right = _conflicting_pair(tmp_repo)
+        (pair,) = console_api.review_queue(tmp_repo)["conflicts"]
+        assert pair["basis"] == conflicts.pair_basis(_entry(tmp_repo, right), _entry(tmp_repo, left))
+        assert len(pair["basis"]) == 16
+
+    def test_keep_with_the_basis_the_pane_showed_goes_through(self, in_repo, capsys):
+        left, right = _conflicting_pair(in_repo)
+        (pair,) = console_api.review_queue(in_repo)["conflicts"]
+        code, out = _run(capsys, "keep", left, "--over", right, "--expect", pair["basis"])
+        assert code == 0 and out["ok"] is True
+        assert right not in [e["id"] for e in store.load(in_repo)["entries"]], "retired"
+
+    def test_keep_refuses_a_pair_whose_wording_changed_since_shown(self, in_repo, capsys):
+        # Still contradicting and still keepable, but one side reads differently now: a Keep
+        # pressed on the old card must not retire anything.
+        left, right = _conflicting_pair(in_repo)
+        (pair,) = console_api.review_queue(in_repo)["conflicts"]
+        data = store.load(in_repo)
+        side = next(e for e in data["entries"] if e["id"] == left)
+        side["title"] = "Prefix every version with v"
+        store.save(in_repo, data)
+        assert conflicts.find_current_pair(store.load(in_repo)["entries"], left, right)
+        code, out = _run(capsys, "keep", left, "--over", right, "--expect", pair["basis"])
+        assert code == 1 and out["ok"] is False and "changed since" in out["message"]
+        assert right in [e["id"] for e in store.load(in_repo)["entries"]], "nothing retired"
 
     def test_keep_refuses_two_decisions_that_do_not_conflict(self, in_repo, capsys):
         a = _seed_entry(in_repo, STANDING)["id"]

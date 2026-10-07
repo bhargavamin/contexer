@@ -428,7 +428,10 @@ def review_basis(entry: dict) -> str | None:
     if not review.item_actions(kind):
         return None
     current = revisions.current_content(entry)
+    # The current scope too: an update that inherits it (`applies_when` absent on the proposal)
+    # shows it on the card and adopts it on approval, so a change to it alone must not pass.
     shown = {"kind": kind, "current": current,
+             "current_applies_when": list(entry.get("applies_when") or []),
              "anchors": review_impact.confirmed_anchors(entry)}
     if kind == "update":
         prop = entry.get("proposed_revision") or {}
@@ -522,6 +525,7 @@ def current_conflicts(repo_path: str) -> list[dict]:
             "kind": "current_conflict",
             "reason": conflicts.CURRENT_PAIR_REASON,
             "decisions": sides,
+            "basis": conflicts.pair_basis(left, right),
             "actions": (review.item_actions("current_conflict")
                         if any(side["can_keep"] for side in sides) else []),
         })

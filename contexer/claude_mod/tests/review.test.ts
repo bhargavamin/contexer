@@ -555,6 +555,15 @@ describe('review pane', () => {
       expect(await pane.find({ key: `approve-${LATER.id}` })).toBeUndefined()
     })
 
+    test(`Keep sends back the basis of the pair it was pressed on (${surface})`, async ($, on) => {
+      const calls = fakeContexer(on, [], 1, [{ ...PAIR, basis: 'feedc0de12345678' }])
+      await start($, surface)
+      const pane = await mountPane($, surface)
+      await pane.press({ key: 'keep-dddd4444-eeee5555-eeee5555' })
+      expect(calls[calls.length - 1]?.slice(-6))
+        .toEqual(['keep', 'eeee5555', '--over', 'dddd4444', '--expect', 'feedc0de12345678'])
+    })
+
     test(`the focusable controls sit above the card's text (${surface})`, async ($, on) => {
       // The surface keeps the focused element in view on each redraw; a ring below a long card
       // pulled the window past its title after every action.

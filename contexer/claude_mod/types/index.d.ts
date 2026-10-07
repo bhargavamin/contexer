@@ -63,6 +63,8 @@ export type CurrentConflict = {
   reason: string
   decisions: [ConflictSide, ConflictSide]
   actions: ConflictAction[]
+  /** Fingerprint of both sides as shown (conflicts.pair_basis); Keep sends it back as `--expect`. */
+  basis?: string
 }
 
 export type ReviewQueue = {
