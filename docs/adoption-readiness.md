@@ -6,19 +6,48 @@
 
 ### Ready for a team pilot
 
-**The same answers as a hand-kept `CLAUDE.md`, 30% lower cost per session at 150 rules, and decisions your team can approve, audit, export and erase.**
+**Your team's rules, approved by a person and delivered to every developer's AI agent, at a lower cost than a growing `CLAUDE.md`.**
 
-**October 2026.** Teams adopting AI coding agents quickly accumulate rules the agents must follow, usually in a `CLAUDE.md` or a folder of decision docs that nobody owns, nobody approves and nothing checks. Contexer v0.50.1 keeps those decisions in a local store, hands the agent the relevant ones at session start and with each prompt, and gives the team the controls a shared rulebook needs: human approval, revision history, conflict marking, export and erasure.
+**October 2026.** Picture a team of eight engineers, each working with Claude Code, Cursor or Codex. The team has rules the agents must follow: "never log customer ids", "keep the record service single-threaded", "version strings are bare numbers". Today those rules live in a `CLAUDE.md` that keeps growing, that nobody owns and that nothing checks. A rule agreed in a chat never makes it into the file. Two rules written months apart quietly contradict each other, and the agent picks one. The lead finds out in code review, or in production.
 
-In the [adoption benchmark](benchmark.md) (1,242 sessions, scored by code), agents using Contexer got **109 of 114** tasks right with a 150-rule store, against **108** with a full `CLAUDE.md` and **108** with decision docs, at **$0.076** per session against $0.109 and $0.103. When two current rules contradicted each other, the agent asked the developer in **12 of 12** runs, against 7 of 12 with the static files. Whenever the needed rule reached the agent, it followed it.
+Contexer v0.50.1 keeps those rules as decisions with an owner, a history and an approval status, and gives every agent the ones that matter for the task in front of it.
 
-Contexer fails safe. Hooks never block a session or a commit by failing; a corrupt store keeps sessions running and refuses to be overwritten; data stays on the developer's machine unless someone shares a decision explicitly, and sharing with redaction switched off always warns and asks for confirmation. Every decision keeps its history, can be exported to Markdown or ADR files, and can be erased by a human when it holds something sensitive.
+#### How a team uses it
 
-For a team, Contexer Teams (early access) adds a shared rulebook that a lead reviews before it reaches every teammate's agent, and an advisory check that compares each pull request with the team's approved decisions. Teams has not been benchmarked yet; the benchmark measured one developer's sessions.
+1. **Write the rules down once.** On first run in a repository, Contexer reads the code and existing docs and proposes starting context, clearly labelled as not yet approved. Developers add the rules that matter by telling their agent "store that decision", or with `contexer review`.
+2. **A person approves what becomes a rule.** Rules an agent proposes, and firm "must"/"never" rules, wait for human approval before they count as policy; with Contexer Teams, a lead approves what becomes a team rule. Every change keeps the previous version.
+3. **Every agent gets the relevant rules.** At session start in Claude Code, Cursor, Codex and Gemini CLI, and with each prompt in all of them except Cursor, without loading the whole rulebook every time.
+4. **Contradictions become questions.** When two current rules clash, agents using Contexer stopped and asked the developer which applied, instead of picking one.
+5. **With Contexer Teams (early access),** the approved rulebook is shared across the team, each teammate's agent picks up an approved change on its next prompt, and pull requests can be checked against the team's decisions.
 
-What a pilot should watch, because capture is still the weak point: rules a developer states during a session reach the store in only **6 of 24** runs in the benchmark, against 24 of 24 for a `CLAUDE.md` the agent is told to maintain ([#385](https://github.com/bhargavamin/contexer/issues/385)), so a person should add or approve the rules that matter. Rules worded very differently from the task can be missed ([#390](https://github.com/bhargavamin/contexer/issues/390)). The human time upkeep takes has not been measured yet ([#363](https://github.com/bhargavamin/contexer/issues/363)).
+#### What the benchmark showed
 
-**To start a pilot:** `uv tool install contexer` then `contexer install` ([quick start](../README.md#quick-start)), keep your existing `CLAUDE.md` for stable instructions, and set your adopt / don't-adopt bar before you begin ([last question below](#how-should-we-run-a-pilot)).
+In the [adoption benchmark](benchmark.md) (1,242 sessions, scored by code, one developer's sessions on synthetic tasks), with 150 rules:
+
+- **Same accuracy as a `CLAUDE.md`:** 109 of 114 tasks right with Contexer, 108 with a full `CLAUDE.md`, 108 with decision docs.
+- **30% lower cost per session:** $0.076 against $0.109, because only the relevant rules are sent. Growing the rulebook from 34 to 150 rules raised a `CLAUDE.md`'s cost by 36% and Contexer's by 15%.
+- **Asked first on contradicting rules:** 12 of 12 runs, against 7 of 12 with the static files.
+- **Rules that reached the agent were followed:** every time.
+
+#### What you can count on
+
+- **It never blocks work by failing.** Hooks are best-effort, and the commit guard skips itself on any internal error.
+- **Nothing is lost to a corrupt file.** Sessions keep running, and Contexer refuses to overwrite an unreadable store.
+- **Data stays on the developer's machine** unless someone shares a decision. Shared decisions pass through secret redaction, and switching redaction off always warns and asks for confirmation.
+- **You can leave or clean up.** Export decisions to Markdown or ADR files, erase one that holds a secret, or uninstall cleanly.
+
+#### What to watch in a pilot
+
+- **Capture is the weak point.** In the benchmark, a rule a developer stated during a session reached the store in only 6 of 24 runs, against 24 of 24 for a `CLAUDE.md` the agent was told to maintain ([#385](https://github.com/bhargavamin/contexer/issues/385)). Plan for a person to add or approve the rules that matter.
+- **Rules worded very differently from the task can be missed** ([#390](https://github.com/bhargavamin/contexer/issues/390)).
+- **Upkeep time and Teams are not measured yet.** The benchmark measured one developer's sessions ([#363](https://github.com/bhargavamin/contexer/issues/363)).
+
+#### Start a two-week pilot
+
+1. Pick one active repository and two or three developers. Install with `uv tool install contexer` then `contexer install` ([quick start](../README.md#quick-start)). Keep your existing `CLAUDE.md` for stable instructions.
+2. In the first session, accept the first-run setup, then add or approve the 10–20 rules that matter most.
+3. Agree your adopt / don't-adopt bar before you start ([how](#how-should-we-run-a-pilot)).
+4. Over the two weeks, note: rule violations caught in code review, contradictions the agent asked about, rules stated in chat that reached the store on their own, and minutes spent reviewing decisions.
 
 ## Frequently asked questions
 
