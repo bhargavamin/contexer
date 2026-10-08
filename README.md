@@ -43,9 +43,16 @@
 
 Capture engineering decisions and their reasoning, review changes, and bring the right guidance into **Claude Code, Cursor, Codex, and Gemini CLI**. Share approved decisions through optional Contexer Teams and enforce selected rules with optional commit checks.
 
-Contexer keeps a reviewable, versioned record of what was decided, why, and whether it has been approved. The same local decision store works across supported assistants, so your engineering guidance is not tied to one agent's conversation history. Review, revision history, team approval, and explicitly enabled checks turn recorded decisions into guidance you can manage and verify.
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/benchmark-dark.svg">
+    <img alt="Adoption benchmark at 150 team rules: tasks right out of 114, Contexer 109, decision docs 108, CLAUDE.md 108; cost per session, Contexer $0.076, decision docs $0.103, CLAUDE.md $0.109; asked before coding on contradicting rules, Contexer 12 of 12, decision docs 7 of 12, CLAUDE.md 7 of 12" src="assets/benchmark-light.svg" width="1000">
+  </picture>
+</p>
 
-**Proven in 1,242 benchmark sessions:** agents get the same answers as with a hand-kept `CLAUDE.md`, at 30% lower cost per session with 150 rules, and they stop to ask when two rules contradict (12 of 12 runs, against 7 of 12). [See the benchmark →](docs/benchmark.md)
+<p align="center"><sub>150 team rules · Claude Sonnet 5.5 · 1,242 sessions scored by code · synthetic tasks in one repository · <a href="docs/benchmark.md">benchmark</a></sub></p>
+
+Contexer keeps a reviewable, versioned record of what was decided, why, and whether it has been approved. The same local decision store works across supported assistants, so your engineering guidance is not tied to one agent's conversation history. Review, revision history, team approval, and explicitly enabled checks turn recorded decisions into guidance you can manage and verify.
 
 ### A simple example
 
@@ -204,7 +211,6 @@ The benchmark ran one developer's sessions; Teams itself has not been benchmarke
 - **Checks on pull requests, not just prompts.** Contexer Check compares each pull request's diff with the team's approved decisions and posts an advisory review comment. A lead can promote an individual decision so the optional Teams Guard check fails when a pull request drifts from it.
 - **A record of who decided what.** Team decisions keep their history, reviewers and approvals.
 
-
 ### See personal and team context in action
 
 Watch how Contexer handles your personal decisions and shared team context.
@@ -228,15 +234,6 @@ Full details: **[published limitations](docs/usage.md#limitations-read-this--we-
 ## Benchmarks
 
 We gave an AI coding agent 38 tasks that only come out right if it knows a team rule, and compared Contexer with a full `CLAUDE.md`, a folder of decision docs, and no rules, at 34 and 150 stored rules (1,242 sessions, scored by code).
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/benchmark-dark.svg">
-    <img alt="Adoption benchmark at 150 team rules: tasks right out of 114, Contexer 109, decision docs 108, CLAUDE.md 108; cost per session, Contexer $0.076, decision docs $0.103, CLAUDE.md $0.109; asked before coding on contradicting rules, Contexer 12 of 12, decision docs 7 of 12, CLAUDE.md 7 of 12" src="assets/benchmark-light.svg" width="1000">
-  </picture>
-</p>
-
-<p align="center"><sub>150 team rules · Claude Sonnet 5.5 · 1,242 sessions scored by code · synthetic tasks in one repository</sub></p>
 
 - **Same accuracy, lower cost:** 30% less per session than a full `CLAUDE.md`, because only the relevant rules are sent. At 34 rules decision docs led on accuracy (111 vs Contexer's 108).
 - **Asks instead of guessing:** when two current rules contradicted each other, agents using Contexer asked first every time.
