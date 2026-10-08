@@ -232,16 +232,15 @@ We gave an AI coding agent 38 tasks that only come out right if it knows a team 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/benchmark-dark.svg">
-    <img alt="Contexer adoption benchmark: as stored rules grow from 34 to 150, cost per session rises 36 to 37 percent for CLAUDE.md and decision docs and 15 percent for Contexer, at the same accuracy; when two current rules contradict, agents using Contexer asked the developer in 12 of 12 runs versus 7 of 12 for the static files" src="assets/benchmark-light.svg" width="1000">
+    <img alt="Adoption benchmark at 150 team rules: tasks right out of 114, Contexer 109, decision docs 108, CLAUDE.md 108; cost per session, Contexer $0.076, decision docs $0.103, CLAUDE.md $0.109; asked before coding on contradicting rules, Contexer 12 of 12, decision docs 7 of 12, CLAUDE.md 7 of 12" src="assets/benchmark-light.svg" width="1000">
   </picture>
 </p>
 
-- **Matches a hand-kept `CLAUDE.md` on accuracy:** 109 vs 108 of 114 tasks at 150 rules, and 108 vs 106 at 34 (decision docs led there with 111).
-- **Then costs less:** 30% less per session than a full `CLAUDE.md` at 150 rules, because only the relevant rules are sent.
-- **Contradicting rules:** at 150 rules Contexer asked before coding in 12 of 12 runs; the static files in 7 of 12.
-- **Not yet solved:** rules stated during a session reached the store in only 6 of 24 runs, against 24 of 24 for a `CLAUDE.md` the agent was told to maintain.
+<p align="center"><sub>150 team rules · Claude Sonnet 5.5 · 1,242 sessions scored by code · synthetic tasks in one repository</sub></p>
 
-These are synthetic tasks in one test repository, not a guarantee for every project. The report covers the method, how results evolved since the July study, raw session data, and every negative finding.
+- **Same accuracy, lower cost:** 30% less per session than a full `CLAUDE.md`, because only the relevant rules are sent. At 34 rules decision docs led on accuracy (111 vs Contexer's 108).
+- **Asks instead of guessing:** when two current rules contradicted each other, agents using Contexer asked first every time.
+- **Not yet solved:** rules stated during a session reached the store in only 6 of 24 runs, against 24 of 24 for a `CLAUDE.md` the agent was told to maintain.
 
 **[Read the benchmark →](docs/benchmark.md)** · **[Try it on your repo in two commands →](#quick-start)**
 
