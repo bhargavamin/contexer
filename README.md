@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <em>One set of team rules for every AI coding agent. Cheaper as your rulebook grows. Your agent asks when rules disagree.</em>
+  <em>Same answers as your CLAUDE.md. 30% cheaper at scale. Your agent asks before it guesses.</em>
 </p>
 
 <p align="center">
@@ -193,6 +193,17 @@ The open-source local store works for one developer across supported assistants.
 | **Local (open source)** | Keep decisions on your machine and reuse them across your AI assistants. No cloud account required. |
 | **Personal Cloud** | Sync your own decisions across your own machines. Personal sync does not share them with teammates. |
 | **Teams (early access)** | Share decisions through a team review and approval workflow, so teammates' assistants can use shared context. |
+
+### Why it matters more for a team
+
+The benchmark ran one developer's sessions; Teams itself has not been benchmarked yet. These are the findings that grow with a team, and what Teams adds on top:
+
+- **More people write more rules.** A rules file's cost per session grew 36–37% when the rulebook went from 34 to 150 rules; Contexer's grew 15%. Every teammate's agent pays that per session.
+- **More authors write rules that contradict each other.** Agents using Contexer asked before coding on every contradicting pair in the benchmark (12 of 12), against 7 of 12 with static files.
+- **One approved rulebook for everyone's agents.** A lead reviews shared decisions before they become team rules, and every teammate's agent (Claude Code, Cursor, Codex, Gemini CLI) receives the same approved set. Nothing becomes team policy without that approval.
+- **Checks on pull requests, not just prompts.** Contexer Check compares each pull request's diff with the team's approved decisions and posts an advisory review comment. A lead can promote an individual decision so the optional Teams Guard check fails when a pull request drifts from it.
+- **A record of who decided what.** Team decisions keep their history, reviewers and approvals.
+
 
 ### See personal and team context in action
 

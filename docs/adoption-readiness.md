@@ -14,6 +14,8 @@ In the [adoption benchmark](benchmark.md) (1,242 sessions, scored by code), agen
 
 Contexer fails safe. Hooks never block a session or a commit by failing; a corrupt store keeps sessions running and refuses to be overwritten; data stays on the developer's machine unless someone shares a decision explicitly, and sharing with redaction switched off always warns and asks for confirmation. Every decision keeps its history, can be exported to Markdown or ADR files, and can be erased by a human when it holds something sensitive.
 
+For a team, Contexer Teams (early access) adds a shared rulebook that a lead reviews before it reaches every teammate's agent, and an advisory check that compares each pull request with the team's approved decisions. Teams has not been benchmarked yet; the benchmark measured one developer's sessions.
+
 What a pilot should watch, because capture is still the weak point: rules a developer states during a session reach the store in only **6 of 24** runs in the benchmark, against 24 of 24 for a `CLAUDE.md` the agent is told to maintain ([#385](https://github.com/bhargavamin/contexer/issues/385)), so a person should add or approve the rules that matter. Rules worded very differently from the task can be missed ([#390](https://github.com/bhargavamin/contexer/issues/390)). The human time upkeep takes has not been measured yet ([#363](https://github.com/bhargavamin/contexer/issues/363)).
 
 **To start a pilot:** `uv tool install contexer` then `contexer install` ([quick start](../README.md#quick-start)), keep your existing `CLAUDE.md` for stable instructions, and set your adopt / don't-adopt bar before you begin ([last question below](#how-should-we-run-a-pilot)).
@@ -65,6 +67,16 @@ Each answer is marked **holds** (works today, with evidence), **partial** (works
 | How much human time does upkeep take? | gap | Not measured yet; the real-repository pilot will measure review minutes, capture precision and staleness (#363). |
 | Onboarding an existing repository? | partial | `bootstrap_context` captures evidence-backed context as non-authoritative observations; nothing becomes policy without approval (CLAUDE.md, "Never claim complete decision capture"). Its effort on a real repository is part of #363. |
 | Model cost per session | holds | 12–18% less than static rule files at 34 rules and 26–30% less at 150, because only the relevant decisions are sent ([benchmark](benchmark.md#how-much-cheaper-is-it-and-why)). |
+
+### What does Contexer Teams add for a team?
+
+| Question | Status | Evidence |
+| --- | --- | --- |
+| Can the whole team's agents follow the same approved rules? | holds | A lead reviews shared decisions before they become team rules; each teammate's client caches the approved set locally and delivers it to their agent alongside personal decisions ([FAQ](faq.md#team-context)). |
+| Can it check pull requests, not only prompts? | holds | Contexer Check compares a pull request's diff with the team's approved decisions and posts an advisory comment. A lead can promote an individual decision so the optional Teams Guard check can fail a drifting pull request ([FAQ](faq.md#what-are-contexer-check-and-contexer-guard-in-teams)). |
+| Is there a team audit trail? | holds | Team decisions keep history, provenance, review and audit actors ([FAQ](faq.md#what-is-the-difference-between-contexer-oss-and-contexer-teams)). |
+| Is it organisation-wide governance? | gap | Governance is team-level; there is no organisation-wide policy hierarchy yet ([FAQ](faq.md#personal-cloud-and-contexer-teams)). |
+| Does the team setup improve agent results? | gap | Not benchmarked yet: the published benchmark measured one developer's sessions. |
 
 ### Can we leave?
 

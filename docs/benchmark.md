@@ -56,6 +56,10 @@ Every failure was a rule that never reached the agent. In every run where the ne
 
 Not reliably yet. In a separate 144-session test, a developer stated a rule in one session and the next session needed it. Contexer recorded it in **6 of 24** runs; a `CLAUDE.md` the agent was told to maintain recorded **24 of 24**; with neither, the second session succeeded in 1 of 24. Agents rarely save decisions on their own, and Contexer's prompt capture recognised only some phrasings ([#385](https://github.com/bhargavamin/contexer/issues/385)). This is Contexer's biggest current weakness: today, rules are most reliable when a person adds or approves them.
 
+### What does this mean for a team?
+
+The benchmark measured one developer's sessions; Contexer Teams has not been benchmarked yet, so these are reasons, not results. Two findings grow with team size. A team writes more rules, and a rules file's cost per session grew 36–37% from 34 to 150 rules while Contexer's grew 15%, for every teammate's agent. And more authors write more rules that contradict each other, which is where agents using Contexer asked first in 12 of 12 runs. On top of the local product, Contexer Teams adds a lead-reviewed shared rulebook delivered to every teammate's agent, and an advisory pull-request check against the team's approved decisions ([Teams](https://contexer.ai/teams)).
+
 ### How has Contexer improved over time?
 
 On the same October tasks, comparing the previous build with v0.50.1 (static-file results unchanged):
