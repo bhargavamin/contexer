@@ -1,52 +1,85 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="310" viewBox="0 0 1200 310" role="img" aria-label="Benchmarks, medians across 548 published sessions, Contexer vs no memory: 6 times fewer tokens per session (32,804 vs 198,864); right answer in 1 turn vs 6; 8 of 8 stored rules followed (Sonnet 5) vs 0 of 8 (Opus); $0.043 per session vs $0.116">
-  <rect width="1200" height="310" rx="16" fill="#15170D"/>
-  <g font-family="-apple-system, 'SF Pro Text', 'Segoe UI', Helvetica, Arial, sans-serif">
-
-    <!-- header: legend left, methodology right -->
-    <rect x="40" y="33" width="12" height="12" rx="3" fill="#CDEB36"/>
-    <text x="59" y="44" font-size="11.5" font-weight="600" letter-spacing="0.08em" fill="#A6A899">CONTEXER</text>
-    <rect x="158" y="33" width="12" height="12" rx="3" fill="#F2F1E6" fill-opacity="0.22"/>
-    <text x="177" y="44" font-size="11.5" font-weight="600" letter-spacing="0.08em" fill="#A6A899">NO MEMORY</text>
-    <text x="1160" y="44" text-anchor="end" font-size="11.5" letter-spacing="0.04em" fill="#A6A899">SONNET 5 MEDIANS OF 548 PUBLISHED SESSIONS &#183; SCORED BY CODE, NOT AN LLM JUDGE</text>
-
-    <!-- card 1: tokens -->
-    <rect x="40" y="68" width="265" height="192" rx="12" fill="#1D2013" stroke="#F2F1E6" stroke-opacity="0.1"/>
-    <text x="64" y="140" font-size="46" font-weight="800" fill="#F2F1E6" style="font-variant-numeric: tabular-nums">6&#215;</text>
-    <text x="64" y="166" font-size="14" font-weight="600" fill="#F2F1E6">fewer tokens per session</text>
-    <rect x="64" y="190" width="21" height="7" rx="3.5" fill="#CDEB36"/>
-    <text x="203" y="197" font-size="11.5" fill="#A6A899" style="font-variant-numeric: tabular-nums">33k</text>
-    <rect x="64" y="208" width="130" height="7" rx="3.5" fill="#F2F1E6" fill-opacity="0.22"/>
-    <text x="203" y="215" font-size="11.5" fill="#A6A899" style="font-variant-numeric: tabular-nums">199k</text>
-
-    <!-- card 2: turns to answer -->
-    <rect x="325" y="68" width="265" height="192" rx="12" fill="#1D2013" stroke="#F2F1E6" stroke-opacity="0.1"/>
-    <text x="349" y="140" font-size="46" font-weight="800" fill="#F2F1E6" style="font-variant-numeric: tabular-nums">1 turn</text>
-    <text x="349" y="166" font-size="14" font-weight="600" fill="#F2F1E6">to the right &#8220;why did we&#8230;?&#8221;</text>
-    <rect x="349" y="190" width="22" height="7" rx="3.5" fill="#CDEB36"/>
-    <text x="488" y="197" font-size="11.5" fill="#A6A899" style="font-variant-numeric: tabular-nums">1 turn</text>
-    <rect x="349" y="208" width="130" height="7" rx="3.5" fill="#F2F1E6" fill-opacity="0.22"/>
-    <text x="488" y="215" font-size="11.5" fill="#A6A899" style="font-variant-numeric: tabular-nums">6 turns</text>
-
-    <!-- card 3: rule compliance (dot rows) -->
-    <rect x="610" y="68" width="265" height="192" rx="12" fill="#1D2013" stroke="#F2F1E6" stroke-opacity="0.1"/>
-    <text x="634" y="140" font-size="46" font-weight="800" fill="#F2F1E6" style="font-variant-numeric: tabular-nums">8/8</text>
-    <text x="634" y="166" font-size="14" font-weight="600" fill="#F2F1E6">stored rules followed</text>
-    <g fill="#CDEB36">
-      <circle cx="639" cy="193.5" r="4.5"/><circle cx="654" cy="193.5" r="4.5"/><circle cx="669" cy="193.5" r="4.5"/><circle cx="684" cy="193.5" r="4.5"/><circle cx="699" cy="193.5" r="4.5"/><circle cx="714" cy="193.5" r="4.5"/><circle cx="729" cy="193.5" r="4.5"/><circle cx="744" cy="193.5" r="4.5"/>
-    </g>
-    <text x="773" y="197" font-size="11.5" fill="#A6A899" style="font-variant-numeric: tabular-nums">8/8</text>
-    <g fill="none" stroke="#F2F1E6" stroke-opacity="0.35">
-      <circle cx="639" cy="211.5" r="4"/><circle cx="654" cy="211.5" r="4"/><circle cx="669" cy="211.5" r="4"/><circle cx="684" cy="211.5" r="4"/><circle cx="699" cy="211.5" r="4"/><circle cx="714" cy="211.5" r="4"/><circle cx="729" cy="211.5" r="4"/><circle cx="744" cy="211.5" r="4"/>
-    </g>
-    <text x="773" y="215" font-size="11.5" fill="#A6A899" style="font-variant-numeric: tabular-nums">0/8 &#183; Opus</text>
-
-    <!-- card 4: cost -->
-    <rect x="895" y="68" width="265" height="192" rx="12" fill="#1D2013" stroke="#F2F1E6" stroke-opacity="0.1"/>
-    <text x="919" y="140" font-size="46" font-weight="800" fill="#F2F1E6" style="font-variant-numeric: tabular-nums">$0.043</text>
-    <text x="919" y="166" font-size="14" font-weight="600" fill="#F2F1E6">per session, right answers</text>
-    <rect x="919" y="190" width="48" height="7" rx="3.5" fill="#CDEB36"/>
-    <text x="1058" y="197" font-size="11.5" fill="#A6A899" style="font-variant-numeric: tabular-nums">$0.043</text>
-    <rect x="919" y="208" width="130" height="7" rx="3.5" fill="#F2F1E6" fill-opacity="0.22"/>
-    <text x="1058" y="215" font-size="11.5" fill="#A6A899" style="font-variant-numeric: tabular-nums">$0.116, wrong</text>
-  </g>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="370" viewBox="0 0 1200 370" role="img" aria-label="Contexer adoption benchmark, Sonnet 5.5, 1,242 sessions scored by code. Cost per session as stored rules grow from 34 to 150: CLAUDE.md $0.080 to $0.109, indexed docs $0.075 to $0.103, Contexer $0.066 to $0.076, with accuracy level across the three (Contexer 109 of 114 tasks at 150 rules, the others 108). When two current rules contradict, Contexer asked the developer in 12 of 12 runs, CLAUDE.md and indexed docs in 7 of 12. Not yet solved: rules stated during a session reached the store in 6 of 24 runs.">
+<rect width="1200" height="370" rx="16" fill="#15170D"/>
+<g font-family="-apple-system, 'SF Pro Text', 'Segoe UI', Helvetica, Arial, sans-serif">
+<text x="40" y="44" font-size="11.5" font-weight="600" letter-spacing="0.08em" fill="#A6A899">SAME ANSWERS AS A WELL-KEPT CLAUDE.MD &#183; 109 VS 108 OF 114 TASKS AT 150 RULES</text>
+<text x="1160" y="44" text-anchor="end" font-size="11.5" letter-spacing="0.04em" fill="#A6A899">SONNET 5.5 &#183; 1,242 SESSIONS &#183; SCORED BY CODE</text>
+<rect x="40" y="68" width="530" height="232" rx="12" fill="#1D2013" stroke="#F2F1E6" stroke-opacity="0.1"/>
+<text x="64" y="104" font-size="18" font-weight="800" fill="#F2F1E6">4&#215; the rules: static files cost 36&#8211;37% more, Contexer 15%.</text>
+<text x="64" y="126" font-size="12.5" fill="#A6A899">Cost per session at 34 and 150 stored rules, same 38 tasks, similar accuracy</text>
+<line x1="110" y1="140" x2="110" y2="258" stroke="#F2F1E6" stroke-opacity="0.1"/>
+<text x="110" y="282" text-anchor="middle" font-size="11.5" fill="#A6A899">34 rules</text>
+<line x1="370" y1="140" x2="370" y2="258" stroke="#F2F1E6" stroke-opacity="0.1"/>
+<text x="370" y="282" text-anchor="middle" font-size="11.5" fill="#A6A899">150 rules</text>
+<line x1="110" y1="210.0" x2="370" y2="152.0" stroke="#F2F1E6" stroke-opacity="0.4" stroke-width="2.5" stroke-linecap="round"/>
+<circle cx="110" cy="210.0" r="5" fill="#F2F1E6" fill-opacity="0.4"/>
+<circle cx="370" cy="152.0" r="5" fill="#F2F1E6" fill-opacity="0.4"/>
+<text x="98" y="212.0" text-anchor="end" font-size="11" fill="#A6A899" style="font-variant-numeric: tabular-nums">$0.080</text>
+<text x="384" y="156.0" font-size="12" font-weight="400" fill="#A6A899" style="font-variant-numeric: tabular-nums">CLAUDE.md $0.109</text>
+<line x1="110" y1="220.0" x2="370" y2="164.0" stroke="#F2F1E6" stroke-opacity="0.4" stroke-width="2.5" stroke-linecap="round"/>
+<circle cx="110" cy="220.0" r="5" fill="#F2F1E6" fill-opacity="0.4"/>
+<circle cx="370" cy="164.0" r="5" fill="#F2F1E6" fill-opacity="0.4"/>
+<text x="98" y="229.0" text-anchor="end" font-size="11" fill="#A6A899" style="font-variant-numeric: tabular-nums">$0.075</text>
+<text x="384" y="168.0" font-size="12" font-weight="400" fill="#A6A899" style="font-variant-numeric: tabular-nums">Indexed docs $0.103</text>
+<line x1="110" y1="238.0" x2="370" y2="218.0" stroke="#CDEB36" stroke-width="4" stroke-linecap="round"/>
+<circle cx="110" cy="238.0" r="5" fill="#CDEB36"/>
+<circle cx="370" cy="218.0" r="5" fill="#CDEB36"/>
+<text x="98" y="242.0" text-anchor="end" font-size="11" fill="#A6A899" style="font-variant-numeric: tabular-nums">$0.066</text>
+<text x="384" y="222.0" font-size="12" font-weight="700" fill="#F2F1E6" style="font-variant-numeric: tabular-nums">Contexer $0.076</text>
+<text x="64" y="282" font-size="0"> </text>
+<rect x="590" y="68" width="590" height="232" rx="12" fill="#1D2013" stroke="#F2F1E6" stroke-opacity="0.1"/>
+<text x="614" y="104" font-size="22" font-weight="800" fill="#F2F1E6">When your rules disagree, it asks.</text>
+<text x="614" y="126" font-size="12.5" fill="#A6A899">One of the four conflicts tested: both rules are current, so the agent should ask.</text>
+<rect x="614" y="144" width="300" height="26" rx="13" fill="#F2F1E6" fill-opacity="0.1"/>
+<text x="630" y="161" font-size="12" fill="#F2F1E6">&#8220;Prefix versions with v, as in v1.4.0&#8221;</text>
+<rect x="614" y="178" width="300" height="26" rx="13" fill="#F2F1E6" fill-opacity="0.1"/>
+<text x="630" y="195" font-size="12" fill="#F2F1E6">&#8220;Publish bare versions such as 1.4.0&#8221;</text>
+<text x="926" y="181" font-size="22" font-weight="800" fill="#A6A899">&#8800;</text>
+<text x="614" y="236" font-size="12" font-weight="700" fill="#F2F1E6">Contexer</text>
+<circle cx="712" cy="232" r="4.5" fill="#CDEB36"/>
+<circle cx="725" cy="232" r="4.5" fill="#CDEB36"/>
+<circle cx="738" cy="232" r="4.5" fill="#CDEB36"/>
+<circle cx="751" cy="232" r="4.5" fill="#CDEB36"/>
+<circle cx="764" cy="232" r="4.5" fill="#CDEB36"/>
+<circle cx="777" cy="232" r="4.5" fill="#CDEB36"/>
+<circle cx="790" cy="232" r="4.5" fill="#CDEB36"/>
+<circle cx="803" cy="232" r="4.5" fill="#CDEB36"/>
+<circle cx="816" cy="232" r="4.5" fill="#CDEB36"/>
+<circle cx="829" cy="232" r="4.5" fill="#CDEB36"/>
+<circle cx="842" cy="232" r="4.5" fill="#CDEB36"/>
+<circle cx="855" cy="232" r="4.5" fill="#CDEB36"/>
+<text x="880" y="236" font-size="12" font-weight="700" fill="#F2F1E6" style="font-variant-numeric: tabular-nums">12/12 asked</text>
+<text x="614" y="258" font-size="12" font-weight="400" fill="#A6A899">CLAUDE.md</text>
+<circle cx="712" cy="254" r="4.5" fill="#F2F1E6" fill-opacity="0.4"/>
+<circle cx="725" cy="254" r="4.5" fill="#F2F1E6" fill-opacity="0.4"/>
+<circle cx="738" cy="254" r="4.5" fill="#F2F1E6" fill-opacity="0.4"/>
+<circle cx="751" cy="254" r="4.5" fill="#F2F1E6" fill-opacity="0.4"/>
+<circle cx="764" cy="254" r="4.5" fill="#F2F1E6" fill-opacity="0.4"/>
+<circle cx="777" cy="254" r="4.5" fill="#F2F1E6" fill-opacity="0.4"/>
+<circle cx="790" cy="254" r="4.5" fill="#F2F1E6" fill-opacity="0.4"/>
+<circle cx="803" cy="254" r="4" fill="none" stroke="#F2F1E6" stroke-opacity="0.4"/>
+<circle cx="816" cy="254" r="4" fill="none" stroke="#F2F1E6" stroke-opacity="0.4"/>
+<circle cx="829" cy="254" r="4" fill="none" stroke="#F2F1E6" stroke-opacity="0.4"/>
+<circle cx="842" cy="254" r="4" fill="none" stroke="#F2F1E6" stroke-opacity="0.4"/>
+<circle cx="855" cy="254" r="4" fill="none" stroke="#F2F1E6" stroke-opacity="0.4"/>
+<text x="880" y="258" font-size="12" font-weight="400" fill="#A6A899" style="font-variant-numeric: tabular-nums">7/12 asked</text>
+<text x="614" y="280" font-size="12" font-weight="400" fill="#A6A899">Indexed docs</text>
+<circle cx="712" cy="276" r="4.5" fill="#F2F1E6" fill-opacity="0.4"/>
+<circle cx="725" cy="276" r="4.5" fill="#F2F1E6" fill-opacity="0.4"/>
+<circle cx="738" cy="276" r="4.5" fill="#F2F1E6" fill-opacity="0.4"/>
+<circle cx="751" cy="276" r="4.5" fill="#F2F1E6" fill-opacity="0.4"/>
+<circle cx="764" cy="276" r="4.5" fill="#F2F1E6" fill-opacity="0.4"/>
+<circle cx="777" cy="276" r="4.5" fill="#F2F1E6" fill-opacity="0.4"/>
+<circle cx="790" cy="276" r="4.5" fill="#F2F1E6" fill-opacity="0.4"/>
+<circle cx="803" cy="276" r="4" fill="none" stroke="#F2F1E6" stroke-opacity="0.4"/>
+<circle cx="816" cy="276" r="4" fill="none" stroke="#F2F1E6" stroke-opacity="0.4"/>
+<circle cx="829" cy="276" r="4" fill="none" stroke="#F2F1E6" stroke-opacity="0.4"/>
+<circle cx="842" cy="276" r="4" fill="none" stroke="#F2F1E6" stroke-opacity="0.4"/>
+<circle cx="855" cy="276" r="4" fill="none" stroke="#F2F1E6" stroke-opacity="0.4"/>
+<text x="880" y="280" font-size="12" font-weight="400" fill="#A6A899" style="font-variant-numeric: tabular-nums">7/12 asked</text>
+<text x="970" y="236" font-size="11" fill="#A6A899">Filled = asked first.</text>
+<text x="970" y="252" font-size="11" fill="#A6A899">4 conflict tasks &#215; 3 runs,</text>
+<text x="970" y="268" font-size="11" fill="#A6A899">150 stored rules.</text>
+<text x="40" y="330" font-size="12" fill="#A6A899">Not yet solved: rules stated during a session reached the store in 6 of 24 runs (a CLAUDE.md the agent maintains: 24 of 24).</text>
+<text x="40" y="348" font-size="12" fill="#A6A899">Synthetic tasks in one fixture repo. Method, every table and the negative findings: docs/benchmark.md</text>
+</g>
 </svg>

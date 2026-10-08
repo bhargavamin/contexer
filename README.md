@@ -209,16 +209,21 @@ Full details: **[published limitations](docs/usage.md#limitations-read-this--we-
 
 ## Benchmarks
 
-The published benchmark compares live agent sessions with and without Contexer, measuring token usage, cost, answer quality, and adherence to stored rules.
+We gave an AI coding agent 38 tasks that only come out right if it knows a team rule, and compared Contexer with a full `CLAUDE.md`, one-file-per-rule docs, and no rules, at 34 and 150 stored rules (1,242 sessions, scored by code).
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/benchmark-dark.svg">
-    <img alt="Published Contexer benchmark results comparing token usage, turns, rule adherence, and session cost" src="assets/benchmark-light.svg" width="1000">
+    <img alt="Contexer adoption benchmark: as stored rules grow from 34 to 150, cost per session rises 36 to 37 percent for CLAUDE.md and indexed docs and 15 percent for Contexer, at similar accuracy; when two current rules contradict, Contexer asked the developer in 12 of 12 runs versus 7 of 12 for the static files" src="assets/benchmark-light.svg" width="1000">
   </picture>
 </p>
 
-These results describe the measured tasks, not a guarantee for every project. A complete, up-to-date `CLAUDE.md` ties Contexer on cost in the published comparison. The report includes methodology, deterministic scoring, raw session data, and negative findings.
+- **Accuracy:** about equal to a well-kept `CLAUDE.md` (109 vs 108 of 114 tasks at 150 rules; 108 vs 106 at 34, where one-file-per-rule docs led with 111).
+- **Cost:** 26–30% less per session at 150 rules, because only the relevant rules are sent.
+- **Contradicting rules:** at 150 rules Contexer asked before coding in 12 of 12 runs; the static files in 7 of 12.
+- **Not yet solved:** rules stated during a session reached the store in only 6 of 24 runs, against 24 of 24 for a `CLAUDE.md` the agent was told to maintain.
+
+These are synthetic tasks in one test repository, not a guarantee for every project. The report covers the method, how results evolved since the July study, raw session data, and every negative finding.
 
 **[Read the benchmark →](docs/benchmark.md)**
 

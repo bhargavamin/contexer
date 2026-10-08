@@ -1,0 +1,16 @@
+{
+  "model": "claude-sonnet-5-5",
+  "seed": 0,
+  "reps": 3,
+  "conditions": [
+    "claudemd_full",
+    "docs_indexed",
+    "with"
+  ],
+  "contexer_sources": {},
+  "steady_state": true,
+  "tasks_file": "benchmarks/adoption_tasks_150.json",
+  "tasks_sha256": "53319e5d1c3b65fe5cef3bbc445468bcb6a1727c65865709a93b5d9bda215319",
+  "managed_settings_present": false,
+  "started_at": "2026-10-03T14:07:21.444761+00:00"
+}
