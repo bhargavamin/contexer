@@ -1,11 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="370" viewBox="0 0 1200 370" role="img" aria-label="Contexer adoption benchmark, Sonnet 5.5, 1,242 sessions scored by code. Cost per session as stored rules grow from 34 to 150: CLAUDE.md $0.080 to $0.109, indexed docs $0.075 to $0.103, Contexer $0.066 to $0.076, with accuracy level across the three (Contexer 109 of 114 tasks at 150 rules, the others 108). When two current rules contradict, Contexer asked the developer in 12 of 12 runs, CLAUDE.md and indexed docs in 7 of 12. Not yet solved: rules stated during a session reached the store in 6 of 24 runs.">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="370" viewBox="0 0 1200 370" role="img" aria-label="Contexer adoption benchmark, Sonnet 5.5, 1,242 sessions scored by code. Cost per session as stored rules grow from 34 to 150: CLAUDE.md $0.080 to $0.109, decision docs $0.075 to $0.103, Contexer $0.066 to $0.076, with accuracy level across the three (Contexer 109 of 114 tasks at 150 rules, the others 108). When two current rules contradict, agents using Contexer asked the developer in 12 of 12 runs, CLAUDE.md and decision docs in 7 of 12. Not yet solved: rules stated during a session reached the store in 6 of 24 runs.">
 <rect width="1200" height="370" rx="16" fill="#F5F4E9"/>
 <g font-family="-apple-system, 'SF Pro Text', 'Segoe UI', Helvetica, Arial, sans-serif">
 <text x="40" y="44" font-size="11.5" font-weight="600" letter-spacing="0.08em" fill="#70725F">SAME ANSWERS AS A WELL-KEPT CLAUDE.MD &#183; 109 VS 108 OF 114 TASKS AT 150 RULES</text>
 <text x="1160" y="44" text-anchor="end" font-size="11.5" letter-spacing="0.04em" fill="#70725F">SONNET 5.5 &#183; 1,242 SESSIONS &#183; SCORED BY CODE</text>
 <rect x="40" y="68" width="530" height="232" rx="12" fill="#FFFFFF" stroke="#15170D" stroke-opacity="0.1"/>
 <text x="64" y="104" font-size="18" font-weight="800" fill="#15170D">4&#215; the rules: static files cost 36&#8211;37% more, Contexer 15%.</text>
-<text x="64" y="126" font-size="12.5" fill="#70725F">Cost per session at 34 and 150 stored rules, same 38 tasks, similar accuracy</text>
+<text x="64" y="126" font-size="12.5" fill="#70725F">Cost per session at 34 and 150 stored rules, same 38 tasks, same accuracy</text>
 <line x1="110" y1="140" x2="110" y2="258" stroke="#15170D" stroke-opacity="0.08"/>
 <text x="110" y="282" text-anchor="middle" font-size="11.5" fill="#70725F">34 rules</text>
 <line x1="370" y1="140" x2="370" y2="258" stroke="#15170D" stroke-opacity="0.08"/>
@@ -19,7 +19,7 @@
 <circle cx="110" cy="220.0" r="5" fill="#15170D" fill-opacity="0.35"/>
 <circle cx="370" cy="164.0" r="5" fill="#15170D" fill-opacity="0.35"/>
 <text x="98" y="229.0" text-anchor="end" font-size="11" fill="#70725F" style="font-variant-numeric: tabular-nums">$0.075</text>
-<text x="384" y="168.0" font-size="12" font-weight="400" fill="#70725F" style="font-variant-numeric: tabular-nums">Indexed docs $0.103</text>
+<text x="384" y="168.0" font-size="12" font-weight="400" fill="#70725F" style="font-variant-numeric: tabular-nums">Decision docs $0.103</text>
 <line x1="110" y1="238.0" x2="370" y2="218.0" stroke="#CDEB36" stroke-width="4" stroke-linecap="round"/>
 <circle cx="110" cy="238.0" r="5" fill="#CDEB36"/>
 <circle cx="370" cy="218.0" r="5" fill="#CDEB36"/>
@@ -27,7 +27,7 @@
 <text x="384" y="222.0" font-size="12" font-weight="700" fill="#15170D" style="font-variant-numeric: tabular-nums">Contexer $0.076</text>
 <text x="64" y="282" font-size="0"> </text>
 <rect x="590" y="68" width="590" height="232" rx="12" fill="#FFFFFF" stroke="#15170D" stroke-opacity="0.1"/>
-<text x="614" y="104" font-size="22" font-weight="800" fill="#15170D">When your rules disagree, it asks.</text>
+<text x="614" y="104" font-size="22" font-weight="800" fill="#15170D">When your rules disagree, the agent asks.</text>
 <text x="614" y="126" font-size="12.5" fill="#70725F">One of the four conflicts tested: both rules are current, so the agent should ask.</text>
 <rect x="614" y="144" width="300" height="26" rx="13" fill="#15170D" fill-opacity="0.08"/>
 <text x="630" y="161" font-size="12" fill="#15170D">&#8220;Prefix versions with v, as in v1.4.0&#8221;</text>
@@ -62,7 +62,7 @@
 <circle cx="842" cy="254" r="4" fill="none" stroke="#15170D" stroke-opacity="0.35"/>
 <circle cx="855" cy="254" r="4" fill="none" stroke="#15170D" stroke-opacity="0.35"/>
 <text x="880" y="258" font-size="12" font-weight="400" fill="#70725F" style="font-variant-numeric: tabular-nums">7/12 asked</text>
-<text x="614" y="280" font-size="12" font-weight="400" fill="#70725F">Indexed docs</text>
+<text x="614" y="280" font-size="12" font-weight="400" fill="#70725F">Decision docs</text>
 <circle cx="712" cy="276" r="4.5" fill="#15170D" fill-opacity="0.35"/>
 <circle cx="725" cy="276" r="4.5" fill="#15170D" fill-opacity="0.35"/>
 <circle cx="738" cy="276" r="4.5" fill="#15170D" fill-opacity="0.35"/>

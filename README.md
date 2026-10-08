@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <em>Capture decisions. Review changes. Enforce selected rules.</em>
+  <em>One set of team rules for every AI coding agent. Cheaper as your rulebook grows. Your agent asks when rules disagree.</em>
 </p>
 
 <p align="center">
@@ -44,6 +44,8 @@
 Capture engineering decisions and their reasoning, review changes, and bring the right guidance into **Claude Code, Cursor, Codex, and Gemini CLI**. Share approved decisions through optional Contexer Teams and enforce selected rules with optional commit checks.
 
 Contexer keeps a reviewable, versioned record of what was decided, why, and whether it has been approved. The same local decision store works across supported assistants, so your engineering guidance is not tied to one agent's conversation history. Review, revision history, team approval, and explicitly enabled checks turn recorded decisions into guidance you can manage and verify.
+
+**Proven in 1,242 benchmark sessions:** agents get the same answers as with a hand-kept `CLAUDE.md`, at 30% lower cost per session with 150 rules, and they stop to ask when two rules contradict (12 of 12 runs, against 7 of 12). [See the benchmark →](docs/benchmark.md)
 
 ### A simple example
 
@@ -80,7 +82,7 @@ Then try telling your assistant:
 Save this as a convention: always use uv, not pip, in this project.
 ```
 
-Decisions are stored locally in plain JSON under `~/.contexer/`. The local features do not require a cloud account; cross-machine sync and team sharing are optional.
+Decisions are stored locally in plain JSON under `~/.contexer/`, in a directory only you can read. The local features do not require a cloud account; cross-machine sync and team sharing are optional. If a saved store ever becomes unreadable, Contexer keeps working but refuses to overwrite it, so nothing is lost while you recover the file.
 
 Details: **[installation & verification](docs/install.md)** · **[per-tool integration notes](docs/integrations.md)**
 
@@ -108,7 +110,7 @@ Keep your `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, or `.cursor/rules` files for st
 ## How it works
 
 1. **Capture.** Contexer detects clear directives, imports supported memory files, and gives your assistant tools to save decisions with their reasoning.
-2. **Reuse.** Standing rules load when a session starts. Matching decisions can be retrieved as you ask questions or reference files, without loading the entire store.
+2. **Reuse.** Standing rules load when a session starts, approved constraints first, with a pointer to the rest when the list is long. Matching decisions can be retrieved as you ask questions or reference files, without loading the entire store. A decision can also record situations it applies to ("slow upstream reads"), which helps a task worded differently find it; agents don't add these reliably yet.
 3. **Review and maintain.** Inspect pending items, correct an entry, or update a decision when your approach changes. Earlier revisions remain available.
 
 Ask your assistant in plain English:
@@ -128,6 +130,8 @@ contexer review
 ```
 
 Not all captured knowledge has the same status. Clear user directives can be approved automatically. Repository observations and AI-inferred starting context are usable but explicitly non-authoritative; confidence or repeated scans do not count as human approval. Some other AI-inferred knowledge is available as a labeled suggestion; items marked **pending approval** wait for your review instead of becoming standing rules.
+
+When two current decisions prescribe incompatible version formats, Contexer shows them together as a conflict so the agent asks you which applies. Other contradictions aren't detected automatically yet, though in the benchmark agents using Contexer still asked about every contradicting pair.
 
 Proposed changes to an existing decision do not silently replace its current revision. When a proposed update conflicts with the standing decision, Contexer can show both versions, clearly labeling the unreviewed one, so you can choose what is correct.
 
@@ -170,6 +174,7 @@ A local web console shows what Contexer has stored across your projects, not jus
 - **Inspect and edit.** Search decisions, read their reasoning and revision history, and correct their content without losing earlier versions.
 - **Review proposed changes.** See pending decisions and before/after diffs for proposed updates.
 - **Erase sensitive content.** Run `contexer erase <id>` or choose **Erase content** in the console to permanently remove one decision’s local content and history. A content-free erasure record remains.
+- **Export.** `contexer export --format md` or `--format adr` writes your decisions as Markdown or one ADR per decision, with secrets redacted by default.
 - **Delete and restore.** Remove unwanted decisions while retaining the option to restore them. Deletion markers prevent the same imported entry from immediately reappearing.
 - **Switch context.** Browse per-repo decisions, global rules, cached team context, deleted entries, and settings.
 
@@ -195,6 +200,8 @@ Watch how Contexer handles your personal decisions and shared team context.
 
 [![Watch: Contexer personal and team context](https://www.loom.com/v1/videos/849265aafaea4c39a31c5c5a15856fb2/thumbnail)](https://www.loom.com/share/849265aafaea4c39a31c5c5a15856fb2)
 
+Shared decisions pass through secret redaction first. If you switch redaction off (`redact_secrets = false`), every share warns you and asks you to confirm the exact text, and background sends pause until it's back on.
+
 Learn more: **[Personal Cloud & Teams](https://contexer.ai/teams)** · **[connection and sharing guide](docs/usage.md#connecting-to-a-team-contexer-teams)**
 
 ## Limitations
@@ -209,23 +216,23 @@ Full details: **[published limitations](docs/usage.md#limitations-read-this--we-
 
 ## Benchmarks
 
-We gave an AI coding agent 38 tasks that only come out right if it knows a team rule, and compared Contexer with a full `CLAUDE.md`, one-file-per-rule docs, and no rules, at 34 and 150 stored rules (1,242 sessions, scored by code).
+We gave an AI coding agent 38 tasks that only come out right if it knows a team rule, and compared Contexer with a full `CLAUDE.md`, a folder of decision docs, and no rules, at 34 and 150 stored rules (1,242 sessions, scored by code).
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/benchmark-dark.svg">
-    <img alt="Contexer adoption benchmark: as stored rules grow from 34 to 150, cost per session rises 36 to 37 percent for CLAUDE.md and indexed docs and 15 percent for Contexer, at similar accuracy; when two current rules contradict, Contexer asked the developer in 12 of 12 runs versus 7 of 12 for the static files" src="assets/benchmark-light.svg" width="1000">
+    <img alt="Contexer adoption benchmark: as stored rules grow from 34 to 150, cost per session rises 36 to 37 percent for CLAUDE.md and decision docs and 15 percent for Contexer, at the same accuracy; when two current rules contradict, agents using Contexer asked the developer in 12 of 12 runs versus 7 of 12 for the static files" src="assets/benchmark-light.svg" width="1000">
   </picture>
 </p>
 
-- **Accuracy:** about equal to a well-kept `CLAUDE.md` (109 vs 108 of 114 tasks at 150 rules; 108 vs 106 at 34, where one-file-per-rule docs led with 111).
-- **Cost:** 26–30% less per session at 150 rules, because only the relevant rules are sent.
+- **Matches a hand-kept `CLAUDE.md` on accuracy:** 109 vs 108 of 114 tasks at 150 rules, and 108 vs 106 at 34 (decision docs led there with 111).
+- **Then costs less:** 30% less per session than a full `CLAUDE.md` at 150 rules, because only the relevant rules are sent.
 - **Contradicting rules:** at 150 rules Contexer asked before coding in 12 of 12 runs; the static files in 7 of 12.
 - **Not yet solved:** rules stated during a session reached the store in only 6 of 24 runs, against 24 of 24 for a `CLAUDE.md` the agent was told to maintain.
 
 These are synthetic tasks in one test repository, not a guarantee for every project. The report covers the method, how results evolved since the July study, raw session data, and every negative finding.
 
-**[Read the benchmark →](docs/benchmark.md)**
+**[Read the benchmark →](docs/benchmark.md)** · **[Try it on your repo in two commands →](#quick-start)**
 
 ---
 
@@ -240,8 +247,8 @@ These are synthetic tasks in one test repository, not a guarantee for every proj
 | **[Usage & CLI](docs/usage.md)** | Natural-language commands, CLI reference, teams login, troubleshooting, limitations |
 | **[Local console](docs/ui.md)** | `contexer ui`, the seven views, `[ui]` settings, security model |
 | **[Decision-impact pilot](docs/decision-impact-pilot.md)** | Explicitly requested file checks, local receipts, consent, setup, and claim limits |
-| **[Benchmark](docs/benchmark.md)** | Live-session A/B methodology, findings (including negative ones), raw data |
-| **[Adoption readiness](docs/adoption-readiness.md)** | For a team lead: what holds today, known gaps, and the issues tracking them |
+| **[Benchmark](docs/benchmark.md)** | Accuracy, cost and contradicting rules against a `CLAUDE.md`, with every negative finding and the raw data |
+| **[Adoption readiness](docs/adoption-readiness.md)** | For a team lead: what holds today, what to watch in a pilot, and the issues tracking each gap |
 
 ---
 
@@ -255,16 +262,3 @@ MIT. See [LICENSE](LICENSE) for full terms.
 
 The Contexer name and logo are trademarks of Contexer.ai. The MIT license does not grant rights to use the Contexer name, logo, or brand in any way that implies official affiliation.
 
-The local data directory is private to its owner (mode `0700`); existing group or world permissions are removed on next use.
-
-Export current decisions with `contexer export --format md --out decisions/`, or use `--format adr` for one architecture decision record per decision. Exports redact secrets by default; `--include-retired` includes retired history and replacement links.
-
-When saving a decision, the agent can include concrete situations where it applies, such as “slow upstream reads.” These help later tasks find the rule even when the task uses different words from the decision. File-specific decisions remain discoverable through lookup pointers when their subject does not fit the current task.
-
-If a repository’s saved context becomes unreadable, captures and edits refuse to replace it. Preserve the file and recover it before retrying. Context display still degrades gracefully.
-
-When current decisions prescribe incompatible version formats, Contexer shows both together and asks you to resolve the conflict before an agent chooses a format.
-
-If `redact_secrets = false`, sharing always shows a warning and requires preview/confirmation, including when `skip_confirm` is enabled. Background sharing retries and automatic proposals pause until redaction is enabled again. Local capture remains verbatim.
-
-Large Claude sessions keep approved constraints first and summarize additional stored context with a lookup pointer, so a long rule list stays readable in the session.

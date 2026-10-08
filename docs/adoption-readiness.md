@@ -4,31 +4,31 @@
 
 ## Press release
 
-### Contexer is ready for a team pilot: the same answers as a hand-kept CLAUDE.md, lower cost as rules grow, and decisions your team can approve, audit, export and erase
+### Ready for a team pilot
 
-**Capturing new rules during work is still the weak point; this page says where it holds and where it doesn't.**
+**The same answers as a hand-kept `CLAUDE.md`, 30% lower cost per session at 150 rules, and decisions your team can approve, audit, export and erase.**
 
 **October 2026.** Teams adopting AI coding agents quickly accumulate rules the agents must follow, usually in a `CLAUDE.md` or a folder of decision docs that nobody owns, nobody approves and nothing checks. Contexer v0.50.1 keeps those decisions in a local store, hands the agent the relevant ones at session start and with each prompt, and gives the team the controls a shared rulebook needs: human approval, revision history, conflict marking, export and erasure.
 
-In the [adoption benchmark](benchmark.md) (1,242 sessions, scored by code), agents using Contexer got **109 of 114** tasks right with a 150-rule store, against **108** with a full `CLAUDE.md` and **108** with indexed decision docs, at **$0.076** per session against $0.109 and $0.103. When two current rules contradicted each other, the agent asked the developer in **12 of 12** runs, against 7 of 12 with the static files. Whenever the needed rule reached the agent, it followed it.
+In the [adoption benchmark](benchmark.md) (1,242 sessions, scored by code), agents using Contexer got **109 of 114** tasks right with a 150-rule store, against **108** with a full `CLAUDE.md` and **108** with decision docs, at **$0.076** per session against $0.109 and $0.103. When two current rules contradicted each other, the agent asked the developer in **12 of 12** runs, against 7 of 12 with the static files. Whenever the needed rule reached the agent, it followed it.
 
 Contexer fails safe. Hooks never block a session or a commit by failing; a corrupt store keeps sessions running and refuses to be overwritten; data stays on the developer's machine unless someone shares a decision explicitly, and sharing with redaction switched off always warns and asks for confirmation. Every decision keeps its history, can be exported to Markdown or ADR files, and can be erased by a human when it holds something sensitive.
 
-What a pilot should watch: rules a developer states during a session reach the store in only **6 of 24** runs in the benchmark, against 24 of 24 for a `CLAUDE.md` the agent is told to maintain ([#385](https://github.com/bhargavamin/contexer/issues/385)), so a person should add or approve the rules that matter. Rules worded very differently from the task can be missed ([#390](https://github.com/bhargavamin/contexer/issues/390)). The human time upkeep takes has not been measured yet ([#363](https://github.com/bhargavamin/contexer/issues/363)).
+What a pilot should watch, because capture is still the weak point: rules a developer states during a session reach the store in only **6 of 24** runs in the benchmark, against 24 of 24 for a `CLAUDE.md` the agent is told to maintain ([#385](https://github.com/bhargavamin/contexer/issues/385)), so a person should add or approve the rules that matter. Rules worded very differently from the task can be missed ([#390](https://github.com/bhargavamin/contexer/issues/390)). The human time upkeep takes has not been measured yet ([#363](https://github.com/bhargavamin/contexer/issues/363)).
 
-To start a pilot, install Contexer (see the [quick start](../README.md#quick-start)), keep your existing `CLAUDE.md` for stable instructions, and set your adopt / don't-adopt bar before you begin ([last question below](#how-should-we-run-a-pilot)).
+**To start a pilot:** `uv tool install contexer` then `contexer install` ([quick start](../README.md#quick-start)), keep your existing `CLAUDE.md` for stable instructions, and set your adopt / don't-adopt bar before you begin ([last question below](#how-should-we-run-a-pilot)).
 
 ## Frequently asked questions
 
-Status key: **holds** (evidence given), **partial** (holds with a stated limit), **gap** (not handled yet; issue linked).
+Each answer is marked **holds** (works today, with evidence), **partial** (works, with a stated limit) or **gap** (not handled yet, with the issue tracking it).
 
 ### Does it change what agents build?
 
 | Question | Status | Evidence |
 | --- | --- | --- |
 | When the right decision reaches the agent, does the agent follow it? | holds | Every benchmark run where the needed rule arrived succeeded (116 runs across both store sizes); every Contexer loss was a rule that never arrived ([benchmark](benchmark.md#why-does-contexer-still-get-some-tasks-wrong)). |
-| Does it beat well-kept documentation? | partial | On accuracy it ties: 108 vs 106 (`CLAUDE.md`) and 111 (indexed docs) of 114 at 34 rules; 109 vs 108 and 108 at 150 rules. It costs 12–18% less per session at 34 rules and 26–30% less at 150 ([benchmark](benchmark.md#how-much-cheaper-is-it-and-why)). |
-| Does it catch contradicting rules? | holds | Contradicting current decisions are rendered together and marked as a conflict (`conflicts.py`); in the benchmark the agent asked before coding in 12 of 12 runs at both store sizes, against 5–9 of 12 for the static files. Small samples: 12 runs per cell. |
+| Does it beat well-kept documentation? | partial | It matches them on accuracy: 108 vs 106 (`CLAUDE.md`) and 111 (decision docs) of 114 at 34 rules; 109 vs 108 and 108 at 150 rules. It costs 12–18% less per session at 34 rules and 26–30% less at 150 ([benchmark](benchmark.md#how-much-cheaper-is-it-and-why)). |
+| Does it catch contradicting rules? | partial | In the benchmark the agent asked before coding in 12 of 12 runs at both store sizes, against 5–9 of 12 for the static files (small samples: 12 runs per cell). Contexer marks a contradiction explicitly only for incompatible version formats (`conflicts.py`); other kinds aren't detected automatically. |
 | Does extra context hurt tasks that need no decision? | holds | On tasks the code alone answers or that need no rule, Contexer got 36 of 36 at both store sizes; a full `CLAUDE.md` got 35 of 36. |
 | Does retrieval find the right decision reliably? | partial | Anchored decisions no longer crowd out task-matched ones (#358, #349, fixed). Rules worded differently from the task are still missed (#390), inflected words such as "caching" vs "cache" can miss (#351), and agents rarely search on their own after a miss (#361). |
 
@@ -38,7 +38,7 @@ Status key: **holds** (evidence given), **partial** (holds with a stated limit),
 | --- | --- | --- |
 | Can Contexer block an agent session or a commit by failing? | holds | Hook output is best-effort and fails soft (CLAUDE.md, "Session behaviour"). The commit guard never blocks on its own failure; only explicitly armed rules can block (CLAUDE.md, "Commit-time guard"). |
 | What happens on a corrupt store file? | holds | Session reads degrade to an empty store, so work continues (`store.load`). Every write path reads through a strict reader that refuses a corrupt file instead of overwriting it, so earlier decisions are not lost (`store.load_for_update`, #368). |
-| Does session-start context reach the model as stores grow? | holds | Claude startup output is budgeted below the host's inline limit, with approved constraints kept in full and a pointer for the rest (#365). A retained live 150-decision session received its needed constraint in full ([receipt](../benchmarks/artifacts/issue365-live/receipt-summary.json)); the 150-rule benchmark rerun on v0.50.1 is the end-to-end check. Other hosts have no inferred Claude cutoff. |
+| Does session-start context reach the model as stores grow? | holds | Claude Code cuts long session-start context down to a short preview; Contexer keeps its startup context under that limit, approved constraints in full first and a pointer to the rest (#365). A retained live 150-decision session received its needed constraint in full ([receipt](../benchmarks/artifacts/issue365-live/receipt-summary.json)); the 150-rule benchmark rerun on v0.50.1 is the end-to-end check. Other hosts have no inferred Claude cutoff. |
 | Partial installs and version skew? | partial | `contexer reinstall` and `upgrade` re-sync hooks and keep foreign hooks (`adapters/base._is_ours`); a release notice appears at most once per release (`updates.py`). Hooks call the installed package directly, so an uninstalled package shows host hook errors rather than silent loss. No health check reports a half-installed host. |
 | Does it inject irrelevant context? | partial | Per-prompt retrieval is gated and capped at three full decisions, but short or generic prompts can still pull unrelated ones (#334). Whether repeated low-value injections teach people or agents to ignore it is not measured (#363). |
 | Which hosts are supported? | partial | Claude Code, Codex and Gemini CLI get session-start and per-prompt delivery; Cursor gets session-start only (CLAUDE.md, adapters). Only Claude Code was benchmarked. |

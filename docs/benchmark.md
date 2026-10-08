@@ -1,58 +1,52 @@
 # The Contexer Benchmark
 
-*Written as a press release and FAQ: the claims first, then the questions a team lead would ask. Every number links back to raw session rows in `benchmarks/artifacts/`, scored by code rather than an AI judge and re-checked by an independent validator.*
+## Same answers as your CLAUDE.md. 30% cheaper at scale. And your agent asks when rules disagree.
 
-## Press release
-
-### Contexer gives AI coding agents the same answers as a hand-kept CLAUDE.md, at 26–30% lower cost as the rulebook grows
-
-**A 1,242-session benchmark also finds that when two team rules contradict each other, agents using Contexer stopped to ask in 12 of 12 runs, against 7 of 12 with static rule files.**
+**A 1,242-session benchmark of Contexer v0.50.1 against a full `CLAUDE.md` and a folder of decision docs: equal accuracy, the lowest cost per session, and the only approach where agents stopped to ask on every contradicting pair of rules (12 of 12, against 7 of 12).**
 
 **October 2026.** Teams that use AI coding agents write their decisions down so the agent follows them: "we never use threads in this service", "always write files atomically". Most keep them in a single `CLAUDE.md` or a folder of decision docs. A new benchmark of Contexer v0.50.1 measured what happens when those rules move into Contexer instead, on 38 coding tasks that only come out right if the agent knows a team rule.
 
-The problem with a rules file is that it grows. Every rule is sent to the agent in every session, so the bill grows with the rulebook, and nothing notices when two rules start to disagree. In the benchmark, growing the rulebook from 34 to 150 rules raised the cost per session by 36–37% for a full `CLAUDE.md` and for indexed docs, and when two rules contradicted each other, both went ahead and wrote code without asking in 5 of 12 runs.
+The problem with a rules file is that it grows. Every rule is sent to the agent in every session, so the bill grows with the rulebook, and nothing notices when two rules start to disagree. In the benchmark, growing the rulebook from 34 to 150 rules raised the cost per session by 36–37% for a full `CLAUDE.md` and for decision docs, and when two rules contradicted each other, both went ahead and wrote code without asking in 5 of 12 runs.
 
-Contexer stores each decision with its history and approval status, and hands the agent the ones that look relevant at session start and with each prompt. With 150 rules, the agent got **109 of 114** tasks right with Contexer, against **108** with a full `CLAUDE.md` and **108** with indexed docs: the same accuracy, within noise. Each session cost **$0.076**, against $0.109 and $0.103. Contexer's cost grew 15% across the same fourfold rulebook growth. When two current rules contradicted each other, Contexer marked them as a conflict and the agent asked the developer which applied, every time.
+Contexer stores each decision with its history and approval status, and hands the agent the ones that look relevant at session start and with each prompt. With 150 rules, the agent got **109 of 114** tasks right with Contexer, against **108** with a full `CLAUDE.md` and **108** with decision docs: the same accuracy. Then the differences: each session cost **$0.076**, against $0.109 and $0.103, which is **30% less** than the `CLAUDE.md`. Contexer's cost grew 15% across the same fourfold rulebook growth. When two current rules contradicted each other, the agent asked the developer which applied, every time.
 
 The benchmark also states what Contexer does not do yet. When a developer stated a new rule during a session, Contexer recorded it for the next session in only **6 of 24** runs; a `CLAUDE.md` the agent was told to maintain recorded **24 of 24**. And a rule worded very differently from the task can be missed: one task asking for code that "finishes as quickly as possible" never received the rule "no threads or async", and failed in all 6 runs. Both are open issues ([#385](https://github.com/bhargavamin/contexer/issues/385), [#390](https://github.com/bhargavamin/contexer/issues/390)).
 
-To try it, install Contexer (see the [quick start](../README.md#quick-start)) and keep your existing `CLAUDE.md` for stable instructions. To check these numbers, every session row and validator report is in `benchmarks/artifacts/`, and the [reproduce](#reproduce-it) commands rerun the benchmark.
+**Try it on your repository in two commands:** `uv tool install contexer` then `contexer install` ([quick start](../README.md#quick-start)). Keep your existing `CLAUDE.md` for stable instructions. To check these numbers, every session row and validator report is in `benchmarks/artifacts/`, and the [reproduce](#reproduce-it) commands rerun the benchmark.
 
 ## Frequently asked questions
 
-### Is Contexer more accurate than a CLAUDE.md?
+### Is Contexer as accurate as a CLAUDE.md?
 
-No: about the same. Across 114 runs per approach, a gap of 1 to 3 tasks is within noise.
-
-| Tasks right (of 114) | No rules | Full CLAUDE.md | Indexed docs | Contexer |
+| Tasks right (of 114) | No rules | Full CLAUDE.md | Decision docs | Contexer |
 |---|---|---|---|---|
 | 34 rules | 66 | 106 | 111 | 108 |
 | 150 rules | 66 | 108 | 108 | 109 |
 
-A difference of 1 to 3 tasks out of 114 is within noise, so the honest summary is **about equal**, not "Contexer is better". On the previous build (v0.49.x), before fixes that stopped long startup context being cut short by the host, Contexer scored 105 and 94 (the 94 on the original, unfixed conflict tasks); those fixes are why we reran it.
+Yes. It **matches** them: a difference of 1 to 3 tasks out of 114 is within noise, so we don't claim Contexer is more accurate. Matching is the entry ticket; cost and contradicting rules (below) are where it differs. The previous build scored 105 and 94; a fix that stopped Claude Code cutting long session-start context down to a short preview is why we reran it.
 
 Writing rules down matters far more than where you keep them: with no rules, the agent got 66 of 114 right.
 
 ### How much cheaper is it, and why?
 
-| Cost per session | Full CLAUDE.md | Indexed docs | Contexer |
+| Cost per session | Full CLAUDE.md | Decision docs | Contexer |
 |---|---|---|---|
 | 34 rules | $0.080 | $0.075 | **$0.066** |
 | 150 rules | $0.109 | $0.103 | **$0.076** |
 | Growth, 34 to 150 rules | +36% | +37% | **+15%** |
 
-A rules file sends every rule in every session, so its cost grows with the rulebook. Contexer sends mainly the rules that look relevant. At 150 rules it is **26 to 30% cheaper**. (No rules at all: $0.045, with far worse results.) Costs are total spend divided by sessions; medians differ by under a cent.
+A rules file sends every rule in every session, so its cost grows with the rulebook. Contexer sends mainly the rules that look relevant. At 150 rules it is **30% cheaper than a full `CLAUDE.md`** (26% cheaper than decision docs). (No rules at all: $0.045, with far worse results.) Costs are total spend divided by sessions; medians differ by under a cent.
 
 ### What happens when two rules contradict each other?
 
 Some tasks carry **two current rules that contradict each other**, for example "prefix versions with v" against "publish bare versions". The right behaviour is to stop and ask which applies. A session counts only if its final message names both rules and its code takes neither side.
 
-| Asked before coding (of 12) | Full CLAUDE.md | Indexed docs | Contexer |
+| Asked before coding (of 12) | Full CLAUDE.md | Decision docs | Contexer |
 |---|---|---|---|
 | 34 rules | 5 | 9 | **12** |
 | 150 rules | 7 | 7 | **12** |
 
-Contexer marks contradicting rules explicitly, so the agent caught every one. With static files the agent went ahead and implemented code in every miss, sometimes mentioning the clash only afterwards. On the version conflict, both static approaches asked in 0 of 3 runs at 150 rules. This is Contexer's clearest advantage; each cell is only 12 runs.
+With Contexer the agent caught every one. Contexer puts the relevant rules in front of the agent as a short list, which likely makes the clash visible; a long rules file buries it. (That explanation is our reading, not measured. Contexer's explicit conflict marker covers only one kind of contradiction so far, incompatible version formats; the other three tasks were caught without it, and so were all four on the previous build, before the marker existed.) With static files the agent went ahead and implemented code in every miss, sometimes mentioning the clash only afterwards. On the version conflict, both static approaches asked in 0 of 3 runs at 150 rules. This is Contexer's clearest advantage; each cell is only 12 runs.
 
 ### Why does Contexer still get some tasks wrong?
 
@@ -66,32 +60,28 @@ Not reliably yet. In a separate 144-session test, a developer stated a rule in o
 
 On the same October tasks, comparing the previous build with v0.50.1 (static-file results unchanged):
 
- The October tasks were run on the previous build and again on v0.50.1, with the static-file results unchanged:
-
 | Contexer on the October tasks | v0.49.x (Oct 3) | v0.50.1 (Oct 8) | Best static file |
 |---|---|---|---|
-| Tasks right, 34 rules | 105 / 114 | **108 / 114** | 111 (indexed docs) |
+| Tasks right, 34 rules | 105 / 114 | **108 / 114** | 111 (decision docs) |
 | Tasks right, 150 rules | 94 / 114 | **109 / 114** | 108 (both) |
 | Contradicting rules asked, 34 rules | 12 / 12 | 12 / 12 | 9 / 12 |
 | Contradicting rules asked, 150 rules | not run on fixed tasks | **12 / 12** | 7 / 12 |
 | Cost per session, 150 rules | $0.054 | $0.076 | $0.103 |
 
-The 150-rule gain came mainly from fixing startup context that was over the host's inline limit and was being cut to a short preview, so most rules never reached the agent. The fix also explains why cost per session rose: the agent now actually reads that context.
+The 150-rule gain came mainly from one fix: Claude Code cuts long session-start context down to a short preview, and with 150 rules most of Contexer's rules were being cut, so they never reached the agent. Contexer now keeps that context within the limit. The fix also explains why cost per session rose: the agent now actually reads it.
 
-Across the two published studies, which used different models, tasks and questions:
-
- Model, tasks and scoring differ, so read this as how the question moved, not as a trend line:
+Across the two published studies, which used different models, tasks and questions, read this as how the question moved, not as a trend line:
 
 | | July 2026 (v0.20.0) | October 2026 (v0.50.1) |
 |---|---|---|
 | Model | Claude Sonnet 5 | Claude Sonnet 5.5 |
 | Question | Do stored decisions beat having none? | Should a team use Contexer instead of a rules file? |
-| Compared against | Nothing stored; a complete hand-written CLAUDE.md | No rules; a full CLAUDE.md; one-file-per-rule docs; at 34 and 150 rules |
+| Compared against | Nothing stored; a complete hand-written CLAUDE.md | No rules; a full CLAUDE.md; decision docs; at 34 and 150 rules |
 | Against nothing stored | 6× fewer tokens, right answers instead of guesses | 109 vs 66 tasks right (150 rules) |
 | Against a complete CLAUDE.md | Tie on cost and accuracy (a small set of stored decisions) | Tie on accuracy; 26–30% cheaper at 150 rules |
 | New in October | | Contradicting rules: 12/12 asked vs 7/12; capture during work measured (6/24) |
 
-The July headline, "a complete CLAUDE.md ties Contexer", still holds for small rulebooks. What October adds is scale: as the rulebook grows, a rules file's cost grows with it, while Contexer's grows much less, and contradictions between rules become something only Contexer flags.
+The July headline, "a complete CLAUDE.md ties Contexer", still holds for small rulebooks. What October adds is scale: as the rulebook grows, a rules file's cost grows with it, while Contexer's grows much less, and contradicting rules were caught far more often with Contexer.
 
 ### How was this tested?
 
@@ -103,7 +93,7 @@ We compared four ways of giving the agent the team's rules:
 |---|---|
 | **No rules** | Just the code |
 | **Full CLAUDE.md** | Every rule in one file, loaded in every session |
-| **Indexed docs** | One file per rule, plus a list of titles the agent can open |
+| **Decision docs** | One file per rule in `docs/decisions/`, plus a list of titles in `CLAUDE.md` the agent can open |
 | **Contexer** | Rules stored in Contexer, which hands the agent the relevant ones at session start and with each prompt |
 
 We ran it with **34 rules** (a small team) and **150 rules** (a bigger, older project). The tasks cover eight situations: knowledge visible in the code, in the repo's docs, nowhere in the repo, code that points the wrong way, an obvious approach the team rejected, tasks that need no rule (to catch harm from noise), a rule replaced by a newer one, and two current rules that contradict each other.
@@ -120,7 +110,7 @@ We ran it with **34 rules** (a small team) and **150 rules** (a bigger, older pr
 | Directory | What | Sessions |
 |---|---|---|
 | `adoption-38-phase1` | All four approaches, 34 rules (Contexer row superseded by `adoption-38-0501`) | 456 |
-| `adoption-150-phase3` | Full CLAUDE.md, indexed docs, Contexer, 150 rules (Contexer row superseded) | 342 |
+| `adoption-150-phase3` | Full CLAUDE.md, decision docs, Contexer, 150 rules (Contexer row superseded) | 342 |
 | `adoption-38-k7c-fixed` | Contradicting-rule tasks after a fixture fix, 34 rules | 36 |
 | `adoption-38-0501`, `adoption-150-0501` | Contexer v0.50.1, both sizes | 228 |
 | `adoption-150-k7c-0501` | Contradicting-rule tasks, 150 rules, three approaches | 36 |
