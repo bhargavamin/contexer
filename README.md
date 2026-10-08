@@ -41,7 +41,7 @@
 
 # The decision and enforcement layer for AI coding agents
 
-Capture engineering decisions and their reasoning, review changes, and bring the right guidance into **Claude Code, Cursor, Codex, and Gemini CLI**. Share approved decisions through optional Contexer Teams and enforce selected rules with optional commit checks.
+Capture engineering decisions and their reasoning, review changes, and bring the right guidance into **Claude Code, Cursor, Codex, and Gemini CLI**. With Contexer Teams, share and version decisions across your team, so every teammate's agent picks up an approved change on its next prompt, and enforce the rules that matter with Contexer Guard, on each commit or pull request.
 
 <p align="center">
   <picture>
