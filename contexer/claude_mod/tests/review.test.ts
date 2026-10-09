@@ -252,6 +252,17 @@ describe('band above the prompt', () => {
       expect((await $.command.run({ command: 'contexer-review', args: '' } as never))?.text).toMatch(/Opened/)
     })
 
+    test(`a pane left waiting undrawn still reads the queue (${surface})`, async ($, on) => {
+      // A resize draws the waiting pane later with no call of the mod's; it must not show the
+      // last turn's queue then.
+      const calls = fakeContexer(on, [NEW])
+      await start($, surface)
+      placed = false
+      const before = calls.length
+      await $.command.run({ command: 'contexer-review', args: '' } as never)
+      expect(calls.slice(before).some(argv => argv[argv.length - 1] === '--json')).toBe(true)
+    })
+
     test(`counts only items the pane can settle (${surface})`, async ($, on) => {
       fakeContexer(on, [RETIRE])
       await start($, surface)

@@ -176,17 +176,18 @@ async function showCardTop($: EngineInterface): Promise<void> {
 // the person's own command or press, so the surface seats it at any width; an open made later
 // from a timer counts as the plugin's own and waits undrawn on a narrow terminal. The pane only
 // counts as open (hiding the band) once it is drawn. `onSeated` runs once it is drawn, before
-// the queue read (a Python process) is waited on. Says whether the pane is drawn.
+// the queue read (a Python process) is waited on. The queue is read either way: a pane left
+// waiting undrawn is drawn later when the terminal widens, with no call of ours, and must not
+// show the last turn's queue then. Says whether the pane is drawn.
 async function openPane($: EngineInterface, onSeated?: () => void): Promise<boolean> {
   await update($, note, () => null)
   await update($, editing, () => null)
   await update($, cursor, () => null)
   const opened = await $.ui.open(OPEN)
   await update($, isPaneOpen, () => opened.isPlaced)
-  if (!opened.isPlaced) return false
-  onSeated?.()
+  if (opened.isPlaced) onSeated?.()
   await refresh($)
-  return true
+  return opened.isPlaced
 }
 
 // Whether the surface draws the pane now, by the engine's record: a pane left waiting undrawn
