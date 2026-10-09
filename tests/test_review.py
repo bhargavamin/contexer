@@ -113,3 +113,25 @@ class TestBuildProposal:
         before = dict(target)
         review.build_proposal(target, "content", "", "s2", "NOW")
         assert target == before, "a proposal waits for approval; it changes nothing"
+
+
+class TestReviewItemKind:
+    def test_a_plain_pending_entry_is_new(self):
+        assert review.item_kind({}) == "new"
+
+    def test_precedence_reconsideration_then_retirement_then_update(self):
+        assert review.item_kind({"proposed_revision": {"c": 1}}) == "update"
+        assert review.item_kind({"proposed_lifecycle": {"a": 1},
+                                 "proposed_revision": {"c": 1}}) == "retirement"
+        assert review.item_kind({"proposed_revision": {"c": 1}, "proposed_lifecycle": {"a": 1},
+                                 "proposed_reconsideration": {"r": 1}}) == "reconsideration"
+
+    def test_known_actions_is_the_union_of_every_kind(self):
+        assert review.known_actions() == {"approve", "edit", "ignore", "dismiss", "keep"}
+
+    def test_only_content_questions_settle_outside_the_terminal(self):
+        assert review.item_actions("new") == ["approve", "edit", "ignore"]
+        assert review.item_actions("update") == ["approve", "edit", "dismiss"]
+        assert review.item_actions("retirement") == []
+        assert review.item_actions("reconsideration") == []
+        assert review.item_actions("unknown") == []

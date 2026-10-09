@@ -3713,7 +3713,9 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
 
 
 def approve_decision(repo_path: str, entry_id: str, action: str,
-                     content: str = "", *, source_files: list | None = None) -> tuple[bool, str]:
+                     content: str = "", *, source_files: list | None = None,
+                     precondition: Callable[[dict], str | None] | None = None,
+                     ) -> tuple[bool, str]:
     """Approve, edit, skip, ignore, or dismiss a decision awaiting the developer - or
     retire an already-trusted one.
 
@@ -3736,6 +3738,13 @@ def approve_decision(repo_path: str, entry_id: str, action: str,
         applies. Single-decision id only, and only with action 'approve' or 'edit' - raises
         ValueError on a comma-list/"all" target or any other action, since neither ratifies
         anything to anchor.
+    precondition: called with the entry as loaded INSIDE the store lock; a returned message
+        refuses the action and nothing is written. For a caller that chose the action from an
+        earlier read (the review pane). It decides only what the caller checks: this function
+        knows nothing of what was shown, so a caller that must not ratify a proposal replaced
+        in between by one of the same kind compares what it showed (the review pane's
+        `console_api.review_basis`); checking the kind alone misses that case. Single decision
+        id only; an id that resolves to nothing is left to the usual "not found" refusal.
     Returns (success, message).
     """
     if action not in ("approve", "ignore", "edit", "skip", "dismiss"):
@@ -3747,9 +3756,16 @@ def approve_decision(repo_path: str, entry_id: str, action: str,
             raise ValueError("source_files requires a single decision id")
         if action not in ("approve", "edit"):
             raise ValueError("source_files requires action 'approve' or 'edit'")
+    if precondition is not None and (entry_id.strip().lower() in ("all", "*") or "," in entry_id):
+        raise ValueError("precondition requires a single decision id")
 
     with store_lock(repo_slug(repo_path)):
         data = load_for_update(repo_path)
+        if precondition is not None:
+            live = entry_by_id(data["entries"], entry_id)
+            refusal = precondition(live) if live is not None else None
+            if refusal:
+                return False, refusal
         ok, msg, changed = apply_approval(
             data, entry_id, action, content, datetime.now(timezone.utc).isoformat(), repo_path,
             has_caller_source_files=bool(source_files))

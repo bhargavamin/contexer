@@ -8,6 +8,10 @@ one-way (``store.py`` imports this leaf, never the reverse).
 
 Promotion of a proposal into a revision is deliberately NOT here: it anchors source files,
 which shells out to git and mutates the entry, so it stays with the store's I/O.
+
+It also owns which question a pending entry asks (`item_kind`) and which actions settle it
+outside the terminal loop (`item_actions`), so `contexer review`, its `--json` mode and the
+Claude Code mod's pane cannot disagree about either.
 """
 
 from contexer import revisions
@@ -16,6 +20,43 @@ from contexer import revisions
 # highest-trust signal in the system, a plan-sourced value survived reconciliation, an AI
 # guess is inferred, and a scan proposal is bookkeeping that re-proposes on its own TTL.
 PROPOSAL_TRUST = {"human": 3, "plan": 2, "ai": 1, "scan": 0}
+
+# What each kind of review item can be settled with OUTSIDE the terminal loop. Retirement and
+# reconsideration stay terminal-only: retiring needs a typed reason and restoring may need typed
+# wording, and both have stale-proposal rules `contexer review` already explains.
+_ITEM_ACTIONS = {
+    "new": ("approve", "edit", "ignore"),
+    "update": ("approve", "edit", "dismiss"),
+    "retirement": (),
+    "reconsideration": (),
+    # Two CURRENT decisions that prescribe incompatible things (conflicts.current_pairs): the
+    # developer keeps one, and the other is retired as superseded by it.
+    "current_conflict": ("keep",),
+}
+
+
+def item_kind(entry: dict) -> str:
+    """Which question a pending entry asks. A reconsideration outranks a retirement, which
+    outranks a Suggested Update: there is no point settling how a decision should read while its
+    existence is in doubt, and a decision under reconsideration is not live at all."""
+    if entry.get("proposed_reconsideration"):
+        return "reconsideration"
+    if entry.get("proposed_lifecycle"):
+        return "retirement"
+    if entry.get("proposed_revision"):
+        return "update"
+    return "new"
+
+
+def known_actions() -> set[str]:
+    """Every action any kind of review item can be settled with outside the terminal."""
+    return {action for actions in _ITEM_ACTIONS.values() for action in actions}
+
+
+def item_actions(kind: str) -> list[str]:
+    """The actions that may settle an item of `kind` one call at a time, outside `contexer
+    review`'s terminal loop; empty for a kind that needs the terminal's typed reason or wording."""
+    return list(_ITEM_ACTIONS.get(kind, ()))
 
 
 def outranks_proposal(source: str, prop: dict) -> bool:

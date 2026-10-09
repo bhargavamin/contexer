@@ -44,7 +44,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["contexer"]
 # Folder guides for coding agents working in this repo; not runtime data for installed users.
-exclude = ["contexer/**/CLAUDE.md"]
+# The Claude Code mod's own tests run locally with `claude plugin test contexer/claude_mod`;
+# they are not shipped in the wheel, the mod itself is.
+exclude = ["contexer/**/CLAUDE.md", "contexer/claude_mod/tests"]
 
 [tool.uv]
 # Pin a uv floor so an older uv can't silently rewrite uv.lock back to an

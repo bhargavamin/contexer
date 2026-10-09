@@ -13,7 +13,10 @@ sat inside the same line range in store.py: it has no console consumer at all (i
 is `contexer review`'s terminal output, via `cli._print_overlap_section`), it carries its own
 thresholds, and it reads store internals rather than projecting an entry for display. Adjacency
 in a file is not a boundary. Anything added here must have a console consumer, or the claim
-above stops being checkable.
+above stops being checkable. The one exception to "ui/api.py is the only caller" is
+`review_queue`, whose consumer is the other console: the Claude Code mod's in-session review
+pane, which reads it through `contexer review --json` (`cli._review_json`). What a queue item
+may be settled with is review policy, owned by `review.py`, not by this projection.
 
 The console must never open a store file itself (the same one-write-path rule the MCP surface
 follows), so every shape it renders is assembled here. Everything is a PURE READ except
@@ -38,13 +41,16 @@ import time. The public entrypoints stay reachable as `store.<name>` through sto
 PEP 562 `__getattr__`, so no existing caller had to change.
 """
 
+import hashlib
 import json
 import os
+import re
 import time
 from pathlib import Path
 
 from contexer import conflicts      # pure stdlib leaf (no cycle): open-conflict predicate
 from contexer import decision_impact
+from contexer import review         # pure leaf: which question a pending item asks, and its actions
 from contexer import review_impact  # the shared review block; reads store, never console_api
 from contexer import revisions      # pure stdlib leaf (no cycle): revision lifecycle
 from contexer import store          # module object, not `from`-imports: see docstring above
@@ -162,6 +168,7 @@ def _console_summary(entry: dict) -> dict:
         "confidence": rev.get("confidence_score", entry.get("confidence", 0)),
         "has_proposal": bool(entry.get("proposed_revision")),
         "source_files": list(entry.get("source_files") or []),
+        "applies_when": list(entry.get("applies_when") or []),
     }
 
 
@@ -399,6 +406,139 @@ def dashboard_summary(repo_path: str) -> dict:
         "staleness": team["staleness"],
         "health": health,
     }
+
+
+REVIEW_PROTOCOL = 1
+"""Version of the `review_queue` shape. The Claude Code mod checks it and draws nothing on a
+mismatch, so a mod and a package from different releases (an upgrade mid-session, a stale
+registration) degrade to silence rather than to a pane that misreads the fields. Bump it on any
+change a mod built against the old shape would misread; adding a key is not one."""
+
+def review_basis(entry: dict) -> str | None:
+    """A short fingerprint of what a review card asks the developer to ratify, or None for an
+    item the pane cannot settle. `review --json <action> <id> --expect <basis>` recomputes it
+    inside the store lock and refuses on a mismatch, so a proposal another session replaced
+    with one of the same kind (`review.claim_proposal_slot`) is never approved unseen.
+
+    Covers the kind, the wording that would become current (a Suggested Update's proposal, else
+    the decision itself) with its title and applicability, the current wording beside it, and
+    the files approval would anchor. Taken from the STORED text, before `_printable`, so the
+    queue and the action read the same bytes."""
+    kind = review.item_kind(entry)
+    if not review.item_actions(kind):
+        return None
+    current = revisions.current_content(entry)
+    # The current scope too: an update that inherits it (`applies_when` absent on the proposal)
+    # shows it on the card and adopts it on approval, so a change to it alone must not pass.
+    shown = {"kind": kind, "current": current,
+             "current_applies_when": list(entry.get("applies_when") or []),
+             "anchors": review_impact.confirmed_anchors(entry)}
+    if kind == "update":
+        prop = entry.get("proposed_revision") or {}
+        shown.update(content=prop.get("content", ""), title=prop.get("title", ""),
+                     applies_when=prop.get("applies_when"))
+    else:
+        shown.update(title=entry.get("title") or revisions.derive_title(current),
+                     applies_when=list(entry.get("applies_when") or []))
+    blob = json.dumps(shown, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def review_queue(repo_path: str) -> dict:
+    """Everything that waits on the developer for one repo, as the in-session review pane
+    renders it. `items` is the same set `contexer review` walks (`store.get_pending_decisions`),
+    one row per decision, each naming the actions the pane may offer for it. `conflicts` is the
+    pane's own addition, contradicting current decisions (`current_conflicts`), which the
+    terminal review does not list."""
+    items = []
+    for entry in store.get_pending_decisions(repo_path):
+        kind = review.item_kind(entry)
+        item = {
+            **_console_summary(entry),
+            "kind": kind,
+            "origin": review_impact.origin_label(entry.get("created_by", "ai")),
+            "actions": review.item_actions(kind),
+        }
+        basis = review_basis(entry)
+        if basis is not None:
+            item["basis"] = basis
+        if kind == "update":
+            prop = entry.get("proposed_revision") or {}
+            item["proposed"] = _console_proposed(prop)
+            if "applies_when" not in prop:
+                # No key means the proposal inherits the current applicability on approval
+                # (`revisions.append_revision`), not "always": say so instead of `[]`.
+                item["proposed"]["applies_when"] = None
+            item["conflict"] = conflicts.has_open_conflict(entry)
+            item["pick"] = conflicts.memo_pick(entry)
+        elif kind == "retirement":
+            life = entry.get("proposed_lifecycle") or {}
+            item["retirement"] = {"reason": life.get("reason") or "",
+                                  "replacement_id": life.get("replacement_decision_id")}
+        elif kind == "reconsideration":
+            recon = entry.get("proposed_reconsideration") or {}
+            item["reconsideration"] = {"content": recon.get("content") or ""}
+        # The files approving would anchor, in full: the developer signs them by pressing
+        # Approve, so the pane names them as the terminal review does (`anchor_confirmation`).
+        item["anchors"] = review_impact.confirmed_anchors(entry)
+        items.append(item)
+    return _printable({"protocol": REVIEW_PROTOCOL, "repo": repo_path, "count": len(items),
+                       "items": items, "conflicts": current_conflicts(repo_path)})
+
+
+# C0 controls except tab and newline, DEL, and C1: the mod's engine refuses a whole render tree
+# whose text holds one, so a stray escape in one captured decision would blank every card.
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+# Keys whose value the mod sends back as an action argument (or matches against the store), so
+# it must reach the mod byte for byte: a stripped id would name no decision, a stripped basis
+# would never match.
+_IDENTIFIERS = frozenset({"id", "repo", "basis", "replacement_id"})
+
+
+def _printable(value):
+    """`value` rebuilt with control characters left out of every display string in it, for the
+    review pane only: the stored decision keeps its text verbatim. Identifiers (`_IDENTIFIERS`)
+    pass through untouched. The pane's Edit field starts from this displayed text, so a pane
+    edit saves the wording without the stripped characters."""
+    if isinstance(value, str):
+        return _CONTROL.sub("", value)
+    if isinstance(value, dict):
+        return {key: item if key in _IDENTIFIERS else _printable(item)
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [_printable(item) for item in value]
+    return value
+
+
+def current_conflicts(repo_path: str) -> list[dict]:
+    """Pairs of CURRENT decisions that prescribe incompatible things (`conflicts.current_pairs`),
+    as the review pane offers them: both sides in full, which of them may be kept
+    (`conflicts.can_keep`), and the action that settles the pair (keep one side; the other is
+    retired as superseded by it). A pair with no keepable side offers no action. Not pending
+    decisions, so they are not in `items` and not in `count`."""
+    pairs = []
+    for left, right in conflicts.current_pairs(store.load(repo_path).get("entries", [])):
+        sides = [_conflict_side(e) for e in (left, right)]
+        pairs.append({
+            "kind": "current_conflict",
+            "reason": conflicts.CURRENT_PAIR_REASON,
+            "decisions": sides,
+            "basis": conflicts.pair_basis(left, right),
+            "actions": (review.item_actions("current_conflict")
+                        if any(side["can_keep"] for side in sides) else []),
+        })
+    return pairs
+
+
+def _conflict_side(entry: dict) -> dict:
+    """One side of a contradiction, with its pending Suggested Update when it has one: keeping
+    a side must not hide that its wording may be about to change."""
+    side = {**_console_summary(entry), "can_keep": conflicts.can_keep(entry)}
+    if entry.get("proposed_revision"):
+        side["proposed"] = _console_proposed(entry["proposed_revision"])
+    return side
 
 
 def list_decisions(repo_path: str, *, query: str = "", subtype: str = "", status: str = "",

@@ -1,0 +1,97 @@
+// The values the review mod keeps in `$.state` for the session, and the queue shape it reads
+// from `contexer review --json` (console_api.review_queue, protocol 1).
+
+export type ReviewItemKind = 'new' | 'update' | 'retirement' | 'reconsideration'
+
+export type ReviewAction = 'approve' | 'edit' | 'ignore' | 'dismiss'
+
+/** Settles a pair of contradicting current decisions (review.item_actions('current_conflict')). */
+export type ConflictAction = 'keep'
+
+/** When a decision applies (`applies_when`); empty means always. */
+export type Applicability = string[]
+
+export type ReviewItem = {
+  id: string
+  kind: ReviewItemKind
+  title: string
+  content: string
+  subtype: string
+  status: string
+  created_by: string
+  /** How it was captured, in the developer's terms (review_impact.ORIGIN_LABELS). */
+  origin: string
+  timestamp: string | null
+  /** Absent from a contexer older than the applicability change: read it as always. */
+  applies_when?: Applicability
+  actions: ReviewAction[]
+  /** What the card asks the developer to ratify, fingerprinted (console_api.review_basis); sent
+   * back as `--expect` so an action on a decision that changed since is refused. Absent when
+   * the pane cannot settle the item, and from a contexer older than the check. */
+  basis?: string
+  /** `applies_when` null: the proposal inherits the current applicability on approval. */
+  proposed?: { content: string; title: string; applies_when?: Applicability | null }
+  /** A Suggested Update whose content differs from the approved version (conflicts.has_open_conflict). */
+  conflict?: boolean
+  /** The side picked earlier with the developer (conflicts.memo_pick), if any. */
+  pick?: 'update' | 'standing' | null
+  /** The files approving would anchor, in full (review_impact.confirmed_anchors). */
+  anchors?: string[]
+  /** A proposed retirement: why, and what replaces it. */
+  retirement?: { reason: string; replacement_id: string | null }
+  /** A proposed restoration: the developer's restated wording. */
+  reconsideration?: { content: string }
+}
+
+/** One side of a pair of contradicting current decisions. */
+export type ConflictSide = {
+  id: string
+  title: string
+  content: string
+  status: string
+  timestamp: string | null
+  applies_when?: Applicability
+  /** Only a human-ratified decision (stated or approved by the developer) may be kept over its contradiction (conflicts.can_keep). */
+  can_keep: boolean
+  /** A Suggested Update waiting on this side, if any: unapproved wording. */
+  proposed?: { content: string; title: string; applies_when?: Applicability }
+}
+
+/** Two current decisions that prescribe incompatible things (console_api.current_conflicts). */
+export type CurrentConflict = {
+  kind: 'current_conflict'
+  reason: string
+  decisions: [ConflictSide, ConflictSide]
+  actions: ConflictAction[]
+  /** Fingerprint of both sides as shown (conflicts.pair_basis); Keep sends it back as `--expect`. */
+  basis?: string
+}
+
+export type ReviewQueue = {
+  protocol: number
+  repo: string
+  count: number
+  items: ReviewItem[]
+  conflicts?: CurrentConflict[]
+}
+
+declare module 'claude-code' {
+  interface PluginState {
+    'contexer-review': {
+      queue: ReviewQueue | null
+      isHidden: boolean
+      /** True for the moment the band steps aside so the pane it opens can take the keyboard. */
+      isHandingOff: boolean
+      editing: string | null
+      note: string | null
+      /** The card the pane shows: its key, and its position for when it has been settled. */
+      cursor: { key: string; at: number } | null
+      /** The pane is up, so the band above the prompt steps aside. */
+      isPaneOpen: boolean
+      /** Another plugin's suggestion is in the prompt box since the last prompt was sent. */
+      isOtherSuggested: boolean
+      /** Queue-read ordering: the last ticket taken, and the ticket of the reply that landed. */
+      order: { ticket: number; landed: number }
+    }
+  }
+}

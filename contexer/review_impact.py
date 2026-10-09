@@ -220,7 +220,7 @@ def _grouped(rows: list) -> list[dict]:
 _NON_ANCHORING_SLOTS = ("proposed_reconsideration", "proposed_lifecycle")
 
 
-def _origin_label(source) -> str:
+def origin_label(source) -> str:
     """One provenance value in the developer's terms; an unknown one keeps its raw spelling
     rather than vanishing, since "captured by something this version does not know" is still
     more than nothing."""
@@ -228,7 +228,7 @@ def _origin_label(source) -> str:
     return ORIGIN_LABELS.get(raw, raw)
 
 
-def _confirmed_anchors(entry: dict) -> list[str]:
+def confirmed_anchors(entry: dict) -> list[str]:
     """Exactly the files `_apply_approval` would write as `source_files`, in its own
     precedence order: a proposal's own stashed anchor, else the capture-time candidates.
 
@@ -276,7 +276,7 @@ def _possible_files(entry: dict, meta: dict) -> list[str]:
     They are deliberately absent from every proposal: neither a backward temporal guess nor a
     supporting forward-only edit proves scope, so nothing that could become an anchor carries
     them. Anything already CONFIRMED is filtered out by either label."""
-    confirmed = (set(_confirmed_anchors(entry)) | set(_evidence_files(entry))
+    confirmed = (set(confirmed_anchors(entry)) | set(_evidence_files(entry))
                  | set(entry.get("source_files") or []))
     possible = list((meta.get("candidate") or {}).get("possible_source_files") or [])
     if entry.get("anchor_candidates_confirmed") is not True:
@@ -409,8 +409,8 @@ def review_impact(repo_path: str, entry: dict, context: dict | None = None) -> d
     # ai-written rewrite of their own decision came from "your prompt" - the standing entry's
     # provenance attached to text they never wrote, which is the exact mistaken approval this
     # block exists to prevent. The standing origin is kept beside it, never replaced by it.
-    standing = _origin_label(entry.get("created_by"))
-    proposed = _origin_label(prop.get("source")) if prop else ""
+    standing = origin_label(entry.get("created_by"))
+    proposed = origin_label(prop.get("source")) if prop else ""
     from contexer import bootstrap
     return {
         "applicability": {"current": list(entry.get("applies_when") or []),
@@ -449,7 +449,7 @@ def review_impact(repo_path: str, entry: dict, context: dict | None = None) -> d
         # so a future reader anywhere in the package is caught by a test that already exists -
         # renaming it to `possible` here would have created a second spelling that no guard
         # looks for, which is a weaker ban than the one this task narrowed.
-        "files": {"confirmed": _confirmed_anchors(entry), "evidence": _evidence_files(entry),
+        "files": {"confirmed": confirmed_anchors(entry), "evidence": _evidence_files(entry),
                   "possible_source_files": possible},
         "coverage": list(context.get("coverage") or []),
         "related": {
@@ -615,10 +615,10 @@ def anchor_confirmation(entry: dict) -> str:
     """The one sentence an action confirmation repeats back before it writes an anchor.
 
     Confirmed files only, spelled out in full rather than counted: the informed-signature rule
-    is about the developer having SEEN the paths at the moment they signed. `_confirmed_anchors`
+    is about the developer having SEEN the paths at the moment they signed. `confirmed_anchors`
     is lane-aware, so a restore or a retirement - neither of which anchors anything - says so
     rather than reading back the evidence files as if they were about to be written."""
-    files = _confirmed_anchors(entry)
+    files = confirmed_anchors(entry)
     if not files:
         return "No files will be anchored by this approval."
     return one_line(f"Will anchor on approval: {', '.join(files)}")
