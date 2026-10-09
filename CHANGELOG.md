@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.51.0](https://github.com/bhargavamin/contexer/compare/v0.50.1...v0.51.0) (2026-10-09)
+
+
+### Features
+
+* **claude:** review pending decisions in-session through a Claude Code mod ([7238403](https://github.com/bhargavamin/contexer/commit/7238403ed71e74c109928161d5b137d314f0025c))
+
+
+### Bug Fixes
+
+* **claude:** keep the pane on its card when the deck shifts ([ffc2df6](https://github.com/bhargavamin/contexer/commit/ffc2df6f74e1ae10ae0fcde07e6765e97c47dd41))
+* **claude:** keep the queue-read order in session state ([5f5f08a](https://github.com/bhargavamin/contexer/commit/5f5f08a6c770b33a4f0138cb07bd81b8239f4b25))
+* **claude:** never replace another plugin's suggestion after a queue read ([8c73118](https://github.com/bhargavamin/contexer/commit/8c731188ce3b9d2c18df0b173cbe4e0a526c585b))
+* **claude:** open the review pane from the band press and keep focus above the card ([ce53eb3](https://github.com/bhargavamin/contexer/commit/ce53eb3f4c39b282bf0c259565a701842121d671))
+* **claude:** rank a pane action from when its write returned ([57ad0ed](https://github.com/bhargavamin/contexer/commit/57ad0ed9d24c0ab525afdf4efcbd42bb0b155c70))
+* **claude:** read the queue when the pane opens undrawn ([c42738e](https://github.com/bhargavamin/contexer/commit/c42738e3132eaaa6d1a30283fa72d6882df8ceb6))
+* **review:** act only on what the pane showed, for Keep and inherited scope ([5d484e9](https://github.com/bhargavamin/contexer/commit/5d484e97034d15f9d206b25a5ab0947922b0e9fe))
+* **review:** keep an applied pane action ok when the queue read fails ([2bba5c7](https://github.com/bhargavamin/contexer/commit/2bba5c7e03ea5f8e76d28bcbfdc6678b2ad23243))
+* **review:** keep identifiers verbatim in the review queue ([15ea60e](https://github.com/bhargavamin/contexer/commit/15ea60e190f2cd7e0cfcf4fe6a0c906a620d8238))
+* **review:** leave control characters out of the review queue's text ([c24294d](https://github.com/bhargavamin/contexer/commit/c24294db1b606079407138890afa29f63e7f155c))
+* **review:** let keep retire a side with a stale retirement proposal ([89759e4](https://github.com/bhargavamin/contexer/commit/89759e4c31bcc52269ee1a53abc5e72b7634d0a9))
+* **review:** re-check a pane action's item under the store lock ([7d360ea](https://github.com/bhargavamin/contexer/commit/7d360ea0afb7dacab29fdfba0e3f72532b036473))
+* **review:** refuse a pane action on a proposal replaced since it was shown ([d6ffe2f](https://github.com/bhargavamin/contexer/commit/d6ffe2feb43336c588a6d1520873b912951547c2))
+* **review:** word the stale-card refusal one way ([818af86](https://github.com/bhargavamin/contexer/commit/818af86a6bf6f7b0d20f0884eb10216a0e8fe5a1))
+
+
+### Documentation
+
+* **adapters:** name the one registration a session checkpoint repairs ([a22ae3b](https://github.com/bhargavamin/contexer/commit/a22ae3bc3103339f75c843a54507e544542326c0))
+* **build:** say the mod tests run locally, not in CI ([62063f6](https://github.com/bhargavamin/contexer/commit/62063f61fe975194b994263a0fef64526bf193ee))
+* **claude-md:** count the model-facing exception as the fourth ([2fc6ef2](https://github.com/bhargavamin/contexer/commit/2fc6ef2618eb3489be29432b96c901694d457247))
+* **cli:** reflow the `review --json` docstring ([edd95ac](https://github.com/bhargavamin/contexer/commit/edd95acf67d26bb58c9141a596775f8926624c2b))
+* fix stale tool contracts and keep CLAUDE.md as the only agent guide ([#399](https://github.com/bhargavamin/contexer/issues/399)) ([6eaea79](https://github.com/bhargavamin/contexer/commit/6eaea79f51746905ccf64ee137c866ff24c386fe))
+* publish the adoption benchmark as a press release and FAQ ([#397](https://github.com/bhargavamin/contexer/issues/397)) ([67dbaf5](https://github.com/bhargavamin/contexer/commit/67dbaf5649537c644b13561411d9237ef6b9d04c))
+* **readme:** explain what belongs in CLAUDE.md versus Contexer ([#400](https://github.com/bhargavamin/contexer/issues/400)) ([22b3179](https://github.com/bhargavamin/contexer/commit/22b3179425e84eeb2dad71fced20cc19b7244400))
+* **review:** say a kept contradiction side must be human-ratified ([89d5e2f](https://github.com/bhargavamin/contexer/commit/89d5e2fec5cc05296d93171657fd16807057c4ce))
+* **review:** say a pane edit saves the control-stripped text ([dcda4b9](https://github.com/bhargavamin/contexer/commit/dcda4b91e8858d98dc84be06bcb5860b8325ff3a))
+
 ## [0.50.1](https://github.com/bhargavamin/contexer/compare/v0.50.0...v0.50.1) (2026-10-06)
 
 
