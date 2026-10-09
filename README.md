@@ -112,6 +112,14 @@ Details: **[installation & verification](docs/install.md)** · **[per-tool integ
 
 Keep your `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, or `.cursor/rules` files for stable instructions. Contexer adds searchable decisions, revision history, review, and file-linked context alongside them.
 
+| Instruction file | Contexer |
+|---|---|
+| Commands, project layout, where to start | Decisions and the reasons behind them |
+| Content every contributor needs, even without Contexer | Rules that change, or that several assistants and repositories share |
+| A few short rules that rarely change | A growing set of rules: standing rules load at session start, matching decisions are fetched as needed |
+
+More: **[why not just use CLAUDE.md?](docs/faq.md#why-not-use-claudemd-agentsmd-cursor-rules-or-geminimd)**
+
 ---
 
 ## How it works
