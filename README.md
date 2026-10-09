@@ -110,18 +110,15 @@ Details: **[installation & verification](docs/install.md)** · **[per-tool integ
 | **Local web console** | Lets you browse, search, edit, review, delete, and restore decisions across your projects. |
 | **Claude memory import** | Imports Claude Code's file-based memory into the decision store, updating existing entries when the source changes. |
 
-### Contexer and your `CLAUDE.md`
+Keep your `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, or `.cursor/rules` files for stable instructions. Contexer adds searchable decisions, revision history, review, and file-linked context alongside them.
 
-Use both. They do different jobs:
-
-| Keep in `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, or `.cursor/rules` | Keep in Contexer |
+| Instruction file | Contexer |
 |---|---|
-| Stable instructions every session needs: build and test commands, project layout, where to start | Decisions and their reasons: what you chose, what you rejected, and why |
-| Anything a contributor needs without Contexer installed, since these files travel with the repository | Rules that change over time, with earlier versions kept and a warning when linked code changes |
-| Short content that should always be loaded in full | A large or growing set of rules: standing rules load at session start, and matching decisions are fetched as needed |
-| | Rules that several assistants share, or that apply across all your repositories |
+| Commands, project layout, where to start | Decisions and the reasons behind them |
+| Content every contributor needs, even without Contexer | Rules that change, or that several assistants and repositories share |
+| A few short rules that rarely change | A growing set of rules: standing rules load at session start, matching decisions are fetched as needed |
 
-Contexer earns its place when your decisions outgrow one file: many rules, several assistants, rules that change, or rules that contradict each other. If your rules fit in one short file that rarely changes, an instruction file may be all you need. To save a decision made in conversation, say **"store that decision"**; automatic capture is [not yet reliable](#benchmarks). More: **[why not just use CLAUDE.md?](docs/faq.md#why-not-use-claudemd-agentsmd-cursor-rules-or-geminimd)**
+More: **[why not just use CLAUDE.md?](docs/faq.md#why-not-use-claudemd-agentsmd-cursor-rules-or-geminimd)**
 
 ---
 
