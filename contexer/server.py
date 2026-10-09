@@ -506,9 +506,15 @@ def list_shareable(repo_path: str = "") -> str:
 @mcp.tool()
 def get_context(repo_path: str = "", query: str = "", entry_type: str = "", limit: int = 0,
                  files: list[str] | None = None) -> str:
-    """Returns stored context for the current repository. Call this when the task requires project context.
+    """Returns stored decisions for the current repository: rules, conventions and architecture
+    with their reasoning. Call it before reading files to answer a question about design
+    rationale, constraints, patterns or conventions, and when an auto-fetched block did not
+    answer it. It does not report current code state - read the files for exact syntax or values.
+    When more decisions match than the display cap, the output says "showing N of M".
 
-    query: optional keyword filter (case-insensitive substring match against decision content).
+    query: optional keywords. A literal phrase match comes first, ordered by relevance; on a
+           miss, a bare topic name falls back to its aliases and a multiword query to the same
+           content-and-title ranker as prompt retrieval.
     entry_type: optional subtype filter - architecture | constraint | pattern | convention
     limit: max decisions to return (0 = auto: 25 for filtered queries, 10 for unfiltered overview).
     files: repo-relative files you are about to work on - returns the decisions that govern
@@ -853,9 +859,10 @@ def capture_user_constraint(prompt: str, repo_path: str = "") -> str:
 
 @mcp.tool()
 def get_context_for_prompt(repo_path: str = "", prompt: str = "") -> str:
-    """Auto-called by UserPromptSubmit hook on every prompt. Detects rationale/decision
-    questions (why, reason, rationale, decided...) and injects matching stored decisions
-    as additionalContext. Returns empty string for non-rationale prompts - silent no-op."""
+    """Returns the stored decisions prompt retrieval would select for `prompt` - the same
+    routing that host prompt hooks run on every prompt without this tool. Returns an empty
+    string when the prompt is not a rationale/decision or project-context question, or when
+    nothing matches. For an explicit lookup by subject, call get_context instead."""
     resolved = store.resolve_repo(repo_path)
     if not resolved:
         return ""

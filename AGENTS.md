@@ -5,13 +5,8 @@ below is only what you need before you open it.** Nothing in it is Claude-specif
 the package layout, the store/revision model, every hook on every host, and the design
 constraints that apply to whatever agent is working here.
 
-This file used to be a full second copy of that guide, and the copy went stale. It still
-described `capture_context` (an MCP tool that no longer exists), claimed `install --target`
-accepts `Codex|cursor|all` (it is `claude|cursor|codex|gemini|all`), pointed at `~/.Codex.json`
-for MCP registration, and knew nothing about `miner.py`, `redact.py`, `memory_sync.py`,
-`team_context.py`, `remote.py`, `repo_key.py`, the `ui/` package, or the Claude and Gemini
-adapters. Two hand-maintained copies of one architecture always diverge — the exact failure this
-project exists to fix — so this one is a pointer now.
+Keep architecture detail in `CLAUDE.md` only: two hand-maintained copies of one architecture
+diverge, which is the failure this project exists to fix.
 
 ## Commands
 
