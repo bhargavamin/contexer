@@ -860,9 +860,10 @@ def capture_user_constraint(prompt: str, repo_path: str = "") -> str:
 @mcp.tool()
 def get_context_for_prompt(repo_path: str = "", prompt: str = "") -> str:
     """Returns the stored decisions prompt retrieval would select for `prompt` - the same
-    routing that host prompt hooks run on every prompt without this tool. Returns an empty
-    string when the prompt is not a rationale/decision or project-context question, or when
-    nothing matches. For an explicit lookup by subject, call get_context instead."""
+    routing that host prompt hooks run on every prompt without this tool. Routing runs for
+    rationale/decision and project-context questions, other questions, and prompts that name
+    a file path or other artifact; any other prompt, or one with no relevant match, returns an
+    empty string. For an explicit lookup by subject, call get_context instead."""
     resolved = store.resolve_repo(repo_path)
     if not resolved:
         return ""
