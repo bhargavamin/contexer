@@ -45,12 +45,9 @@ uv run contexer guard anchors --list
 All agents working on prompt capture must read the runnable
 [benchmark guide](benchmarks/prompt_capture/README.md). This is separate from the
 applicability/relevance benchmark: retrieval scores do not validate capture correctness.
-`AGENTS.md` points here; keep this maintenance contract authoritative rather than duplicating it
-in host-specific instructions.
-
-The benchmark is implemented; its authoritative usage and maintenance guide is
-[`benchmarks/prompt_capture/README.md`](benchmarks/prompt_capture/README.md). Missing fixture,
-runner, or report output is a failed check, never a silent success.
+Keep this maintenance contract authoritative here rather than duplicating it in
+host-specific instructions. Missing fixture, runner, or report output is a failed check,
+never a silent success.
 
 Run the dedicated benchmark before and after changes affecting prompt
 classification/extraction or sanitization, capture target selection, proposal/approval/history
@@ -71,8 +68,7 @@ registrations, and documentation when the intended contract changes; never rewri
 just to match a failing implementation. Remove fixed strict xfails; new gaps require the plan's
 exact assertion-level evidence and review, never a blanket xfail or weakened safety assertion.
 In the handoff/PR, report commands and outcomes, known gaps versus unexpected failures, and
-coverage added or why existing cases suffice. Report unavailable checks explicitly. CI integration
-and the verified run/update instructions are part of benchmark implementation acceptance.
+coverage added or why existing cases suffice. Report unavailable checks explicitly.
 
 ## Architecture
 

@@ -11,7 +11,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 ROOT = REPO / "CLAUDE.md"
 GUIDES = [ROOT, REPO / "docs/architecture.md", REPO / "contexer/adapters/CLAUDE.md",
-          REPO / "benchmarks/CLAUDE.md", REPO / "AGENTS.md"]
+          REPO / "benchmarks/CLAUDE.md"]
 
 # Measured 17.7 KB when the split landed; Claude Code's docs warn at ~40,000 characters. The cap
 # leaves room for a few index lines, not for a subsystem's worth of prose.
@@ -82,9 +82,3 @@ def test_relative_links_and_anchors_resolve():
                 broken.append(f"{guide.relative_to(REPO)} -> {target} (no such heading)")
     assert broken == [], broken
 
-
-def test_agents_md_names_the_folder_guides():
-    """Codex and other agents do not auto-load nested CLAUDE.md files, so AGENTS.md must name them."""
-    text = (REPO / "AGENTS.md").read_text(encoding="utf-8")
-    for guide in ("docs/architecture.md", "contexer/adapters/CLAUDE.md", "benchmarks/CLAUDE.md"):
-        assert guide in text, guide
