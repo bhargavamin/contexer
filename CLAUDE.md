@@ -45,8 +45,8 @@ uv run contexer guard anchors --list
 All agents working on prompt capture must read the runnable
 [benchmark guide](benchmarks/prompt_capture/README.md). This is separate from the
 applicability/relevance benchmark: retrieval scores do not validate capture correctness.
-`AGENTS.md` points here; keep this maintenance contract authoritative rather than duplicating it
-in host-specific instructions. Missing fixture, runner, or report output is a failed check,
+Keep this maintenance contract authoritative here rather than duplicating it in
+host-specific instructions. Missing fixture, runner, or report output is a failed check,
 never a silent success.
 
 Run the dedicated benchmark before and after changes affecting prompt
