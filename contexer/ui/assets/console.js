@@ -1417,24 +1417,27 @@
             class: "btn btn-primary btn-sm",
             type: "button",
             text: "Approve",
-            on: { click: () => approve(slug, id, "approve") },
+            on: { click: () => approve(slug, id, "approve", d.basis) },
           }),
           h("button", {
             class: "btn btn-danger btn-sm",
             type: "button",
             text: "Reject",
-            on: { click: () => approve(slug, id, "reject") },
+            on: { click: () => approve(slug, id, "reject", d.basis) },
           }),
         ]),
       ]),
     ]);
   }
 
-  function approve(slug, id, action) {
+  /** `basis` is the card's review fingerprint as shown: the server refuses with 409 when the
+   *  decision changed since, so a card left open (a "Show full text" pauses the poll) never
+   *  signs wording the developer did not see. */
+  function approve(slug, id, action, basis) {
     return act(
       "/api/store/" + encodeURIComponent(slug) + "/decisions/" + encodeURIComponent(id) + "/approve",
       "POST",
-      { action },
+      basis ? { action, basis } : { action },
       action === "approve" ? "Approved." : "Rejected."
     );
   }
@@ -1675,13 +1678,13 @@
               class: "btn btn-primary btn-sm",
               type: "button",
               text: "Approve update",
-              on: { click: () => approve(slug, id, "approve") },
+              on: { click: () => approve(slug, id, "approve", d.basis) },
             }),
             h("button", {
               class: "btn btn-danger btn-sm",
               type: "button",
               text: "Reject update",
-              on: { click: () => approve(slug, id, "reject") },
+              on: { click: () => approve(slug, id, "reject", d.basis) },
             }),
           ]),
         ])
@@ -1766,7 +1769,7 @@
                 class: "btn btn-primary btn-sm",
                 type: "button",
                 text: "Approve",
-                on: { click: () => approve(slug, id, "approve") },
+                on: { click: () => approve(slug, id, "approve", d.basis) },
               })
             : null,
         ]);
@@ -2209,13 +2212,13 @@
             class: "btn btn-primary btn-sm",
             type: "button",
             text: "Approve",
-            on: { click: () => approve(slug, id, "approve") },
+            on: { click: () => approve(slug, id, "approve", d.basis) },
           }),
           h("button", {
             class: "btn btn-danger btn-sm",
             type: "button",
             text: "Reject",
-            on: { click: () => approve(slug, id, "reject") },
+            on: { click: () => approve(slug, id, "reject", d.basis) },
           }),
           h("span", { class: "muted mono", text: shortId(id) }),
         ]),
@@ -2251,13 +2254,13 @@
             class: "btn btn-primary btn-sm",
             type: "button",
             text: "Approve update",
-            on: { click: () => approve(slug, id, "approve") },
+            on: { click: () => approve(slug, id, "approve", p.basis) },
           }),
           h("button", {
             class: "btn btn-danger btn-sm",
             type: "button",
             text: "Reject update",
-            on: { click: () => approve(slug, id, "reject") },
+            on: { click: () => approve(slug, id, "reject", p.basis) },
           }),
           h("span", { class: "muted mono", text: "proposed " + (fmtStamp(prop.created_at) || "—") }),
         ]),

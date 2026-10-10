@@ -749,6 +749,10 @@ def review() -> None:
                     skipped += 1
                     continue
                 summary = _ask_review_summary(wording)
+                if summary is None:
+                    print("\nSkipped - the reconsideration stays pending.")
+                    skipped += 1
+                    continue
             if action == "skip":
                 skipped += 1
                 print("Skipped - the reconsideration stays pending.")
@@ -823,6 +827,10 @@ def review() -> None:
                 continue
             if new_content:
                 summary = _ask_review_summary(new_content)
+                if summary is None:
+                    print("\nSkipped.")
+                    skipped += 1
+                    continue
                 print(review_impact.anchor_confirmation(entry))
                 ok, msg = store.approve_decision(repo_path, entry["id"], "edit", new_content,
                                                  summary=summary)
@@ -875,10 +883,11 @@ def _print_review_text(content: str, record: dict, judged: str | None = None) ->
     return False
 
 
-def _ask_review_summary(content: str) -> str:
+def _ask_review_summary(content: str) -> str | None:
     """Ask for an optional review summary of edited text that is too long to be its own. An
     edit never keeps the old summary; Enter skips, and the review then shows the full text.
-    A summary that does not fit `revisions.summary_problem` is asked for again."""
+    A summary that does not fit `revisions.summary_problem` is asked for again. None means
+    Ctrl+C or EOF: the caller cancels the edit, as the Edit prompt does, instead of saving it."""
     from contexer import revisions
     if not revisions.needs_summary(content):
         return ""
@@ -886,7 +895,7 @@ def _ask_review_summary(content: str) -> str:
         try:
             summary = input("Summary (optional, 1-5 short sentences, Enter to skip): ").strip()
         except (KeyboardInterrupt, EOFError):
-            return ""
+            return None
         problem = revisions.summary_problem(summary) if summary else None
         if not problem:
             return summary

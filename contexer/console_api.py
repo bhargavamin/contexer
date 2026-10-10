@@ -51,6 +51,7 @@ from pathlib import Path
 from contexer import conflicts      # pure stdlib leaf (no cycle): open-conflict predicate
 from contexer import decision_impact
 from contexer import review         # pure leaf: which question a pending item asks, and its actions
+from contexer import redact         # pure leaf: scrubs the text the pane sends to a model
 from contexer import review_impact  # the shared review block; reads store, never console_api
 from contexer import revisions      # pure stdlib leaf (no cycle): revision lifecycle
 from contexer import store          # module object, not `from`-imports: see docstring above
@@ -170,7 +171,19 @@ def _console_summary(entry: dict) -> dict:
         "source_files": list(entry.get("source_files") or []),
         "applies_when": list(entry.get("applies_when") or []),
         **_review_summary_fields(entry),
+        **_basis_field(entry),
     }
+
+
+def _basis_field(entry: dict) -> dict:
+    """`basis`: the `review_basis` of an entry that waits on the developer, which the console
+    sends back with Approve or Reject so a card replaced while it was on screen is refused
+    instead of signed unseen. Absent on a trusted entry, and on a kind only the terminal
+    review can settle: the poll reads every decision and a trusted one has nothing to ratify."""
+    if store.entry_status(entry) != "pending_approval" and not entry.get("proposed_revision"):
+        return {}
+    basis = review_basis(entry)
+    return {} if basis is None else {"basis": basis}
 
 
 def _review_summary_fields(record: dict) -> dict:
@@ -211,6 +224,7 @@ def _console_proposal(entry: dict) -> dict:
         "current": {"content": revisions.current_content(entry), "applies_when": list(entry.get("applies_when") or []), "title": rev.get("title", ""),
                     "version_number": version, **_review_summary_fields(entry)},
         "proposed": _console_proposed(entry.get("proposed_revision") or {}),
+        **_basis_field(entry),
     }
 
 
@@ -460,6 +474,14 @@ def review_basis(entry: dict) -> str | None:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
+def _add_summary_source(version: dict | None) -> None:
+    """Give a version that needs a review summary the text the pane sends to a small model to
+    write one: its content with secrets scrubbed (`redact.scrub_text`). The model call leaves
+    the machine, so it gets this egress copy and never the verbatim `content`."""
+    if version and version.get("needs_summary"):
+        version["summary_source"] = redact.scrub_text(version.get("content") or "")
+
+
 def review_queue(repo_path: str) -> dict:
     """Everything that waits on the developer for one repo, as the in-session review pane
     renders it. `items` is the same set `contexer review` walks (`store.get_pending_decisions`),
@@ -497,6 +519,8 @@ def review_queue(repo_path: str) -> dict:
         # The files approving would anchor, in full: the developer signs them by pressing
         # Approve, so the pane names them as the terminal review does (`anchor_confirmation`).
         item["anchors"] = review_impact.confirmed_anchors(entry)
+        for version in (item, item.get("proposed")):
+            _add_summary_source(version)
         items.append(item)
     return _printable({"protocol": REVIEW_PROTOCOL, "repo": repo_path, "count": len(items),
                        "items": items, "conflicts": current_conflicts(repo_path)})

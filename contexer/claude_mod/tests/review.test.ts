@@ -675,8 +675,9 @@ describe('review pane', () => {
     })
 
     test(`a long decision with no summary gets one from a small model (${surface})`, async ($, on) => {
+      const SCRUBBED = 'Never delete rows for a deleted org. Key [REDACTED:api-key] stays out.'
       const LATER: ReviewItem = { ...NEW, id: 'gggg7777', title: 'Log every skipped org', summary: 'Log it.', needs_summary: false }
-      const calls = fakeContexer(on, [{ ...NEW, basis: 'cafe0123cafe0123', summary: null, needs_summary: true }, LATER])
+      const calls = fakeContexer(on, [{ ...NEW, basis: 'cafe0123cafe0123', summary: null, needs_summary: true, summary_source: SCRUBBED }, LATER])
       const asks: string[] = []
       on('model.complete', async (_$, e) => {
         asks.push(String(e.prompt))
@@ -686,7 +687,8 @@ describe('review pane', () => {
       const pane = await mountPane($, surface)
       expect(await pane.find({ type: 'Text', text: /No summary|Writing a summary/ })).toBeDefined()
       await clock.settle()
-      expect(asks).toEqual([NEW.content])
+      // The scrubbed egress copy, never the verbatim stored content.
+      expect(asks).toEqual([SCRUBBED])
       const write = calls.find(argv => argv.includes('summarize'))
       expect(write?.slice(-6)).toEqual(['summarize', NEW.id, '--summary', 'Warn and count. Do not delete rows.', '--expect', 'cafe0123cafe0123'])
       // Once per card text: drawing the card again does not ask again.
@@ -700,7 +702,7 @@ describe('review pane', () => {
     test(`a summary write marked in session state holds off another across a reload (${surface})`, async ($, on) => {
       // A hot reload resets the module's own one-write guard while the write it started is
       // still in flight; the `summarizing` mark in `$.state` survives the reload.
-      const calls = fakeContexer(on, [{ ...NEW, basis: 'cafe0123cafe0123', summary: null, needs_summary: true }])
+      const calls = fakeContexer(on, [{ ...NEW, basis: 'cafe0123cafe0123', summary: null, needs_summary: true, summary_source: NEW.content }])
       const asks: string[] = []
       on('model.complete', async (_$, e) => {
         asks.push(String(e.prompt))
@@ -732,8 +734,8 @@ describe('review pane', () => {
       // The one-write guard is reset in a finally, so a state call that fails before the
       // model is asked cannot hold off every later write until the mod reloads.
       const long = (what: string) => `${what} ${'More detail about the deletion path. '.repeat(10)}`
-      const LATER: ReviewItem = { ...NEW, id: 'gggg7777', title: 'Log every skipped org', content: long('Log it.'), basis: 'beef0123beef0123', summary: null, needs_summary: true }
-      const calls = fakeContexer(on, [{ ...NEW, content: long('Warn.'), basis: 'cafe0123cafe0123', summary: null, needs_summary: true }, LATER])
+      const LATER: ReviewItem = { ...NEW, id: 'gggg7777', title: 'Log every skipped org', content: long('Log it.'), basis: 'beef0123beef0123', summary: null, needs_summary: true, summary_source: long('Log it.') }
+      const calls = fakeContexer(on, [{ ...NEW, content: long('Warn.'), basis: 'cafe0123cafe0123', summary: null, needs_summary: true, summary_source: long('Warn.') }, LATER])
       const asks: string[] = []
       on('model.complete', async (_$, e) => {
         asks.push(String(e.prompt).split(' ')[0] ?? '')
@@ -761,7 +763,7 @@ describe('review pane', () => {
 
     test(`while a summary is written the card hides the long text (${surface})`, async ($, on) => {
       const long = `${NEW.content} ${'More detail about the deletion path. '.repeat(10)}`
-      const calls = fakeContexer(on, [{ ...NEW, content: long, basis: 'cafe0123cafe0123', summary: null, needs_summary: true }])
+      const calls = fakeContexer(on, [{ ...NEW, content: long, basis: 'cafe0123cafe0123', summary: null, needs_summary: true, summary_source: long }])
       let answer: (() => void) | undefined
       on('model.complete', async () => {
         await new Promise<void>(resolve => { answer = resolve })
@@ -791,7 +793,7 @@ describe('review pane', () => {
 
     test(`a failed write shows the full text with the tag at the top (${surface})`, async ($, on) => {
       const long = `${NEW.content} ${'More detail about the deletion path. '.repeat(10)}`
-      fakeContexer(on, [{ ...NEW, content: long, basis: 'cafe0123cafe0123', summary: null, needs_summary: true }])
+      fakeContexer(on, [{ ...NEW, content: long, basis: 'cafe0123cafe0123', summary: null, needs_summary: true, summary_source: long }])
       on('model.complete', async () => ({ value: { isAnswered: false, reason: 'empty-reply' } as never }))
       await start($, surface)
       const pane = await mountPane($, surface)
@@ -806,8 +808,8 @@ describe('review pane', () => {
     test(`an update's two summaries are written one at a time (${surface})`, async ($, on) => {
       const long = (what: string) => `${what} ${'More detail about the store. '.repeat(12)}`
       const calls = fakeContexer(on, [{
-        ...UPDATE, basis: 'beef0123beef0123', content: long('Use Postgres.'), summary: null, needs_summary: true,
-        proposed: { ...UPDATE.proposed!, content: long('Use DynamoDB.'), summary: null, needs_summary: true },
+        ...UPDATE, basis: 'beef0123beef0123', content: long('Use Postgres.'), summary: null, needs_summary: true, summary_source: long('Use Postgres.'),
+        proposed: { ...UPDATE.proposed!, content: long('Use DynamoDB.'), summary: null, needs_summary: true, summary_source: long('Use DynamoDB.') },
       }])
       const asks: string[] = []
       let inFlight = 0
@@ -831,8 +833,8 @@ describe('review pane', () => {
 
     test(`only a card with a basis gets a summary written (${surface})`, async ($, on) => {
       const long = `${NEW.content} ${'More detail about the deletion path. '.repeat(10)}`
-      const wordy = { ...side('dddd4444', 'Prefix versions with v'), content: long, summary: null, needs_summary: true }
-      const calls = fakeContexer(on, [{ ...NEW, content: long, summary: null, needs_summary: true }], 1,
+      const wordy = { ...side('dddd4444', 'Prefix versions with v'), content: long, summary: null, needs_summary: true, summary_source: long }
+      const calls = fakeContexer(on, [{ ...NEW, content: long, summary: null, needs_summary: true, summary_source: long }], 1,
         [{ ...PAIR, basis: 'feedc0de12345678', decisions: [wordy, side('eeee5555', 'Publish bare versions')] }])
       const asks: string[] = []
       on('model.complete', async (_$, e) => {
@@ -843,6 +845,22 @@ describe('review pane', () => {
       const pane = await mountPane($, surface)
       expect(await pane.find({ type: 'Text', text: 'No summary' })).toBeDefined()
       await pane.press({ key: 'next' })
+      expect(await pane.find({ type: 'Text', text: 'No summary' })).toBeDefined()
+      await clock.settle()
+      expect(asks).toEqual([])
+      expect(calls.some(argv => argv.includes('summarize'))).toBe(false)
+    })
+
+    test(`a card with no scrubbed copy sends nothing to the summary model (${surface})`, async ($, on) => {
+      const long = `${NEW.content} ${'More detail about the deletion path. '.repeat(10)}`
+      const calls = fakeContexer(on, [{ ...NEW, content: long, basis: 'cafe0123cafe0123', summary: null, needs_summary: true }])
+      const asks: string[] = []
+      on('model.complete', async (_$, e) => {
+        asks.push(String(e.prompt))
+        return { value: { isAnswered: true, text: 'Warn and count.', usage: {} } as never }
+      })
+      await start($, surface)
+      const pane = await mountPane($, surface)
       expect(await pane.find({ type: 'Text', text: 'No summary' })).toBeDefined()
       await clock.settle()
       expect(asks).toEqual([])

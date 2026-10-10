@@ -1124,6 +1124,32 @@ class TestReconsiderationReviewSurfaces:
         head = revisions.current_revision(_entry(tmp_repo, eid))
         assert (head["content"], head.get("summary")) == (wording, summary)
 
+    def test_ctrl_c_at_the_summary_prompt_restores_nothing(self, tmp_repo, monkeypatch, capsys):
+        """Cancelling the summary prompt cancels the restore, as cancelling the Edit prompt
+        does: an empty answer means skip the summary, a Ctrl+C means stop."""
+        wording = ("Use Postgres for the decision store, with pgbouncer in front of it. "
+                   "SQLite could not handle concurrent sessions writing to the same file, and "
+                   "every session holding its own connection exhausted the server's limit within "
+                   "a day of load testing. Reasoning: pooling keeps the connection count flat "
+                   "while sessions come and go, and Postgres gives row-level locking for free.")
+        eid = _ignored(tmp_repo)
+        _reconsider(tmp_repo, eid)
+        before = revisions.current_content(_entry(tmp_repo, eid))
+        monkeypatch.setattr(store, "git_root", lambda _: tmp_repo)
+        answers = iter(["E", wording, KeyboardInterrupt])
+
+        def answer(_=""):
+            key = next(answers)
+            if key is KeyboardInterrupt:
+                raise KeyboardInterrupt
+            return key
+        monkeypatch.setattr("builtins.input", answer)
+        cli.review()
+        assert "restored" not in capsys.readouterr().out.split("─" * 60)[-1]
+        entry = _entry(tmp_repo, eid)
+        assert revisions.current_content(entry) == before
+        assert entry.get("proposed_reconsideration")
+
 
 # ── the extraction seam ───────────────────────────────────────────────────────
 

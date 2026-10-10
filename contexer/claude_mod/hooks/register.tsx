@@ -268,7 +268,9 @@ async function writeSummary($: EngineInterface, cardKey: string, wants: SummaryT
   }
 }
 
-type Summarized = { content: string; summary?: string | null; needs_summary?: boolean }
+// `summary_source` is the content with secrets scrubbed (console_api._add_summary_source): the
+// only text the summary model is sent, since that call leaves the machine.
+type Summarized = { content: string; summary?: string | null; needs_summary?: boolean; summary_source?: string }
 
 // What a card leads with for one version of a decision: its stored review summary, else the
 // full text (the queue sends `summary` only when one is stored).
@@ -550,12 +552,13 @@ export const register: Register = on => {
     // else the full text, tagged at the top when long. Only a target that carries the card's
     // basis is backfilled: the write is then refused once the text it summarized changed. A
     // conflict side or a basis-less item keeps its full text.
-    const reading = (record: Summarized, target: SummaryTarget): string => {
+    const reading = (record: Summarized, at: Omit<SummaryTarget, 'text'>): string => {
       if (!isFull && isStandIn(record)) {
         hasStandIn = true
         return record.summary
       }
-      if (record.needs_summary && target.expect) {
+      if (record.needs_summary && at.expect && record.summary_source) {
+        const target = { ...at, text: record.summary_source }
         wants.push(target)
         if (!isFull && (isSummarizing || !asked.has(summaryToken(target)))) {
           isWritingShown = true
@@ -593,9 +596,9 @@ export const register: Register = on => {
         const after = applicability(item.proposed.applies_when ?? item.applies_when)
         body.push(
           <Box key={`fields-${key}`} flexDirection="column">
-            {field('NOW', reading(item, { id: item.id, text: item.content, ofProposal: false, expect: item.basis }), true)}
+            {field('NOW', reading(item, { id: item.id, ofProposal: false, expect: item.basis }), true)}
             {(() => {
-              const proposed = reading(item.proposed, { id: item.id, text: item.proposed.content, ofProposal: true, expect: item.basis })
+              const proposed = reading(item.proposed, { id: item.id, ofProposal: true, expect: item.basis })
               return field('PROPOSED', proposed, proposed === WRITING)
             })()}
             {field('APPLIES', before === after ? before : `${before} → ${after}`, true)}
@@ -606,7 +609,7 @@ export const register: Register = on => {
         body.push(
           <Box key={`fields-${key}`} flexDirection="column">
             {(() => {
-              const text = reading(item, { id: item.id, text: item.content, ofProposal: false, expect: item.basis })
+              const text = reading(item, { id: item.id, ofProposal: false, expect: item.basis })
               return <Text dimColor={text === WRITING}>{text}</Text>
             })()}
             {field('APPLIES', applicability(item.applies_when), true)}
@@ -681,7 +684,7 @@ export const register: Register = on => {
           {sides.map(([one]) => (
             <Box key={`side-${key}-${one.id}`} width="50%" flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
               <Text bold>{one.title}</Text>
-              <Text>{reading(one, { id: one.id, text: one.content, ofProposal: false })}</Text>
+              <Text>{reading(one, { id: one.id, ofProposal: false })}</Text>
               <Text dimColor>{`${one.status} · applies: ${applicability(one.applies_when)}`}</Text>
               {one.proposed
                 ? <Text color="yellow">{`Unreviewed update: ${full(one.proposed.content)}`}</Text>

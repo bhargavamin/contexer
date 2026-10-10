@@ -28,6 +28,8 @@ export type ReviewItem = {
   summary?: string | null
   /** No summary and the content is long: the pane asks a small model for one. */
   needs_summary?: boolean
+  /** With `needs_summary`: the content with secrets scrubbed, the only text sent to that model. */
+  summary_source?: string
   actions: ReviewAction[]
   /** What the card asks the developer to ratify, fingerprinted (console_api.review_basis); sent
    * back as `--expect` so an action on a decision that changed since is refused. Absent when
@@ -40,6 +42,7 @@ export type ReviewItem = {
     applies_when?: Applicability | null
     summary?: string | null
     needs_summary?: boolean
+    summary_source?: string
   }
   /** A Suggested Update whose content differs from the approved version (conflicts.has_open_conflict). */
   conflict?: boolean

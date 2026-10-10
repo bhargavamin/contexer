@@ -382,6 +382,21 @@ class TestReviewQueue:
         (item,) = console_api.review_queue(tmp_repo)["items"]
         assert item["summary"] is None and item["needs_summary"] is False
 
+    def test_the_summary_model_gets_a_scrubbed_copy(self, tmp_repo):
+        """The pane sends `summary_source` to a small model, which leaves the machine: secrets
+        are scrubbed from it, the stored content stays verbatim, and a version that needs no
+        summary carries no copy."""
+        secret = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"
+        ok, eid = store.update_decision(tmp_repo, LONG + f" The CI token is {secret}.", "s1",
+                                        "constraint")
+        store.update_decision(tmp_repo, SHORT, "s1", "convention")
+        items = {i["id"]: i for i in console_api.review_queue(tmp_repo)["items"]}
+        long_item = items.pop(eid)
+        assert secret in long_item["content"]
+        assert secret not in long_item["summary_source"]
+        assert long_item["summary_source"].startswith(LONG[:40])
+        assert all("summary_source" not in item for item in items.values())
+
     def test_the_basis_covers_the_summary(self, tmp_repo):
         ok, eid = store.update_decision(tmp_repo, LONG, "s1", "constraint", summary=SUMMARY)
         before = console_api.review_basis(_entry(tmp_repo, eid))
@@ -456,6 +471,23 @@ class TestTerminalReview:
         monkeypatch.setattr("builtins.input", lambda _="": next(answers))
         cli.review()
         assert _entry(tmp_repo, eid)["summary"] == "Use the helpers. Keep it in one place."
+
+    def test_ctrl_c_at_the_summary_prompt_approves_nothing(self, tmp_repo, monkeypatch, capsys):
+        ok, eid = store.update_decision(tmp_repo, LONG, "s1", "constraint", summary=SUMMARY)
+        monkeypatch.setattr(store, "git_root", lambda _: tmp_repo)
+        answers = iter(["E", LONG + " Edited."])
+
+        def answer(_=""):
+            try:
+                return next(answers)
+            except StopIteration:
+                raise KeyboardInterrupt from None
+        monkeypatch.setattr("builtins.input", answer)
+        cli.review()
+        assert "Approved with edits" not in capsys.readouterr().out
+        entry = _entry(tmp_repo, eid)
+        assert store.entry_status(entry) == "pending_approval"
+        assert (revisions.current_content(entry), entry["summary"]) == (LONG, SUMMARY)
 
     def test_a_long_decision_without_a_summary_is_tagged(self, tmp_repo, monkeypatch, capsys):
         store.update_decision(tmp_repo, LONG, "s1", "constraint")
