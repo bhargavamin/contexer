@@ -80,7 +80,7 @@
     // Same idea for ~/.contexer/_global.json: a corrupt file is not "no global rules", so the
     // Global nav badge has to be able to say so from any view.
     globalOk: true,
-    edit: null, // { id, content, title, subtype, stored }
+    edit: null, // { id, content, title, subtype, summary, stored }
     confirm: "", // id awaiting a delete/restore confirmation
     // The Teams login this tab is waiting on. `attached` is the fallback for a login this tab
     // cannot follow by job — an older daemon's 409 names none, so all that is left to watch is
@@ -1152,6 +1152,64 @@
     ]);
   }
 
+  // ── Review summaries ──────────────────────────────────────────────────────────────────
+  /** The stored review summary, or "" when there is none to lead with (the projection sends
+   *  `summary` only when one is stored). */
+  function realSummary(d) {
+    return d && typeof d.summary === "string" ? d.summary.trim() : "";
+  }
+
+  /** The dim tag on a long decision with no summary yet: the reviewer reads the full text. */
+  function noSummaryTag(d) {
+    return d && d.needs_summary === true
+      ? h("div", { class: "summary-missing" }, [
+          h("span", { class: "badge badge-dim", text: "no summary" }),
+        ])
+      : null;
+  }
+
+  /** "Show full text" as a native <details>. It is built closed on every render: there is no
+   *  remembered preference, and `pollTick` skips a rebuild while one is open. */
+  function fullTextExpander(kids) {
+    return h("details", { class: "fulltext" }, [
+      h("summary", { class: "fulltext-toggle", text: "Show full text" }),
+      h("div", { class: "fulltext-body" }, kids),
+    ]);
+  }
+
+  /** What a reviewer reads for one decision: its summary, with the full text (what the model
+   *  reads and what an approval signs) behind "Show full text". Without a separate summary the
+   *  full text renders as before, tagged when the decision is long enough to need one. */
+  function reviewText(d) {
+    const full = h("p", { class: "prose", text: String((d && d.content) || "") });
+    const s = realSummary(d);
+    if (!s) return [full, noSummaryTag(d)];
+    return [h("p", { class: "prose review-summary", text: s }), fullTextExpander([full])];
+  }
+
+  /** A Suggested Update: the stored and the proposed summaries one above the other, with the
+   *  full before/after columns behind "Show full text". When neither side has a separate
+   *  summary the columns render directly, as before. */
+  function updateReview(cur, prop, version) {
+    const change = [
+      h("div", { class: "block-label", text: "Change against v" + num(version) }),
+      diffView(cur.content, prop.content),
+    ];
+    if (!realSummary(cur) && !realSummary(prop)) return change.concat([noSummaryTag(prop)]);
+    // A side with no separate summary shows its own full text (tagged when it is long), so it
+    // is never hidden behind the closed expander while the other side leads with a summary.
+    const side = (label, d) => {
+      const s = realSummary(d);
+      return h("div", { class: "summary-side" }, [
+        h("div", { class: "diff-col-label", text: label }),
+        s ? h("p", { class: "prose review-summary", text: s })
+          : h("p", { class: "prose", text: String(d.content || "") }),
+        s ? null : noSummaryTag(d),
+      ]);
+    };
+    return [side("Stored now", cur), side("Proposed", prop), fullTextExpander(change)];
+  }
+
   // ── View: dashboard ───────────────────────────────────────────────────────────────────
   async function viewDashboard(slug) {
     const data = (await req("/api/store/" + encodeURIComponent(slug))) || {};
@@ -1344,7 +1402,9 @@
       h("a", { class: "drow-title", href: hrefFor("decisions", slug, id), text: titleOf(d) }),
       h("span", {
         class: "drow-text",
-        text: isProposal ? String(proposed.content || "") : String(d.content || ""),
+        text: isProposal
+          ? realSummary(proposed) || String(proposed.content || "")
+          : realSummary(d) || String(d.content || ""),
       }),
       h("span", { class: "drow-meta" }, [
         subtypeBadge(subtype),
@@ -1357,24 +1417,27 @@
             class: "btn btn-primary btn-sm",
             type: "button",
             text: "Approve",
-            on: { click: () => approve(slug, id, "approve") },
+            on: { click: () => approve(slug, id, "approve", d.basis) },
           }),
           h("button", {
             class: "btn btn-danger btn-sm",
             type: "button",
             text: "Reject",
-            on: { click: () => approve(slug, id, "reject") },
+            on: { click: () => approve(slug, id, "reject", d.basis) },
           }),
         ]),
       ]),
     ]);
   }
 
-  function approve(slug, id, action) {
+  /** `basis` is the card's review fingerprint as shown: the server refuses with 409 when the
+   *  decision changed since, so a card left open (a "Show full text" pauses the poll) never
+   *  signs wording the developer did not see. */
+  function approve(slug, id, action, basis) {
     return act(
       "/api/store/" + encodeURIComponent(slug) + "/decisions/" + encodeURIComponent(id) + "/approve",
       "POST",
-      { action },
+      basis ? { action, basis } : { action },
       action === "approve" ? "Approved." : "Rejected."
     );
   }
@@ -1609,19 +1672,19 @@
     const proposal = d.proposed_revision
       ? h("div", { class: "block" }, [
           h("div", { class: "block-label", text: "Proposed update awaiting review" }),
-          diffView(d.content, d.proposed_revision.content),
+          updateReview(d, d.proposed_revision, d.revision),
           h("div", { class: "btn-row mt-2" }, [
             h("button", {
               class: "btn btn-primary btn-sm",
               type: "button",
               text: "Approve update",
-              on: { click: () => approve(slug, id, "approve") },
+              on: { click: () => approve(slug, id, "approve", d.basis) },
             }),
             h("button", {
               class: "btn btn-danger btn-sm",
               type: "button",
               text: "Reject update",
-              on: { click: () => approve(slug, id, "reject") },
+              on: { click: () => approve(slug, id, "reject", d.basis) },
             }),
           ]),
         ])
@@ -1673,6 +1736,13 @@
                   content: String(d.content || ""),
                   title: String(d.title || ""),
                   subtype: String(d.subtype || ""),
+                  // Only a real summary: a short decision's content stands in as its own
+                  // summary on the wire, and prefilling that would store it as one.
+                  summary: realSummary(d),
+                  // The prefilled values, so a save can tell an untouched summary from one the
+                  // developer wrote for the new wording.
+                  storedContent: String(d.content || ""),
+                  storedSummary: realSummary(d),
                   // What the store holds, kept beside the draft so a save can tell an actual
                   // subtype change from the field merely being on the form.
                   stored: String(d.subtype || ""),
@@ -1699,7 +1769,7 @@
                 class: "btn btn-primary btn-sm",
                 type: "button",
                 text: "Approve",
-                on: { click: () => approve(slug, id, "approve") },
+                on: { click: () => approve(slug, id, "approve", d.basis) },
               })
             : null,
         ]);
@@ -1771,8 +1841,8 @@
     const files = Array.isArray(d.source_files) ? d.source_files : [];
     return frag([
       h("div", { class: "block" }, [
-        h("div", { class: "block-label", text: "Content" }),
-        h("p", { class: "prose", text: String(d.content || "") }),
+        h("div", { class: "block-label", text: realSummary(d) ? "Summary" : "Content" }),
+        reviewText(d),
       ]),
       files.length
         ? h("div", { class: "block" }, [
@@ -1864,6 +1934,23 @@
           },
         }),
       ]),
+      h("div", { class: "field mt-2" }, [
+        h("span", { class: "field-label", text: "Summary" }),
+        h("textarea", {
+          class: "textarea textarea-summary",
+          maxlength: "2000",
+          props: { value: draft.summary || "" },
+          on: {
+            input: (ev) => {
+              draft.summary = ev.target.value;
+            },
+          },
+        }),
+        h("span", {
+          class: "muted",
+          text: "1 to 5 short sentences, plain words, for reviewers. Leave empty to drop it.",
+        }),
+      ]),
       h("div", { class: "btn-row mt-3" }, [
         h("button", {
           class: "btn btn-primary btn-sm",
@@ -1876,6 +1963,14 @@
                 title: draft.title,
                 if_version: num(d.revision),
               };
+              // An edit never keeps the old summary: reworded text with the summary field left
+              // as prefilled sends none, so the store drops it. A summary the developer typed
+              // (or cleared) is sent as is; the store refuses one that does not fit, and that
+              // comes back as any other edit error.
+              const summary = draft.summary || "";
+              const reworded = draft.content !== draft.storedContent;
+              if (summary !== draft.storedSummary) payload.summary = summary;
+              else if (reworded && draft.storedSummary) payload.summary = "";
               // Only when the developer actually moved the <select>. Sending the field on every
               // save is what made an unsubtyped decision uneditable: the payload carried "" while
               // the form displayed a subtype that was never stored.
@@ -1884,11 +1979,14 @@
               // it before the await threw away a rewritten decision on every rejection the write
               // can draw — a 409 from a concurrent MCP session, a 400 on empty content, a 429 off
               // the mutation budget, a 500, a NetworkError that req() deliberately does not retry.
+              // The toast is the store's own message ("Updated ... now revision N", or "Updated
+              // the summary of ..." for a summary-only save applied in place); the fallback below
+              // only shows if a reply carries none, so it must not claim a new revision.
               await act(
                 "/api/store/" + encodeURIComponent(slug) + "/decisions/" + encodeURIComponent(id),
                 "PATCH",
                 payload,
-                "Saved as a new revision.",
+                "Saved.",
                 () => {
                   state.edit = null;
                 }
@@ -2101,7 +2199,7 @@
             h("span", { class: "badge", text: "by " + String(d.created_by || "ai") }),
           ]),
         ]),
-        h("p", { class: "prose", text: String(d.content || "") }),
+        reviewText(d),
         Array.isArray(d.confidence_factors) && d.confidence_factors.length
           ? h(
               "ul",
@@ -2114,13 +2212,13 @@
             class: "btn btn-primary btn-sm",
             type: "button",
             text: "Approve",
-            on: { click: () => approve(slug, id, "approve") },
+            on: { click: () => approve(slug, id, "approve", d.basis) },
           }),
           h("button", {
             class: "btn btn-danger btn-sm",
             type: "button",
             text: "Reject",
-            on: { click: () => approve(slug, id, "reject") },
+            on: { click: () => approve(slug, id, "reject", d.basis) },
           }),
           h("span", { class: "muted mono", text: shortId(id) }),
         ]),
@@ -2143,8 +2241,7 @@
               : null,
           ]),
         ]),
-        h("div", { class: "block-label", text: "Change against v" + num(cur.version_number || p.revision) }),
-        diffView(cur.content, prop.content),
+        updateReview(cur, prop, cur.version_number || p.revision),
         Array.isArray(prop.confidence_factors) && prop.confidence_factors.length
           ? h(
               "ul",
@@ -2157,13 +2254,13 @@
             class: "btn btn-primary btn-sm",
             type: "button",
             text: "Approve update",
-            on: { click: () => approve(slug, id, "approve") },
+            on: { click: () => approve(slug, id, "approve", p.basis) },
           }),
           h("button", {
             class: "btn btn-danger btn-sm",
             type: "button",
             text: "Reject update",
-            on: { click: () => approve(slug, id, "reject") },
+            on: { click: () => approve(slug, id, "reject", p.basis) },
           }),
           h("span", { class: "muted mono", text: "proposed " + (fmtStamp(prop.created_at) || "—") }),
         ]),
@@ -3025,6 +3122,8 @@
     const a = document.activeElement;
     if (a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.tagName === "SELECT")) return;
     if (switcherEl && switcherEl.open) return;
+    // A rebuild would close a "Show full text" the developer is reading.
+    if (document.querySelector("details.fulltext[open]")) return;
     render({ poll: true });
   }
 

@@ -1076,6 +1076,55 @@ def capture_lint(content: str, created_by: str = "ai", replace_id: str = "") -> 
     return ""
 
 
+_SUMMARY_GUIDE = (
+    "Write it in ASD-STE100 Simplified Technical English for the developer who reviews it: "
+    f"1 to {revisions.MAX_SUMMARY_SENTENCES} short sentences, at most "
+    f"{revisions.MAX_SUMMARY_SENTENCE_WORDS} words each, active voice, one idea per sentence. "
+    "Say what the decision does and why, without code detail. The model never reads it; "
+    "`content` stays the full text.")
+
+
+def summary_lint(content: str, summary: str, created_by: str = "ai",
+                 refused: str = "Not stored.", replace_id: str = "") -> str:
+    """Deterministic review-summary gate for model-authored writes ('' = passes).
+
+    A summary that is given must fit `revisions.summary_problem`. A long model-authored text
+    (`revisions.needs_summary`) must come with one, so the developer reviewing it reads a few
+    plain sentences first; short content is its own summary and needs none. Only `ai`/`plan`
+    writes are held to it: human directives, scan, bootstrap and memory imports have no model
+    to write a summary, and the review pane backfills theirs. Same restate-in-the-same-turn
+    contract as `capture_lint`. `refused` opens the notice ("Not edited." for an edit).
+
+    A correction (`replace_id`) leaves the missing-summary decision to
+    `update_decision_with_meta(require_summary=True)`, which makes it under the store lock
+    against the decision's current text: resent unchanged text keeps the existing summary,
+    changed long text is refused there with `summary_missing_notice`. A `replace_id` that
+    matches no decision falls through to a new capture there and gets the same refusal, with
+    entry id None. A summary sent with a correction is still checked here."""
+    if revisions.normalize_summary(summary):
+        problem = revisions.summary_problem(summary)
+        if problem:
+            return (f"{refused} The summary does not fit: {problem}. {_SUMMARY_GUIDE} "
+                    "Call again with the same content and a shorter summary.")
+        return ""
+    if not replace_id and summary_required(content, summary, created_by):
+        return summary_missing_notice(refused)
+    return ""
+
+
+def summary_required(content: str, summary: str, created_by: str) -> bool:
+    """Whether a write must carry a review summary it lacks: model-authored (`ai`/`plan`) text
+    too long to be its own summary, sent with none. The one statement of who is held to it."""
+    return (created_by in ("ai", "plan") and not revisions.normalize_summary(summary)
+            and revisions.needs_summary(content))
+
+
+def summary_missing_notice(refused: str = "Not stored.") -> str:
+    """The restate notice for long model-authored text sent without a summary."""
+    return (f"{refused} This decision is long, so pass `summary` too. " + _SUMMARY_GUIDE
+            + " Call again with the same content and a summary.")
+
+
 def _session_set(match: dict) -> set[str]:
     """Distinct sessions that have hit this entry. Reconstructs from the legacy
     single `session_id` for entries written before `session_ids` existed."""
@@ -2484,6 +2533,8 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
                 if rev is not None:
                     rev["content"] = (" ".join(content.split()) if confirmation_required
                                       else revisions.normalize_content(content))
+                    # The summary described the replaced wording; none came with this one.
+                    revisions.set_summary(rev, "")
                 if confirmation_required:
                     hit["preserve_case"] = True
                 revisions.sync_decision_cache(hit)
@@ -2875,7 +2926,8 @@ def _new_decision_entry(content: str, session_id: str, subtype: str,
                         created_by: str = "ai",
                         status: str = "",
                         title: str = "",
-                        preserve_case: bool = False, applies_when: list[str] | None = None) -> dict:
+                        preserve_case: bool = False, applies_when: list[str] | None = None,
+                        summary: str = "") -> dict:
     """Build a decision entry with its first revision. Single source of truth for the
     entry schema - both manual capture (`update_decision`) and memory import use this.
     `preserve_case` is reserved for factual candidates whose leading token may be a
@@ -2913,7 +2965,8 @@ def _new_decision_entry(content: str, session_id: str, subtype: str,
     rev = revisions.new_revision(decision_id, 1, content, source=created_by,
                         confidence_score=score, evidence=factors,
                         approved_at=approved_at, created_at=now,
-                        title=effective_title, normalize=not preserve_case, applies_when=applies_when)
+                        title=effective_title, normalize=not preserve_case, applies_when=applies_when,
+                        summary=summary)
     entry["revisions"] = [rev]
     entry["current_revision_id"] = rev["revision_id"]
     revisions.sync_decision_cache(entry)
@@ -2978,7 +3031,8 @@ def clear_team_reconciliation_proposal(repo_path: str, entry_id: str, *,
         return True
 
 
-def _promote_proposal(repo_path: str, entry: dict, content: str | None = None) -> None:
+def _promote_proposal(repo_path: str, entry: dict, content: str | None = None,
+                      summary: str = "") -> None:
     """Approve a pending proposed_revision: append it as a new immutable revision and move
     current_revision_id forward. Prior revisions are preserved (never overwritten). `content`
     (an edited value) overrides the proposal's content when given. The proposal's title carries
@@ -3016,10 +3070,18 @@ def _promote_proposal(repo_path: str, entry: dict, content: str | None = None) -
     new_content = content if content else prop_content
     now = datetime.now(timezone.utc).isoformat()
     carried_title = prop.get("title", "") if new_content == prop_content else ""
+    # The proposal's summary describes the proposal's text: it carries only when that text is
+    # promoted unchanged and no summary came with the approval. A summary given with an edit
+    # always wins, even when the edited text equals the proposal's.
+    if revisions.normalize_summary(summary):
+        carried_summary = summary
+    else:
+        carried_summary = prop.get("summary", "") if new_content == prop_content else ""
     revisions.append_revision(
         entry, new_content, source=prop.get("source", "human"), approved_at=now,
         title=carried_title, normalize=not prop.get("preserve_case", False),
         applies_when=prop.get("applies_when") if new_content == prop_content else [],
+        summary=carried_summary,
     )
     if prop.get("source_files"):
         _anchor_sources(repo_path, entry, prop["source_files"])
@@ -3413,12 +3475,13 @@ def update_decision(repo_path: str, content: str, session_id: str, subtype: str 
                     created_by: str = "ai", replace_id: str = "", title: str = "", *,
                     source_files: list | None = None,
                     repo_source: str = "",
-                    applies_when: list[str] | None = None) -> tuple[bool, str | None]:
+                    applies_when: list[str] | None = None,
+                    summary: str = "") -> tuple[bool, str | None]:
     """`update_decision_with_meta` without the meta - the 2-tuple every non-MCP caller wants."""
     stored, entry_id, _ = update_decision_with_meta(
         repo_path, content, session_id, subtype, created_by=created_by,
         replace_id=replace_id, title=title, source_files=source_files,
-        repo_source=repo_source, applies_when=applies_when)
+        repo_source=repo_source, applies_when=applies_when, summary=summary)
     return stored, entry_id
 
 
@@ -3430,6 +3493,8 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
                               force_pending: bool = False,
                               anchor_candidates: list | None = None,
                               anchor_candidates_confirmed: bool = False,
+                              summary: str = "",
+                              require_summary: bool = False,
                               ) -> tuple[bool, str | None, dict]:
     """Store (or route) one decision, plus a `meta` dict - `{}` except on a refused proposal
     slot claim, where it carries `refusal_ack` (issue #202) for the caller to relay verbatim.
@@ -3472,7 +3537,16 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
     approval is still what turns a candidate into an anchor. `anchor_candidates_confirmed`
     is accepted only with an explicit candidate list and records that its paths came from a
     structural evidence link; sidecar guesses remain non-authoritative unless the reviewer
-    passes them back explicitly through `approve_decision(source_files=...)`."""
+    passes them back explicitly through `approve_decision(source_files=...)`.
+
+    A `replace_id` correction sent without a summary keeps the current revision's summary
+    when its content is unchanged (an applies_when-, title- or anchor-only correction): the
+    text it describes did not change. With `require_summary` (the MCP surface, after
+    `summary_lint`), a correction from `ai`/`plan` whose changed content is long
+    (`revisions.needs_summary`) and comes without a summary is refused, nothing stored, with
+    `summary_missing_notice` as its `refusal_ack`. A long, summary-less `replace_id` that
+    matches no decision falls through to a new capture and gets the same refusal, with entry
+    id None. All of these are decided here, under the lock."""
     if anchor_candidates_confirmed and anchor_candidates is None:
         raise ValueError("confirmed anchor candidates require an explicit candidate list")
     applies_when = revisions.normalize_applies_when(applies_when)
@@ -3499,7 +3573,26 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
                 # from wiping a trusted decision.
                 if not _is_storable(content):
                     return False, None, {}
-                if content == target.get("content", "") and applies_when is not None and not title:
+                unchanged = content == target.get("content", "")
+                # A review summary for unchanged content describes the same text, and the
+                # developer reviews by it: no caller but a human may reword the summary of a
+                # trusted decision that has one, or it could make a later reversal look harmless
+                # on every review surface. This holds on every path below (in-place correction,
+                # gated title or applies_when proposal, ungated new revision), since a proposal
+                # with unchanged content carries its summary onto the approved revision. Short
+                # content is its own summary, so it counts as having one.
+                cur_rev = revisions.current_revision(target)
+                keep_trusted_summary = (unchanged and created_by != "human"
+                                        and entry_status(target) != "pending_approval"
+                                        and cur_rev is not None
+                                        and bool(revisions.review_summary(cur_rev)))
+                # Resolved once for every path below: unchanged text keeps its summary when none
+                # is sent or when it is a trusted one; changed long model text must bring one.
+                if unchanged and (keep_trusted_summary or not revisions.normalize_summary(summary)):
+                    summary = (cur_rev or target).get("summary", "")
+                elif require_summary and summary_required(content, summary, created_by):
+                    return True, target["id"], {"refusal_ack": summary_missing_notice()}
+                if unchanged and applies_when is not None and not title:
                     title = target.get("title", "")
                 # No-op guard - identical content creates no revision. A title-only correction
                 # (same content, new title) is still handled, but must respect the SAME approval
@@ -3515,9 +3608,19 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
                     # Every exit from this block below must persist this via save.
                     if source_files:
                         _anchor_sources(repo_path, target, source_files)
+                    # A review summary for the unchanged content is corrected in place, with no
+                    # approval gate: the model never reads it. Any source other than a human (ai,
+                    # plan, scan, bootstrap: all model-supplied on the MCP surface) lands one only
+                    # on a pending decision or one with no summary yet (keep_trusted_summary).
+                    summary_changed = False
+                    new_summary = revisions.normalize_summary(summary)
+                    if new_summary and cur_rev is not None and new_summary != cur_rev.get("summary"):
+                        revisions.set_summary(cur_rev, new_summary)
+                        revisions.sync_decision_cache(target)
+                        summary_changed = True
                     new_title = revisions.normalize_title(title)
                     if not new_title or new_title == target.get("title", ""):
-                        if source_files:
+                        if source_files or summary_changed:
                             save(repo_path, data)
                         return True, target["id"], {}  # nothing meaningful changed
                     now = datetime.now(timezone.utc).isoformat()
@@ -3545,7 +3648,8 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
                                 save(repo_path, data)
                             return True, target["id"], {"refusal_ack": review.refusal_ack(target)}
                         target["proposed_revision"] = review.build_proposal(
-                            target, content, subtype, session_id, now, title=title)
+                            target, content, subtype, session_id, now, title=title,
+                            summary=summary)
                         save(repo_path, data)
                         touch_pending_review(repo_path)
                         return True, target["id"], {}
@@ -3587,6 +3691,9 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
                             if applies_when is not None:
                                 rev["applies_when"] = applies_when
                             rev["title"] = revisions.normalize_title(title) or revisions.derive_title(content)
+                            # The amended draft keeps the summary sent with it, or the
+                            # current one when the text is unchanged (resolved above).
+                            revisions.set_summary(rev, summary)
                             if subtype:
                                 target["subtype"] = subtype
                             target["updated_at"] = now
@@ -3616,7 +3723,7 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
                     # applies it at approval time).
                     target["proposed_revision"] = review.build_proposal(
                         target, content, subtype, session_id, now, title=title,
-                        source_files=source_files, applies_when=applies_when)
+                        source_files=source_files, applies_when=applies_when, summary=summary)
                     save(repo_path, data)
                     touch_pending_review(repo_path)  # a Suggested Update now awaits review (after save)
                     return True, target["id"], {}
@@ -3626,12 +3733,18 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
                 # the live, rendered content now, so re-anchor here (not before the split above).
                 if subtype:
                     target["subtype"] = subtype
-                revisions.append_revision(target, content, source=created_by, approved_at=now, title=title, applies_when=applies_when)
+                # Unchanged content here means only applies_when moved; `summary` already holds
+                # the current one when keep_trusted_summary applies.
+                revisions.append_revision(target, content, source=created_by, approved_at=now,
+                                          title=title, applies_when=applies_when, summary=summary)
                 if source_files:
                     _anchor_sources(repo_path, target, source_files)
                 save(repo_path, data)
                 return True, target["id"], {}
-            # replace_id not found - fall through to normal storage
+            # replace_id not found - fall through to normal storage. That makes a new
+            # decision, so it is held to the new-capture rule `summary_lint` left to us.
+            if require_summary and summary_required(content, summary, created_by):
+                return True, None, {"refusal_ack": summary_missing_notice()}
         if not _is_storable(content):
             return False, None, {}
         decisions_only = [e for e in data["entries"] if e["type"] == "decision"]
@@ -3661,7 +3774,7 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
                 "entry_id": tombstoned.get("id") or "", "status": "retired",
                 "overlap": round(_match_overlap(content, tombstoned), 2)}}
         entry = _new_decision_entry(content, session_id, subtype, created_by=created_by,
-                                    title=title, applies_when=applies_when,
+                                    title=title, applies_when=applies_when, summary=summary,
                                     status="pending_approval" if force_pending else "")
         # Which signal chose THIS store (see resolve_repo_verbose). Stamped only when the
         # caller resolved verbosely and passed it on, and only on a brand-new entry - a
@@ -3715,6 +3828,7 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
 def approve_decision(repo_path: str, entry_id: str, action: str,
                      content: str = "", *, source_files: list | None = None,
                      precondition: Callable[[dict], str | None] | None = None,
+                     summary: str = "",
                      ) -> tuple[bool, str]:
     """Approve, edit, skip, ignore, or dismiss a decision awaiting the developer - or
     retire an already-trusted one.
@@ -3745,6 +3859,9 @@ def approve_decision(repo_path: str, entry_id: str, action: str,
         in between by one of the same kind compares what it showed (the review pane's
         `console_api.review_basis`); checking the kind alone misses that case. Single decision
         id only; an id that resolves to nothing is left to the usual "not found" refusal.
+    summary: the review summary of the edited text, with action='edit' only. An edit never
+        keeps the previous summary (it described other wording); with none given the edited
+        revision has none, and the review shows its full text until one is written.
     Returns (success, message).
     """
     if action not in ("approve", "ignore", "edit", "skip", "dismiss"):
@@ -3768,7 +3885,7 @@ def approve_decision(repo_path: str, entry_id: str, action: str,
                 return False, refusal
         ok, msg, changed = apply_approval(
             data, entry_id, action, content, datetime.now(timezone.utc).isoformat(), repo_path,
-            has_caller_source_files=bool(source_files))
+            has_caller_source_files=bool(source_files), summary=summary)
         if ok and source_files:
             entry = entry_by_id(data["entries"], entry_id)
             if entry is not None:
@@ -3786,7 +3903,8 @@ def approve_decision(repo_path: str, entry_id: str, action: str,
 
 def apply_approval(data: dict, entry_id: str, action: str, content: str,
                    now: str, repo_path: str, *,
-                   has_caller_source_files: bool = False) -> tuple[bool, str, bool]:
+                   has_caller_source_files: bool = False,
+                   summary: str = "") -> tuple[bool, str, bool]:
     """Apply ONE approval action to `data` in memory - no load, no save (the caller owns
     those). NOT lock-free, though: an approve/edit that anchors (`_anchor_sources`, via
     `_promote_proposal` or directly below) shells out to `git rev-parse HEAD`, and its sole
@@ -3800,6 +3918,8 @@ def apply_approval(data: dict, entry_id: str, action: str, content: str,
     it applies those (and clears any `anchor_candidates`) AFTER this returns, so this function
     must not waste a git call promoting a structurally confirmed candidate that is about to be
     overridden anyway (see the confirmed-candidate branches below, issue #175 Task 3)."""
+    if action != "edit":
+        summary = ""           # only an edit brings new wording for a summary to describe
     entry = next((e for e in data["entries"] if e.get("id") == entry_id), None)
     if entry is None and entry_id:
         entry = next((e for e in data["entries"] if e.get("id", "").startswith(entry_id)), None)
@@ -3829,7 +3949,8 @@ def apply_approval(data: dict, entry_id: str, action: str, content: str,
         # anchor, which would re-anchor the just-retired decision to unrelated files and drag
         # it straight back into anchor-decay participation (and Tier-1 guard pairing).
         prop_clear = bool((entry.get("proposed_revision") or {}).get("clear_anchors"))
-        _promote_proposal(repo_path, entry, content if action == "edit" else None)
+        _promote_proposal(repo_path, entry, content if action == "edit" else None,
+                          summary=summary)
         # Stamp approved_by AFTER promoting, not before: revisions.append_revision (called inside
         # _promote_proposal) invalidates approved_by whenever the new revision's source isn't
         # "human" (see its docstring) - a Suggested Update's source is usually the ORIGINAL
@@ -3896,7 +4017,8 @@ def apply_approval(data: dict, entry_id: str, action: str, content: str,
         entry["status"] = "approved"
         entry.pop("bootstrap_withheld", None)
         revisions.append_revision(entry, content if action == "edit" else revisions.current_content(entry),
-                                  "human", approved_at=now)
+                                  "human", approved_at=now,
+                                  summary=summary if action == "edit" else entry.get("summary", ""))
         return True, f"Human decision saved as revision {entry['revision']}; original inference preserved.", True
 
     # No proposed_revision: a plain decision entry, gated on its own status.
@@ -3933,6 +4055,8 @@ def apply_approval(data: dict, entry_id: str, action: str, content: str,
     if action == "edit" and cur is not None:
         cur["content"] = (" ".join(content.split()) if entry.get("preserve_case")
                           else revisions.normalize_content(content))
+        # The old summary described the old wording: only the edit's own summary stays.
+        revisions.set_summary(cur, summary)
     entry["status"] = "approved"
     entry["approved_at"] = now
     entry["approved_by"] = "human"
@@ -3960,6 +4084,41 @@ def apply_approval(data: dict, entry_id: str, action: str, content: str,
     preview = stored_content[:80] + ("..." if len(stored_content) > 80 else "")
     verb = "Updated and approved" if action == "edit" else "Approved"
     return True, f"{verb}. This decision is now trusted knowledge: \"{preview}\"", True
+
+
+def set_review_summary(repo_path: str, entry_id: str, summary: str, *,
+                       of_proposal: bool = False,
+                       precondition: Callable[[dict], str | None] | None = None,
+                       ) -> tuple[bool, str]:
+    """Store the review summary of a decision's current revision, or (`of_proposal`) of its
+    pending Suggested Update. A reading aid only: the content, the approval state and what the
+    model is given are untouched, so no approval gate applies. Refused when the summary fails
+    `revisions.summary_problem`, when there is no proposal to summarize, or when `precondition`
+    (checked against the entry as loaded inside the lock, like `approve_decision`'s) refuses."""
+    problem = revisions.summary_problem(summary)
+    if problem:
+        return False, f"That summary does not fit: {problem}."
+    with store_lock(repo_slug(repo_path)):
+        data = load_for_update(repo_path)
+        entry = entry_by_id([e for e in data["entries"] if e.get("type") == "decision"], entry_id)
+        if entry is None:
+            return False, f"Decision {entry_id!r} not found."
+        if precondition is not None:
+            refusal = precondition(entry)
+            if refusal:
+                return False, refusal
+        if of_proposal:
+            target = entry.get("proposed_revision")
+            if not target:
+                return False, "That decision has no suggested update to summarize."
+        else:
+            target = revisions.current_revision(entry)
+            if target is None:
+                return False, "That decision has no revision to summarize."
+        revisions.set_summary(target, summary)
+        revisions.sync_decision_cache(entry)
+        save(repo_path, data)
+    return True, "Summary saved."
 
 
 # NOTE: there is deliberately no `approve_decisions` (plural) bulk entrypoint. It was removed
@@ -4271,7 +4430,8 @@ EDIT_CONFLICT = "changed underneath you"
 
 def edit_decision(repo_path: str, entry_id: str, *, content: str | None = None,
                   title: str | None = None, subtype: str | None = None,
-                  source: str = "ui", if_version: int | None = None) -> tuple[bool, str, dict | None]:
+                  source: str = "ui", if_version: int | None = None,
+                  summary: str | None = None) -> tuple[bool, str, dict | None]:
     """Apply a developer's explicit edit to a decision as a new revision.
 
     Deliberately does NOT go through `update_decision`: an edit overlaps the text it
@@ -4289,6 +4449,11 @@ def edit_decision(repo_path: str, entry_id: str, *, content: str | None = None,
     `superseded_proposals`), because that proposal was authored against the text this edit
     replaces; a title/subtype-only change leaves it pending. See the comment at the drop.
 
+    `summary` is the review summary (`revisions.summary_problem` must pass). A content change
+    never keeps the old one: it carries only the summary sent with it, or none. A title/subtype
+    edit keeps the current summary. A summary-only edit is corrected in place on the current
+    revision, with no new revision: the model never reads it, so nothing trusted changes.
+
     `if_version` is the optimistic-concurrency guard against a live MCP session writing the
     same entry: on a mismatch nothing is written and the third element carries
     {"current_version": N}. Returns (ok, message, entry | conflict | None); on success the
@@ -4303,8 +4468,12 @@ def edit_decision(repo_path: str, entry_id: str, *, content: str | None = None,
         return False, f"Invalid subtype {subtype!r}. Use one of: {', '.join(sorted(_SUBTYPES))}.", None
     if content is not None and not _is_storable(content):
         return False, "Content must contain at least one word.", None
-    if content is None and title is None and subtype is None:
-        return False, "Nothing to change - pass content, title, or subtype.", None
+    if summary is not None and summary.strip():
+        problem = revisions.summary_problem(summary)
+        if problem:
+            return False, f"That summary does not fit: {problem}.", None
+    if content is None and title is None and subtype is None and summary is None:
+        return False, "Nothing to change - pass content, title, subtype, or summary.", None
     with store_lock(repo_slug(repo_path)):
         data = load_for_update(repo_path)
         entry = entry_by_id(data["entries"], entry_id)
@@ -4314,6 +4483,24 @@ def edit_decision(repo_path: str, entry_id: str, *, content: str | None = None,
         version = current.get("version_number", entry.get("revision", 1))
         if if_version is not None and if_version != version:
             return False, EDIT_CONFLICT, {"current_version": version}
+        # The console's Save always posts content and title: a summary-only correction made
+        # there arrives with both unchanged, and must not mint a revision either.
+        cur_content = revisions.current_content(entry)
+        unchanged = ((content is None or content == cur_content
+                      or revisions.normalize_content(content) == cur_content)
+                     and (title is None or revisions.normalize_title(title) == entry.get("title", ""))
+                     and (subtype is None or subtype == entry.get("subtype")))
+        if summary is not None and unchanged:
+            revisions.set_summary(current, summary)
+            revisions.sync_decision_cache(entry)
+            save(repo_path, data)
+            return True, f"Updated the summary of {entry['id'][:8]}.", entry
+        if summary is not None:
+            new_summary = summary
+        elif content is not None and content != cur_content:
+            new_summary = ""                    # it described the replaced wording
+        else:
+            new_summary = current.get("summary", "")
         if title is not None:
             new_title = title
         elif content is not None:
@@ -4348,7 +4535,8 @@ def edit_decision(repo_path: str, entry_id: str, *, content: str | None = None,
             entry.setdefault("superseded_proposals", []).append(
                 {**dropped, "superseded_at": datetime.now(timezone.utc).isoformat()})
         revisions.append_revision(entry, revisions.current_content(entry) if content is None else content,
-                         source=source, approved_at=approved_at, title=new_title)
+                         source=source, approved_at=approved_at, title=new_title,
+                         summary=new_summary)
         save(repo_path, data)
         note = " The pending Suggested Update was superseded by this edit." if dropped else ""
         return True, f"Updated {entry['id'][:8]} - now revision {entry['revision']}.{note}", entry

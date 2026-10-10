@@ -251,28 +251,49 @@ def _decision_route(method: str, repo_path: str, entry_id: str, rest: list[str],
 
 def _approve(repo_path: str, entry_id: str, body: object) -> tuple[int, object]:
     """Approve or reject. "reject" is the console's word for the store's `ignore` action -
-    the store vocabulary (approve/ignore/edit/skip/dismiss) stays unchanged."""
-    action = _body(body, "action").get("action", "approve")
+    the store vocabulary (approve/ignore/edit/skip/dismiss) stays unchanged.
+
+    `basis` is the card's `review_basis` as the console showed it. When given, the store lock
+    recomputes it and a mismatch refuses with 409: a card another session replaced while the
+    developer read it is never signed unseen."""
+    payload = _body(body, "action", "basis")
+    action = payload.get("action", "approve")
     if action == "reject":
         action = "ignore"
     if action not in ("approve", "ignore"):
         raise ApiError(400, "action must be 'approve' or 'reject'")
-    return _finish(repo_path, entry_id, *store.approve_decision(repo_path, entry_id, action))
+    basis = payload.get("basis")
+    if basis is not None and not isinstance(basis, str):
+        raise ApiError(400, "basis must be a string")
+    refused = []
+
+    def still_shown(live: dict) -> str | None:
+        if console_api.review_basis(live) == basis:
+            return None
+        refused.append(True)
+        return "That decision changed since it was shown, so nothing was done. Review it again."
+
+    ok, message = store.approve_decision(repo_path, entry_id, action,
+                                         precondition=still_shown if basis else None)
+    if refused:
+        raise ApiError(409, message)
+    return _finish(repo_path, entry_id, ok, message)
 
 
 def _edit(repo_path: str, entry_id: str, body: object) -> tuple[int, object]:
-    payload = _body(body, "content", "title", "subtype", "if_version")
+    payload = _body(body, "content", "title", "subtype", "if_version", "summary")
     content = _text(payload, "content", MAX_CONTENT)
     title = _text(payload, "title", MAX_TITLE)
     subtype = _text(payload, "subtype", MAX_WORD)
+    summary = _text(payload, "summary", MAX_CONTENT)
     if_version = payload.get("if_version")
     if if_version is not None and (isinstance(if_version, bool) or not isinstance(if_version, int)):
         raise ApiError(400, "if_version must be an integer")
     # `subtype: ""` is forwarded, not rejected: the store reads a blank subtype as "leave it
     # alone" so a legacy entry that carries no subtype stays editable. Only a MISSING field is
     # "nothing to change" here; a body of nothing but `subtype: ""` is the store's own refusal.
-    if content is None and title is None and subtype is None:
-        raise ApiError(400, "nothing to change - pass content, title, or subtype")
+    if content is None and title is None and subtype is None and summary is None:
+        raise ApiError(400, "nothing to change - pass content, title, subtype, or summary")
 
     # `source="human"`, not SOURCE - same reasoning as `_add_global`: an edit arriving here was
     # typed by a developer, and "ui" names the surface, not the author. Only this call site
@@ -280,7 +301,7 @@ def _edit(repo_path: str, entry_id: str, body: object) -> tuple[int, object]:
     # which by definition is not a developer at a form.
     ok, message, extra = store.edit_decision(repo_path, entry_id, content=content, title=title,
                                              subtype=subtype, source="human",
-                                             if_version=if_version)
+                                             if_version=if_version, summary=summary)
     if not ok and message == store.EDIT_CONFLICT:
         # A live MCP session wrote this decision between the console's read and this save.
         raise ApiError(409, message, current_version=(extra or {}).get("current_version"))

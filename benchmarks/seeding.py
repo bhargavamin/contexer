@@ -37,6 +37,29 @@ def seed_items(task: dict, seed: int, rep: int = 0) -> list[dict]:
     return items
 
 
+# Mirrors `contexer.revisions.MAX_SUMMARY_SENTENCE_WORDS`, the most words one summary sentence
+# may hold. Copied, not imported: this module stays import-free (see the module docstring), so
+# the harness never imports the code it measures.
+_SUMMARY_WORDS = 20
+
+
+def _seed_summary(revision: dict) -> str:
+    """The review summary a seed is captured with on a checkout that takes one: its title, or
+    for an untitled seed the first `_SUMMARY_WORDS` words of its content as one sentence.
+    Computed here, not by the store's own check, so the harness never imports the code it
+    measures."""
+    words = (revision.get("title") or revision["content"]).split()[:_SUMMARY_WORDS]
+    return " ".join(words).rstrip(".!?;:,") + "."
+
+
+def _optional_kwargs(revision: dict) -> str:
+    """The keyword suffix every generated `update_context` call for `revision` ends with: its
+    `applies_when` when the seed carries one, then its review summary on a checkout that takes
+    one (`_summary`, set at the top of the generated script)."""
+    return ((f", applies_when={revision['applies_when']!r}" if "applies_when" in revision else "")
+            + f", **({{'summary': {_seed_summary(revision)!r}}} if _summary else {{}}))")
+
+
 def seed_script(repo: str, items: list[dict]) -> str:
     """Python source that stores `items` the way an agent's decisions reach a real store:
     `update_context` as the AI author (title, anchors, capture-quality gate and novelty filter
@@ -45,8 +68,11 @@ def seed_script(repo: str, items: list[dict]) -> str:
     Runs inside the measured checkout, so it imports only `contexer`. A seed the store refuses
     (gate bounce, duplicate, failed approval) raises with the store's own message: the
     static-file arm always gets every seed, so a silent drop would break arm parity. The ids
-    land in `seeded_ids`, in item order."""
-    lines = ["import re", "from contexer import server, store", "seeded_ids = []"]
+    land in `seeded_ids`, in item order. A checkout whose `update_context` takes a review
+    `summary` (and bounces a long capture without one) gets one from `_seed_summary`, the way
+    an agent there passes one; an older checkout is called exactly as before."""
+    lines = ["import inspect, re", "from contexer import server, store", "seeded_ids = []",
+             "_summary = 'summary' in inspect.signature(server.update_context).parameters"]
     for item in items:
         revisions = item.get("history", []) + [item]  # oldest first; the last is current
         first, later = revisions[0], revisions[1:]
@@ -54,7 +80,7 @@ def seed_script(repo: str, items: list[dict]) -> str:
             f"_r = server.update_context({first['content']!r}, repo_path={repo!r}, "
             f"subtype={item['subtype']!r}, created_by='ai', title={first['title']!r}, "
             f"source_files={item['source_files'] or None!r}"
-            + (f", applies_when={first['applies_when']!r}" if "applies_when" in first else "") + ")\n"
+            + _optional_kwargs(first) + "\n"
             "_m = re.search(r'\\bid=([0-9a-f-]{8,})', _r)\n"
             f"assert _m, {'seed not stored: ' + first['content'][:60]!r} + ' -> ' + _r[:300]\n"
             f"_e = next(e for e in store.load({repo!r})['entries'] "
@@ -71,7 +97,7 @@ def seed_script(repo: str, items: list[dict]) -> str:
                 f"_r = server.update_context({revision['content']!r}, repo_path={repo!r}, "
                 f"subtype={item['subtype']!r}, created_by='ai', title={revision['title']!r}, "
                 f"source_files={item['source_files'] or None!r}, replace_id=_m.group(1)"
-                + (f", applies_when={revision['applies_when']!r}" if "applies_when" in revision else "") + ")\n"
+                + _optional_kwargs(revision) + "\n"
                 f"_e = next(e for e in store.load({repo!r})['entries'] "
                 "if str(e.get('id', '')).startswith(_m.group(1)))\n"
                 "if _e.get('proposed_revision'):\n"

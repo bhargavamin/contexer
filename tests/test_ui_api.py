@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from contexer import config, store, team_context
+from contexer import config, console_api, store, team_context
 from tests.conftest import redirect_store_dir
 from contexer.ui import api, daemon, server
 
@@ -697,6 +697,48 @@ def test_approving_a_proposed_update_promotes_it_to_a_new_revision(console, repo
     assert detail["content"].endswith("not MySQL")
 
 
+def test_cards_carry_the_basis_approve_sends_back(console, repo):
+    """A card waiting on the developer carries its review fingerprint; a trusted one has none."""
+    pending = ok(console, f"/api/store/{repo['slug']}/decisions/{repo['pending']}")
+    plain = ok(console, f"/api/store/{repo['slug']}/decisions/{repo['plain']}")
+    proposal = ok(console, f"/api/store/{repo['slug']}")["proposals"][0]
+    entries = store.load(repo["path"])["entries"]
+    assert pending["basis"] == console_api.review_basis(store.entry_by_id(entries, repo["pending"]))
+    assert proposal["basis"] == console_api.review_basis(store.entry_by_id(entries, repo["approved"]))
+    assert "basis" not in plain
+
+
+def test_approving_with_the_shown_basis_settles_it(console, repo):
+    basis = ok(console, f"/api/store/{repo['slug']}/decisions/{repo['pending']}")["basis"]
+    reply = write(console, "POST",
+                  f"/api/store/{repo['slug']}/decisions/{repo['pending']}/approve",
+                  body={"action": "approve", "basis": basis})
+    assert reply.status == 200
+    assert ok(console, f"/api/store/{repo['slug']}/decisions/{repo['pending']}")["status"] == "approved"
+
+
+@pytest.mark.parametrize("action", ["approve", "reject"])
+def test_a_card_that_changed_since_it_was_shown_is_refused(console, repo, action):
+    """The card was read before another session swapped what it asks: a "Show full text" left
+    open pauses the poll, so the click must not sign wording the developer never saw."""
+    shown = ok(console, f"/api/store/{repo['slug']}/decisions/{repo['approved']}")["basis"]
+    store.set_review_summary(repo["path"], repo["approved"], "Use Postgres. Do not use MySQL.",
+                             of_proposal=True)
+    reply = write(console, "POST",
+                  f"/api/store/{repo['slug']}/decisions/{repo['approved']}/approve",
+                  body={"action": action, "basis": shown})
+    assert reply.status == 409 and "changed since it was shown" in reply.data["error"]
+    detail = ok(console, f"/api/store/{repo['slug']}/decisions/{repo['approved']}")
+    assert detail["revision"] == 1 and detail["proposed_revision"] is not None
+
+
+def test_a_non_string_basis_is_a_400(console, repo):
+    reply = write(console, "POST",
+                  f"/api/store/{repo['slug']}/decisions/{repo['pending']}/approve",
+                  body={"action": "approve", "basis": 7})
+    assert reply.status == 400
+
+
 def test_approving_an_already_approved_decision_is_a_400_not_a_404(console, repo):
     reply = write(console, "POST",
                   f"/api/store/{repo['slug']}/decisions/{repo['plain']}/approve",
@@ -732,6 +774,19 @@ def test_an_edit_appends_a_revision_attributed_to_the_developer(console, repo):
     assert detail["revision"] == 2 and detail["title"] == "Test file naming"
     assert detail["revisions"][-1]["source"] == "human"
     assert detail["status"] == "approved"  # an edit to a trusted decision stays trusted
+
+
+def test_a_summary_only_save_answers_with_the_in_place_message(console, repo):
+    """A Save that changes only the summary is applied in place; the reply's
+    message is what the toast shows, so it must say the summary was updated, not that a new
+    revision was minted."""
+    reply = write(console, "PATCH", f"/api/store/{repo['slug']}/decisions/{repo['plain']}",
+                  body={"content": "Name test files test_<module>.py",
+                        "summary": "Name each test file after its module.", "if_version": 1})
+    assert reply.status == 200
+    assert reply.data["message"] == f"Updated the summary of {repo['plain'][:8]}."
+    detail = ok(console, f"/api/store/{repo['slug']}/decisions/{repo['plain']}")
+    assert detail["revision"] == 1
 
 
 def test_a_stale_if_version_is_a_409_carrying_the_current_version(console, repo):

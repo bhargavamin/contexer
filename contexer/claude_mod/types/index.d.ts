@@ -24,13 +24,26 @@ export type ReviewItem = {
   timestamp: string | null
   /** Absent from a contexer older than the applicability change: read it as always. */
   applies_when?: Applicability
+  /** The stored review summary review shows first, or null (console_api._review_summary_fields). */
+  summary?: string | null
+  /** No summary and the content is long: the pane asks a small model for one. */
+  needs_summary?: boolean
+  /** With `needs_summary`: the content with secrets scrubbed, the only text sent to that model. */
+  summary_source?: string
   actions: ReviewAction[]
   /** What the card asks the developer to ratify, fingerprinted (console_api.review_basis); sent
    * back as `--expect` so an action on a decision that changed since is refused. Absent when
    * the pane cannot settle the item, and from a contexer older than the check. */
   basis?: string
   /** `applies_when` null: the proposal inherits the current applicability on approval. */
-  proposed?: { content: string; title: string; applies_when?: Applicability | null }
+  proposed?: {
+    content: string
+    title: string
+    applies_when?: Applicability | null
+    summary?: string | null
+    needs_summary?: boolean
+    summary_source?: string
+  }
   /** A Suggested Update whose content differs from the approved version (conflicts.has_open_conflict). */
   conflict?: boolean
   /** The side picked earlier with the developer (conflicts.memo_pick), if any. */
@@ -53,6 +66,8 @@ export type ConflictSide = {
   applies_when?: Applicability
   /** Only a human-ratified decision (stated or approved by the developer) may be kept over its contradiction (conflicts.can_keep). */
   can_keep: boolean
+  summary?: string | null
+  needs_summary?: boolean
   /** A Suggested Update waiting on this side, if any: unapproved wording. */
   proposed?: { content: string; title: string; applies_when?: Applicability }
 }
@@ -88,6 +103,10 @@ declare module 'claude-code' {
       cursor: { key: string; at: number } | null
       /** The pane is up, so the band above the prompt steps aside. */
       isPaneOpen: boolean
+      /** The card (by key) showing its full text instead of its review summary. */
+      showFull: string | null
+      /** The card (by key) whose review summary a small model is writing. */
+      summarizing: string | null
       /** Another plugin's suggestion is in the prompt box since the last prompt was sent. */
       isOtherSuggested: boolean
       /** Queue-read ordering: the last ticket taken, and the ticket of the reply that landed. */
