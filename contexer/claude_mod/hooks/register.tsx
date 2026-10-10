@@ -570,7 +570,9 @@ export const register: Register = on => {
     }
 
     const badge = ({ label, color }: Badge) => (
-      <Text key={`badge-${label}`} bold color="black" backgroundColor={color}>{` ${label} `}</Text>
+      <Box key={`badge-${label}`} flexShrink={0}>
+        <Text bold color="black" backgroundColor={color}>{` ${label} `}</Text>
+      </Box>
     )
     // A label column keeps the values aligned: NOW, PROPOSED, APPLIES.
     const field = (name: string, value: string, dim = false) => (
@@ -654,7 +656,7 @@ export const register: Register = on => {
         actions = <Text key={`terminal-${key}`} dimColor>Decide this one with `contexer review` in a terminal.</Text>
       } else {
         actions = (
-          <Box key={`actions-${key}`} gap={1}>
+          <Box key={`actions-${key}`} columnGap={1} flexWrap="wrap">
             {item.actions
               .filter(action => action !== 'edit' || Input)
               .map(action => (
@@ -742,12 +744,15 @@ export const register: Register = on => {
     }
     return (
       <Box flexDirection="column" gap={1} paddingX={1}>
-        <Box key="top" flexDirection="row" justifyContent="space-between">
-          <Box gap={1}>
+        {/* A narrow pane moves the navigation to its own line, rather than squeezing the badges
+            or pushing buttons past the edge: each part keeps its width, and only the subtitle
+            wraps. */}
+        <Box key="top" flexDirection="row" flexWrap="wrap" justifyContent="space-between" columnGap={2}>
+          <Box columnGap={1} flexWrap="wrap" flexShrink={1}>
             {badges.map(badge)}
-            <Text dimColor>{subtitle}</Text>
+            <Box flexShrink={1}><Text dimColor>{subtitle}</Text></Box>
           </Box>
-          <Box gap={1}>
+          <Box columnGap={1} flexWrap="wrap" flexShrink={0}>
             {fullToggle}
             {many ? <Button key="prev" label="‹" hotkey="p" dimColor onPress={() => go((at + cards.length - 1) % cards.length)} /> : null}
             <Text dimColor>{progress(at, cards.length)}</Text>
@@ -760,9 +765,11 @@ export const register: Register = on => {
         <Box key={`card-${key}`} flexDirection="column" borderStyle="round" borderColor={frame} paddingX={1} gap={1}>
           {body}
         </Box>
-        <Box key="bottom" flexDirection="row" justifyContent="space-between">
-          <Text dimColor>{many ? 'tab move · enter press · ↑↓ scroll · n/p next/previous · esc close' : 'tab move · enter press · ↑↓ scroll · esc close'}</Text>
-          {close}
+        <Box key="bottom" flexDirection="row" flexWrap="wrap" justifyContent="space-between" columnGap={2}>
+          <Box flexShrink={1}>
+            <Text dimColor>{many ? 'tab move · enter press · ↑↓ scroll · n/p next/previous · esc close' : 'tab move · enter press · ↑↓ scroll · esc close'}</Text>
+          </Box>
+          <Box flexShrink={0}>{close}</Box>
         </Box>
       </Box>
     )
