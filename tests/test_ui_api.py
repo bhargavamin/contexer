@@ -734,6 +734,19 @@ def test_an_edit_appends_a_revision_attributed_to_the_developer(console, repo):
     assert detail["status"] == "approved"  # an edit to a trusted decision stays trusted
 
 
+def test_a_summary_only_save_answers_with_the_in_place_message(console, repo):
+    """A Save that changes only the summary is applied in place; the reply's
+    message is what the toast shows, so it must say the summary was updated, not that a new
+    revision was minted."""
+    reply = write(console, "PATCH", f"/api/store/{repo['slug']}/decisions/{repo['plain']}",
+                  body={"content": "Name test files test_<module>.py",
+                        "summary": "Name each test file after its module.", "if_version": 1})
+    assert reply.status == 200
+    assert reply.data["message"] == f"Updated the summary of {repo['plain'][:8]}."
+    detail = ok(console, f"/api/store/{repo['slug']}/decisions/{repo['plain']}")
+    assert detail["revision"] == 1
+
+
 def test_a_stale_if_version_is_a_409_carrying_the_current_version(console, repo):
     reply = write(console, "PATCH", f"/api/store/{repo['slug']}/decisions/{repo['plain']}",
                   body={"content": "Something else entirely", "if_version": 99})
