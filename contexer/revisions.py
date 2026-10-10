@@ -10,6 +10,16 @@ from datetime import datetime, timezone
 
 MAX_TITLE_LEN = 100
 
+# The review summary: a short Simplified Technical English (ASD-STE100) version of a decision,
+# for the human reviewing it. The model never reads it; the full content stays what is injected
+# and what an approval signs. Checked deterministically: the controlled STE dictionary is not
+# machine-checkable, but "short sentences, few of them" is, and that is the failure that matters
+# (a summary as long as the text it summarizes).
+MAX_SUMMARY_SENTENCES = 5
+MAX_SUMMARY_SENTENCE_WORDS = 20
+MAX_SUMMARY_CHARS = 600
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+
 
 def normalize_content(content: str) -> str:
     """Strip whitespace, collapse internal runs, and capitalize the first character."""
@@ -35,6 +45,57 @@ def derive_title(content: str) -> str:
     first_line = content.strip().splitlines()[0]
     first_sentence = re.split(r"(?<=[.!?])\s", first_line, maxsplit=1)[0]
     return normalize_title(first_sentence)
+
+
+def normalize_summary(summary: str) -> str:
+    """Collapse a summary to single-spaced text; sentences, not lines, are its units."""
+    return " ".join((summary or "").split())
+
+
+def set_summary(record: dict, summary: str) -> None:
+    """Store `summary` (normalized) on a revision, proposal or decision cache, or drop the key
+    when it normalizes to nothing: a record never keeps an empty summary."""
+    flat = normalize_summary(summary)
+    if flat:
+        record["summary"] = flat
+    else:
+        record.pop("summary", None)
+
+
+def summary_problem(text: str) -> str | None:
+    """Why `text` does not read as a review summary, or None when it does: one to
+    MAX_SUMMARY_SENTENCES sentences, each at most MAX_SUMMARY_SENTENCE_WORDS words, at most
+    MAX_SUMMARY_CHARS characters in all."""
+    flat = normalize_summary(text)
+    if not flat:
+        return "it is empty"
+    if len(flat) > MAX_SUMMARY_CHARS:
+        return f"it is {len(flat)} characters; keep it under {MAX_SUMMARY_CHARS}"
+    sentences = [s for s in _SENTENCE_END.split(flat) if s]
+    if len(sentences) > MAX_SUMMARY_SENTENCES:
+        return f"it has {len(sentences)} sentences; use at most {MAX_SUMMARY_SENTENCES}"
+    longest = max(len(s.split()) for s in sentences)
+    if longest > MAX_SUMMARY_SENTENCE_WORDS:
+        return (f"a sentence has {longest} words; keep each sentence to "
+                f"{MAX_SUMMARY_SENTENCE_WORDS} words or fewer")
+    return None
+
+
+def needs_summary(content: str) -> bool:
+    """Whether content is too long to be its own review summary. Short content (a one-line
+    convention, a prompt directive) already reads as one, so it gets none stored."""
+    return summary_problem(content) is not None
+
+
+def review_summary(record: dict) -> str | None:
+    """What a review shows in place of the full text: the stored summary, else the content
+    itself when it is short enough to be its own, else None (the review shows the full text).
+    `record` is a decision, a revision or a proposal."""
+    stored = normalize_summary(record.get("summary") or "")
+    if stored:
+        return stored
+    text = record.get("content", "")
+    return normalize_summary(text) if text and not needs_summary(text) else None
 
 
 def compute_confidence(entry: dict) -> tuple[int, list[str]]:
@@ -109,8 +170,9 @@ def new_revision(decision_id: str, version_number: int, content: str, source: st
                  confidence_score: int = 0, evidence: list | None = None,
                  approved_at: str | None = None, created_at: str | None = None,
                  normalize: bool = True, title: str = "",
-                 applies_when: list[str] | None = None) -> dict:
-    """Build one immutable revision object."""
+                 applies_when: list[str] | None = None, summary: str = "") -> dict:
+    """Build one immutable revision object. A review `summary` is kept only when given: a
+    revision never inherits another revision's summary, since it may no longer describe it."""
     now = datetime.now(timezone.utc).isoformat()
     revision = {
         "revision_id": str(uuid.uuid4()),
@@ -126,6 +188,7 @@ def new_revision(decision_id: str, version_number: int, content: str, source: st
     }
     if applies_when is not None:
         revision["applies_when"] = normalize_applies_when(applies_when)
+    set_summary(revision, summary)
     return revision
 
 
@@ -155,6 +218,7 @@ def sync_decision_cache(entry: dict) -> None:
         return
     entry["content"] = revision.get("content", "")
     entry["title"] = revision.get("title") or derive_title(revision.get("content", ""))
+    set_summary(entry, revision.get("summary") or "")
     if "applies_when" in revision:
         entry["applies_when"] = list(revision["applies_when"])
     else:
@@ -170,10 +234,12 @@ def sync_decision_cache(entry: dict) -> None:
 
 def append_revision(entry: dict, content: str, source: str,
                     approved_at: str | None = None, title: str = "",
-                    normalize: bool = True, applies_when: list[str] | None = None) -> dict:
+                    normalize: bool = True, applies_when: list[str] | None = None,
+                    summary: str = "") -> dict:
     """Append a revision, advance HEAD, invalidate stale approval, and sync its cache.
 
-    `normalize=False` preserves already-collapsed case-sensitive factual content.
+    `normalize=False` preserves already-collapsed case-sensitive factual content. The new
+    revision carries only the `summary` given here, never the previous revision's.
     """
     if applies_when is None:
         applies_when = (current_revision(entry) or entry).get("applies_when")
@@ -187,7 +253,7 @@ def append_revision(entry: dict, content: str, source: str,
         entry.get("id", ""), next_version, content,
         source=source, confidence_score=score, evidence=factors,
         approved_at=approved_at, title=effective_title, normalize=normalize,
-        applies_when=applies_when,
+        applies_when=applies_when, summary=summary,
     )
     revisions.append(revision)
     entry["current_revision_id"] = revision["revision_id"]

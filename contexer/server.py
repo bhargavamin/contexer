@@ -7,7 +7,7 @@ import time
 import uuid
 from mcp.server.fastmcp import FastMCP
 from contexer import (conflicts, decision_impact, evidence, lifecycle, policy_api, reconcile,
-                      share_policy, store)
+                      revisions, share_policy, store)
 
 _HOST_SESSION_ID = os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
 SESSION_ID = _HOST_SESSION_ID or str(uuid.uuid4())
@@ -51,7 +51,12 @@ _INSTRUCTIONS = (
     "store it the same turn, since the session may end with the answer. Pass the full reasoning, not "
     "just the conclusion, and always pass a concise, one-line, imperative title (<= 100 chars) "
     "summarizing the decision - e.g. 'Use Postgres for decision store' - omit it only if you truly "
-    "can't summarize better than the store's own derivation from content. The server silently filters "
+    "can't summarize better than the store's own derivation from content. When the content has more than "
+    f"{revisions.MAX_SUMMARY_SENTENCES} sentences, a sentence over {revisions.MAX_SUMMARY_SENTENCE_WORDS} "
+    f"words, or over {revisions.MAX_SUMMARY_CHARS} characters, also pass `summary`: 1 to "
+    f"{revisions.MAX_SUMMARY_SENTENCES} sentences of ASD-STE100 Simplified Technical English, at most "
+    f"{revisions.MAX_SUMMARY_SENTENCE_WORDS} words each, for the developer who reviews it (never shown "
+    "to a model). The server silently filters "
     "duplicates, so err on the side of calling it. Do not call it for a task- or session-local "
     "operational instruction (for this task, the task I gave you, in this session, while you do "
     "this), including one that only says to use or work somewhere. Prompt capture ignores those, "
@@ -77,7 +82,7 @@ mcp = FastMCP("contexer", instructions=_INSTRUCTIONS, log_level="WARNING")
 def update_context(content: str, repo_path: str = "", subtype: str = "",
                    created_by: str = "ai", replace_id: str = "", title: str = "",
                    source_files: list[str] | None = None,
-                   applies_when: list[str] | None = None) -> str:
+                   applies_when: list[str] | None = None, summary: str = "") -> str:
     """Called when Claude Code makes a significant decision mid-task. The server filters before storing.
 
     A synthesized understanding of how a subsystem works - produced by exploring or reading the
@@ -117,6 +122,15 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
            shown when it's listed/injected - e.g. 'Use Postgres for decision store'. Only omit it
            when you can't summarize better than the content itself; the store then derives one
            from `content`.
+    summary: required when `content` has more than 5 sentences, a sentence over 20 words, or
+           over 600 characters: 1 to 5 sentences of
+           ASD-STE100 Simplified Technical English, at most 20 words each, saying what the
+           decision does and why, for the developer who reviews it. Review shows it first; the
+           full `content` stays one step away and is what models read and approvals sign. A
+           correction via replace_id carries a new summary for the new text (the old one is
+           dropped). With unchanged content, a new summary is applied only to a pending
+           decision or one with no summary yet; a trusted decision keeps its summary.
+           A missing or oversized summary returns a restate notice, not stored.
 
     applies_when: up to eight specific task phrases (2+ words, <=100 characters each)
     describing situations that need this decision, each with a situation-specific word (not
@@ -151,13 +165,16 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
     resolved, repo_source = store.resolve_repo_verbose(repo_path)
     if not resolved:
         return "Skipped - repo path not detected."
-    lint = store.capture_lint(content, created_by=created_by, replace_id=replace_id)
+    lint = (store.capture_lint(content, created_by=created_by, replace_id=replace_id)
+            or store.summary_lint(content, summary, created_by=created_by,
+                                  replace_id=replace_id))
     if lint:
         return lint
     stored, entry_id, meta = store.update_decision_with_meta(
         resolved, content, SESSION_ID, subtype, created_by=created_by,
         replace_id=replace_id, title=title, source_files=source_files,
-        repo_source=repo_source, applies_when=applies_when)
+        repo_source=repo_source, applies_when=applies_when, summary=summary,
+        require_summary=True)
     if not stored:
         return "Filtered - did not meet storage criteria."
     if meta.get("refusal_ack"):
@@ -171,7 +188,7 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
 
 @mcp.tool()
 def approve_decision(entry_id: str, action: str, content: str = "", repo_path: str = "",
-                     source_files: list[str] | None = None) -> str:
+                     source_files: list[str] | None = None, summary: str = "") -> str:
     """Approve, edit, skip, ignore, or dismiss decision(s) pending developer review - or
     retire an already-trusted (approved/suggested) decision with 'ignore'.
 
@@ -194,6 +211,10 @@ def approve_decision(entry_id: str, action: str, content: str = "", repo_path: s
               only status flips to 'ignored'). 'approve'/'edit'/'dismiss'/'skip' remain
               pending-only: an already-approved decision cannot be re-approved.
     content: required when action='edit' - the corrected decision text (single decision only)
+    summary: with action='edit', the review summary of the corrected text, required when that
+             text has more than 5 sentences, a sentence over 20 words, or over 600
+             characters (same rules as update_context's summary).
+             An edit never keeps the old summary.
     source_files: repo-relative files or trailing-slash directory prefixes this decision
                   describes - anchors it for staleness tracking and the commit-time guard;
                   single-id approvals only.
@@ -210,8 +231,12 @@ def approve_decision(entry_id: str, action: str, content: str = "", repo_path: s
         return _BULK_REFUSAL
     if not target:
         return "No decision id given."
+    if action == "edit":
+        lint = store.summary_lint(content, summary, created_by="ai", refused="Not edited.")
+        if lint:
+            return lint
     ok, message = store.approve_decision(
-        resolved, target, action, content, source_files=source_files)
+        resolved, target, action, content, source_files=source_files, summary=summary)
     if ok and action in ("approve", "edit"):
         share_policy.enqueue_after_local_mutation(resolved, target)
     return message

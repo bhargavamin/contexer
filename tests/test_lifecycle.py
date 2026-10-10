@@ -1105,6 +1105,25 @@ class TestReconsiderationReviewSurfaces:
         assert revisions.current_content(entry) == "Use Postgres with pgbouncer"
         assert (store.entry_status(entry), entry["approved_by"]) == ("approved", "human")
 
+    def test_the_cli_restore_with_edits_keeps_the_summary_it_asks_for(self, tmp_repo,
+                                                                      monkeypatch):
+        """Long restored wording gets the same summary prompt as an [E]dit of a pending
+        decision, and the summary lands on the restored revision."""
+        wording = ("Use Postgres for the decision store, with pgbouncer in front of it. "
+                   "SQLite could not handle concurrent sessions writing to the same file, and "
+                   "every session holding its own connection exhausted the server's limit within "
+                   "a day of load testing. Reasoning: pooling keeps the connection count flat "
+                   "while sessions come and go, and Postgres gives row-level locking for free.")
+        summary = "Keep decisions in Postgres behind a connection pool."
+        assert revisions.needs_summary(wording)
+        eid = _ignored(tmp_repo)
+        _reconsider(tmp_repo, eid)
+        monkeypatch.setattr(store, "git_root", lambda _: tmp_repo)
+        _answer(monkeypatch, ["E", wording, summary, "Q"])
+        cli.review()
+        head = revisions.current_revision(_entry(tmp_repo, eid))
+        assert (head["content"], head.get("summary")) == (wording, summary)
+
 
 # ── the extraction seam ───────────────────────────────────────────────────────
 
