@@ -14,6 +14,20 @@ Contexer is wired in through two mechanisms: **MCP tools** the agent can call (t
 5. Future AI sessions automatically replay relevant engineering knowledge
 ```
 
+## Every message, in one picture
+
+<p align="center">
+  <img src="../assets/diagrams/how-contexer-remembers.svg" alt="How Contexer remembers: each message you send starts two helpers. Job 1, look it up: could notes help, search the notebook, pick the best (up to 3 notes or a hint), and hand them to the AI. Job 2, write it down: is it a rule, is it clear or fuzzy, is it already written, then save it to the notebook. The AI's own notes go through the same check and most wait for your OK." width="900">
+</p>
+
+Think of Contexer as the AI's notebook. Every message you send starts two helpers:
+
+- **Look it up.** If the message is a question, or names a file, Contexer searches the notebook and hands the AI up to 3 matching notes, or a short hint to look further. You once said "always use uv, never pip"; later you ask "why do we use pip?" and the AI gets that note before it answers. A plain task like "fix this typo" gets nothing, so the AI isn't distracted. A note already shown in this chat isn't shown again. Notes you haven't approved yet can still be shown, marked as not approved.
+- **Write it down.** If the message states a rule ("always...", "never...", "from now on..."), Contexer saves it. Clear rules are trusted right away; fuzzy ones like "never do this here" wait for you to approve them. Saying almost the same rule again is counted, not saved twice. Only some wording is spotted ("we usually run pytest" is missed), so not every rule gets caught.
+- **The AI's own notes.** After a change, the AI can suggest a decision too. It goes through the same duplicate check, and most of these wait for your OK.
+
+The engineering view of the same flow is in the [architecture reference](architecture.md#prompt-capture-and-retrieval-at-a-glance).
+
 ## What gets captured
 
 - **Architecture decisions**: structural choices that shape the system

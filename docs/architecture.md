@@ -80,6 +80,16 @@ The model is **embedded**, not normalized into a second collection: each decisio
 
 ## Session behaviour (hooks)
 
+### Prompt capture and retrieval at a glance
+
+<p align="center">
+  <img src="../assets/diagrams/prompt-capture-and-retrieval.svg" alt="Prompt capture and retrieval. A prompt reaches the UserPromptSubmit hooks. Retrieval (claude.rationale): route gate, then rank by anchors plus BM25 reading the index sidecar, then the injection ladder injects into agent context. Capture (claude.capture_constraint): directive detector, trust gate (acks back through the hook), novelty match, then save to the decision store, which rebuilds the BM25 index. Lock contention spools an unverified evidence event. The agent nominates decisions with update_context after the anchor reminder, through the same novelty filter." width="1000">
+</p>
+
+- **Retrieval** routes only rationale/project, question-shaped or artifact-bearing prompts. It ranks `source_files` anchors plus BM25 (content fused with title, tokens of 3+ characters) over the index sidecar, skips decisions already credited in the session working set, and injects at most three full-text decisions (approved constraints first). Otherwise it emits a topic or file pointer, then for why/project prompts an overview or global fallback, else nothing. Pending and suggested decisions are injected with status tags. Prompt hooks never rebuild the index; SessionStart self-heals a missing or corrupt one.
+- **Capture** stores prescriptive directives from the hook payload as `created_by=human`: clear ones approved, deictic or ambiguous ones `pending_approval`, environment-scope facts `confirmation_required`. A near-verbatim restatement records recurrence; a containment match becomes a suggested update. The hook acks back to the agent, and lock contention spools an unverified `user_directive` event instead of stalling the prompt.
+- **Agent nomination** happens through `update_context` after the anchor settle reminder. `created_by=ai` patterns and architecture land `suggested` (L3 signals and constraints `pending_approval`; scan-shaped facts approved).
+
 Claude's SessionStart payload has an 8,000-byte budget including conservative JSON escaping, applied after local and team context are combined. The adapter reserves bootstrap and retrieval instructions, then selects complete approved constraints and pending-conflict blocks before other rules. Selection priority never changes section order or authority headings. Pending-conflict blocks travel with their resolution guide; multiline rules stay whole. Rehydrated task context is selected ahead of title-only overflow, and the team shown-count is recalculated from budgeted output. The legacy Claude-shaped entrypoint also applies the budget but leaves an unspecified capture host unspecified. Omitted blocks are summarized by one `get_context` pointer and are excluded from working-set delivery credit. Under-budget output is unchanged; Cursor, Codex and Gemini are not assigned Claude's observed cutoff.
 
 
