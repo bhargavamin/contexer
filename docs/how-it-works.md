@@ -14,6 +14,20 @@ Contexer is wired in through two mechanisms: **MCP tools** the agent can call (t
 5. Future AI sessions automatically replay relevant engineering knowledge
 ```
 
+## Every message, in one picture
+
+<p align="center">
+  <img src="../assets/diagrams/how-contexer-keeps-decisions.svg" alt="How Contexer keeps your decisions: each message you send starts two helpers. Job 1, look it up: could a decision help, search decisions, pick the best (up to 3 decisions or a hint), and hand them to the AI. Job 2, write it down: is it a rule, is it clear or fuzzy, is it already recorded, then record it in the decision book, where you approve what the AI follows. AI suggestions go through the same check and most wait for your OK." width="900">
+</p>
+
+Think of Contexer as the AI's decision book: it records the rules and choices you make, lets you approve them, and hands the right ones to the AI when they matter. Every message you send starts two helpers:
+
+- **Look it up.** If the message is a question, or names a file, Contexer searches your decisions and hands the AI up to 3 that match, or a short hint to look further. This happens automatically in Claude Code, Codex and Gemini CLI; Cursor can't add decisions to a message, so there the AI is told to look them up itself. You once said "always use uv, never pip"; later you ask "why do we use pip?" and the AI gets that decision before it answers. A plain task like "fix this typo" gets nothing, so the AI isn't distracted. A decision already shown in this chat isn't shown again. Decisions you haven't approved yet can still be shown, marked as not approved.
+- **Write it down.** If the message states a rule ("always...", "never...", "from now on..."), Contexer records it. Clear rules are approved right away; fuzzy ones like "never do this here" wait for you to approve them. Saying almost the same rule again is counted, not recorded twice. Only some wording is spotted ("we usually run pytest" is missed), so not every rule gets caught.
+- **AI suggestions.** After a change, the AI can suggest a decision too. It goes through the same duplicate check, and most suggestions wait for your OK.
+
+The engineering view of the same flow is in the [architecture reference](architecture.md#prompt-capture-and-retrieval-at-a-glance).
+
 ## What gets captured
 
 - **Architecture decisions**: structural choices that shape the system
