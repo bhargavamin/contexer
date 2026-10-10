@@ -32,6 +32,8 @@ const editing = atom({ plugin: 'contexer-review', key: 'editing' } as const, nul
 const note = atom({ plugin: 'contexer-review', key: 'note' } as const, null)
 const cursor = atom({ plugin: 'contexer-review', key: 'cursor' } as const, null)
 const isPaneOpen = atom({ plugin: 'contexer-review', key: 'isPaneOpen' } as const, false)
+const showFull = atom({ plugin: 'contexer-review', key: 'showFull' } as const, null)
+const summarizing = atom({ plugin: 'contexer-review', key: 'summarizing' } as const, null)
 const isOtherSuggested = atom({ plugin: 'contexer-review', key: 'isOtherSuggested' } as const, false)
 
 // The `contexer` that installed this mod: the console script of the same tool venv
@@ -183,6 +185,10 @@ async function openPane($: EngineInterface, onSeated?: () => void): Promise<bool
   await update($, note, () => null)
   await update($, editing, () => null)
   await update($, cursor, () => null)
+  await update($, showFull, () => null)
+  // A write a reloaded module started can never clear its own mark, which would stop every
+  // later summary: a fresh open starts unmarked.
+  await update($, summarizing, () => null)
   const opened = await $.ui.open(OPEN)
   await update($, isPaneOpen, () => opened.isPlaced)
   if (opened.isPlaced) onSeated?.()
@@ -199,6 +205,75 @@ async function isPaneDrawn($: EngineInterface): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+// A card leads with its review summary: a few plain sentences for the developer, while the
+// full text (what the model reads and what Approve signs) stays one press away. A decision
+// with neither gets one written by a small model through the session (`$.model.complete`,
+// SUMMARY_MODEL) the first time its card shows, stored through `contexer review --json
+// summarize` so the terminal and the web console show it too. Once per card text in this
+// module's life: a refused or failed write is not retried until the mod reloads, and the card
+// meanwhile shows the full text.
+const SUMMARY_MODEL = 'haiku'
+const SUMMARY_SYSTEM = [
+  'You write review summaries of engineering decisions for the developer who approves them.',
+  'Use ASD-STE100 Simplified Technical English: 1 to 5 sentences, at most 20 words each,',
+  'active voice, one idea per sentence, common words. Say what the decision requires and why.',
+  'Leave out code detail, file paths and history. Reply with the summary text only.',
+].join(' ')
+const asked = new Set<string>()
+// Shown where a version's text goes while its summary is being written.
+const WRITING = 'Writing a summary…'
+// One write at a time: a card's two versions share one basis, and the first write changes it,
+// so a second sent beside it would always be refused. The redraw after a write lands asks for
+// the next version with the fresh basis. `isWriting` holds off a second call in the same tick;
+// `summarizing` in `$.state` holds off one a hot reload would let through, since a reload
+// resets this module's variables while the write it started is still in flight.
+let isWriting = false
+
+type SummaryTarget = { id: string; text: string; ofProposal: boolean; expect?: string }
+
+function summaryToken(target: SummaryTarget): string {
+  return `${target.id}:${target.ofProposal ? 'proposed' : 'current'}:${target.text.length}:${target.expect ?? ''}`
+}
+
+async function writeSummary($: EngineInterface, cardKey: string, wants: SummaryTarget[]): Promise<void> {
+  if (isWriting) return
+  const target = wants.find(want => !asked.has(summaryToken(want)))
+  if (!target) return
+  isWriting = true
+  // Every await sits inside the try, so a failed state call cannot leave `isWriting` set.
+  // Only a write that marked `summarizing` clears it: one held off by another's mark leaves it.
+  let isMarked = false
+  try {
+    if ((await read($, summarizing)) != null) return
+    asked.add(summaryToken(target))
+    isMarked = true
+    await update($, summarizing, () => cardKey)
+    const reply = await $.model.complete({
+      model: SUMMARY_MODEL, system: SUMMARY_SYSTEM, prompt: target.text, maxTokens: 400,
+    })
+    if (!reply.isAnswered) return
+    const args = ['summarize', target.id, '--summary', reply.text.trim()]
+    if (target.ofProposal) args.push('--proposal')
+    if (target.expect) args.push('--expect', target.expect)
+    const out = await contexer($, args)
+    const mine = await take($)
+    if (isQueue(out?.queue)) await land($, mine, out.queue as ReviewQueue)
+  } catch {
+    // fail silent: the card keeps showing the full text
+  } finally {
+    isWriting = false
+    if (isMarked) await update($, summarizing, current => (current === cardKey ? null : current))
+  }
+}
+
+type Summarized = { content: string; summary?: string | null; needs_summary?: boolean }
+
+// What a card leads with for one version of a decision: its stored review summary, else the
+// full text (the queue sends `summary` only when one is stored).
+function isStandIn(record: Summarized): record is Summarized & { summary: string } {
+  return !!record.summary
 }
 
 // The engine refuses a pane's focus request while the band holds the keys, so a pane opened by
@@ -461,6 +536,35 @@ export const register: Register = on => {
     const at = cardAt(cards, await read($, cursor))
     const card = cards[at] as Card
     const key = cardKey(card)
+    // Every card starts on its summary: the toggle holds for the card it was pressed on only,
+    // and is cleared when the developer moves to another card or opens the pane again.
+    const [fullKey, summarizingKey] = await Promise.all([read($, showFull), read($, summarizing)])
+    const isFull = fullKey === key
+    const isSummarizing = summarizingKey === key
+    const wants: SummaryTarget[] = []
+    let hasStandIn = false
+    let lacksSummary = false
+    let isWritingShown = false
+    // One version's text as the card shows it: the summary; else, while the pane is writing one
+    // (or about to), a placeholder where the text goes rather than the long text it replaces;
+    // else the full text, tagged at the top when long. Only a target that carries the card's
+    // basis is backfilled: the write is then refused once the text it summarized changed. A
+    // conflict side or a basis-less item keeps its full text.
+    const reading = (record: Summarized, target: SummaryTarget): string => {
+      if (!isFull && isStandIn(record)) {
+        hasStandIn = true
+        return record.summary
+      }
+      if (record.needs_summary && target.expect) {
+        wants.push(target)
+        if (!isFull && (isSummarizing || !asked.has(summaryToken(target)))) {
+          isWritingShown = true
+          return WRITING
+        }
+      }
+      if (record.needs_summary) lacksSummary = true
+      return full(record.content)
+    }
 
     const badge = ({ label, color }: Badge) => (
       <Text key={`badge-${label}`} bold color="black" backgroundColor={color}>{` ${label} `}</Text>
@@ -489,8 +593,11 @@ export const register: Register = on => {
         const after = applicability(item.proposed.applies_when ?? item.applies_when)
         body.push(
           <Box key={`fields-${key}`} flexDirection="column">
-            {field('NOW', full(item.content), true)}
-            {field('PROPOSED', full(item.proposed.content))}
+            {field('NOW', reading(item, { id: item.id, text: item.content, ofProposal: false, expect: item.basis }), true)}
+            {(() => {
+              const proposed = reading(item.proposed, { id: item.id, text: item.proposed.content, ofProposal: true, expect: item.basis })
+              return field('PROPOSED', proposed, proposed === WRITING)
+            })()}
             {field('APPLIES', before === after ? before : `${before} → ${after}`, true)}
           </Box>,
         )
@@ -498,7 +605,10 @@ export const register: Register = on => {
       } else {
         body.push(
           <Box key={`fields-${key}`} flexDirection="column">
-            <Text>{full(item.content)}</Text>
+            {(() => {
+              const text = reading(item, { id: item.id, text: item.content, ofProposal: false, expect: item.basis })
+              return <Text dimColor={text === WRITING}>{text}</Text>
+            })()}
             {field('APPLIES', applicability(item.applies_when), true)}
           </Box>,
         )
@@ -571,7 +681,7 @@ export const register: Register = on => {
           {sides.map(([one]) => (
             <Box key={`side-${key}-${one.id}`} width="50%" flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
               <Text bold>{one.title}</Text>
-              <Text>{full(one.content)}</Text>
+              <Text>{reading(one, { id: one.id, text: one.content, ofProposal: false })}</Text>
               <Text dimColor>{`${one.status} · applies: ${applicability(one.applies_when)}`}</Text>
               {one.proposed
                 ? <Text color="yellow">{`Unreviewed update: ${full(one.proposed.content)}`}</Text>
@@ -604,9 +714,26 @@ export const register: Register = on => {
         )
     }
 
+    // At the top, under the title: a reviewer reads down from there.
+    if (!isFull && lacksSummary) {
+      body.splice(1, 0, <Text key={`no-summary-${key}`} dimColor>No summary</Text>)
+    }
+    if (!isFull && wants.some(want => !asked.has(summaryToken(want)))) {
+      // Asked after the draw, never inside it; `writeSummary` asks once per card text, one
+      // version at a time. Not gated on `isWriting`: the redraw a landing write causes comes
+      // before that write lets go, and it is what schedules the next version.
+      $.clock.after(0, () => {
+        void writeSummary($, key, wants)
+      })
+    }
+    // The full text is what the model reads and what Approve signs: one press away, `f`.
+    const fullToggle = hasStandIn || isWritingShown || isFull
+      ? <Button key="full" label={isFull ? 'Summary' : 'Full text'} hotkey="f" dimColor onPress={() => update($, showFull, () => (isFull ? null : key))} />
+      : null
     const subtitle = card.kind === 'item' ? meta(card.item) : 'two current decisions disagree'
     const many = cards.length > 1
     const go = async (to: number) => {
+      if (isFull) await update($, showFull, () => null)
       await update($, cursor, () => ({ key: cardKey(cards[to] as Card), at: to }))
       await showCardTop($)
     }
@@ -618,6 +745,7 @@ export const register: Register = on => {
             <Text dimColor>{subtitle}</Text>
           </Box>
           <Box gap={1}>
+            {fullToggle}
             {many ? <Button key="prev" label="‹" hotkey="p" dimColor onPress={() => go((at + cards.length - 1) % cards.length)} /> : null}
             <Text dimColor>{progress(at, cards.length)}</Text>
             {many ? <Button key="next" label="›" hotkey="n" dimColor onPress={() => go((at + 1) % cards.length)} /> : null}
