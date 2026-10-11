@@ -2347,7 +2347,13 @@ def capture_user_constraint_with_meta(
         content = scope_candidate[:600]
     else:
         confirmation_required = False
-        content = _sanitize_directive(policy_content.strip())[:600]
+        if ambiguous_extraction:
+            # Review must expose the retained candidate, including rationale and later
+            # requirements. The semantic sanitizer can delete everything after a filler
+            # connector such as "because this", weakening even a pending decision.
+            content = revisions.normalize_content(policy_content).rstrip("!?,. ")[:600]
+        else:
+            content = _sanitize_directive(policy_content.strip())[:600]
     if not _is_storable(content):
         return None, None, None, {}
     deictic = _is_deictic(content) or bool(_TASK_SCOPE_MARKER.search(content))

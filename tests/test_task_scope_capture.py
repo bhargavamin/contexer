@@ -201,8 +201,40 @@ def test_ambiguous_work_item_preserves_full_candidate_for_review(tmp_repo, monke
     assert entry["content"] == prompt.rstrip(".")
     assert entry["status"] == "pending_approval"
     assert entry["created_by"] == "human"
+    assert entry["revisions"][0]["content"] == entry["content"]
     assert entry["revisions"][0]["source"] == "human"
     assert entry["content"] not in store.get_context(tmp_repo, _active_only=True)
+
+
+@pytest.mark.parametrize("prompt", [
+    "Always hash passwords because this protects users. Write the hash with argon2id.",
+    "Always hash passwords so that users remain safe. Write the hash without a plaintext fallback.",
+    "Always retain audit logs hence this helps investigations. Write a log per transaction.",
+    "Always validate inputs which means requests are checked. Add no default bypass.",
+    "Write the hash with argon2id. Always hash passwords because this protects users.",
+    "Always hash passwords because this protects users. Fix the hash with argon2id. Implement retry limits.",
+])
+def test_ambiguous_candidate_bypasses_lossy_sanitization(tmp_repo, monkeypatch, prompt):
+    monkeypatch.setattr(store, "_hook_repo_verbose", lambda *_: (tmp_repo, "hook"))
+    _hook(tmp_repo, prompt, "review-sanitization")
+    [entry] = store.load(tmp_repo)["entries"]
+    expected = prompt.rstrip(".")
+    assert entry["content"] == expected
+    assert entry["revisions"][0]["content"] == expected
+    assert entry["status"] == "pending_approval"
+    assert entry["created_by"] == "human"
+    assert entry["revisions"][0]["source"] == "human"
+    assert entry["revisions"][0]["approved_at"] is None
+    assert expected not in store.get_context(tmp_repo, _active_only=True)
+
+
+def test_unambiguous_directive_keeps_existing_sanitization(tmp_repo, monkeypatch):
+    monkeypatch.setattr(store, "_hook_repo_verbose", lambda *_: (tmp_repo, "hook"))
+    _hook(tmp_repo, "Always use uv not pip because of this.", "clean-sanitization")
+    [entry] = store.load(tmp_repo)["entries"]
+    assert entry["content"] == "Always use uv not pip"
+    assert entry["revisions"][0]["content"] == entry["content"]
+    assert entry["status"] == "approved"
 
 
 def test_work_item_sentence_stays_out_of_the_trusted_rule(tmp_repo, monkeypatch):
