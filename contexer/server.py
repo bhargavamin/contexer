@@ -73,56 +73,14 @@ _INSTRUCTIONS = (
 mcp = FastMCP("contexer", instructions=_INSTRUCTIONS, log_level="WARNING")
 
 
+# Claude Code 2.1.296 cuts descriptions at 4,096 chars; keep <=3,800 for headroom.
+# tests/test_mcp_descriptions.py checks served text, not interpreter-dependent raw docstrings.
 @mcp.tool()
 def update_context(content: str, repo_path: str = "", subtype: str = "",
                    created_by: str = "ai", replace_id: str = "", title: str = "",
                    source_files: list[str] | None = None,
                    applies_when: list[str] | None = None) -> str:
     """Called when Claude Code makes a significant decision mid-task. The server filters before storing.
-
-    A synthesized understanding of how a subsystem works - produced by exploring or reading the
-    codebase to answer a question - is also capture-worthy (subtype='architecture' for subsystem
-    behaviour/structure, 'pattern' for recurring code organization); store it in the SAME turn as
-    the exploration, since sessions often end right after the answer and there may be no next
-    prompt to catch it.
-
-    subtype: optional classification for filtered retrieval - architecture | constraint | pattern | convention
-    created_by: 'ai' (default) | 'plan' (a decision from a just-approved plan - stored PROVISIONAL/
-                suggested until implementation validates it, then reconciled) | 'bootstrap'/'scan' (legacy provenance).
-                New bootstrap findings must use bootstrap_context's evidence/report workflow.
-    replace_id: ID (full UUID or 8-char short id) of an existing decision this content changes.
-                Bypasses similarity filtering. Decisions are versioned, never overwritten:
-                - a trivial change (typo/formatting, or a pattern/convention) is applied in
-                  place as a new revision, with the prior revision kept in history;
-                - a significant change (architecture/constraint) becomes a Suggested Update
-                  attached to the live decision and returns an approval prompt - the current
-                  revision stays trusted until the developer approves.
-    source_files: repo-relative files or directory prefixes this content describes (max 10).
-                Use a trailing slash for a prefix (for example `contexer/`); an existing
-                directory is normalized to that spelling automatically. When capturing a
-                comprehension summary, pass the files it describes so future injections can
-                flag it as possibly stale once that code changes. Anchors a newly stored
-                decision, and also re-anchors a replace_id correction (fresh files + current
-                HEAD) as soon as the corrected text becomes the live, rendered content - for
-                a trivial correction or a re-capture of still-accurate content, that's
-                immediate; for a significant correction (architecture/constraint) it happens
-                only once a developer approves the resulting Suggested Update, since until
-                then the OLD content is still what's shown. Never a recurrence. When an
-                injection shows a decision with "[may be stale: ...]", re-read the named
-                file(s) and re-capture via replace_id, passing source_files again so the
-                anchor refreshes (immediately, or on approval) and the note clears; omitting
-                source_files on that correction leaves the old anchor in place and the note
-                keeps firing.
-    title: Provide a concise, one-line, imperative title (<= 100 chars) summarizing the decision,
-           shown when it's listed/injected - e.g. 'Use Postgres for decision store'. Only omit it
-           when you can't summarize better than the content itself; the store then derives one
-           from `content`.
-
-    applies_when: up to eight specific task phrases (2+ words, <=100 characters each)
-    describing situations that need this decision, each with a situation-specific word (not
-    only generic words like "fix test" or "new feature"). Use task vocabulary, for example
-    ["slow upstream reads", "making fetches faster"]. They aid deterministic retrieval;
-    they grant no approval or file authority. Omit when unknown.
 
     If this returns a 'pending review' notice, the decision is recorded but NOT yet trusted and
     does not block your work - keep going. Surface it to the developer for approval at a natural
@@ -131,6 +89,41 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
     If instead this returns a 'Correction NOT stored' notice, a higher-trust update already holds
     the decision's one proposal slot - do not retry the call; relay both versions to the developer
     that turn so they can review with full context.
+
+    A synthesized understanding of how a subsystem works - produced by exploring or reading the
+    codebase to answer a question - is also capture-worthy (subtype='architecture' for subsystem
+    behaviour/structure, 'pattern' for recurring code organization); store it in the SAME turn as
+    the exploration, since sessions often end right after the answer and there may be no next
+    prompt to catch it.
+
+    subtype: optional classification - architecture | constraint | pattern | convention.
+    created_by: 'ai' (default) | 'plan' (approved but unimplemented plan: PROVISIONAL/suggested
+                until implementation validates it, then reconciled) | 'bootstrap'/'scan'
+                (legacy provenance). New bootstrap findings use bootstrap_context's evidence/report workflow.
+    replace_id: existing decision ID (full UUID or 8-char prefix); bypasses similarity filtering.
+                Decisions are versioned, never overwritten. A trivial change (typo/formatting,
+                pattern/convention) becomes a new revision in place, keeping history. A significant
+                change (architecture/constraint) becomes a Suggested Update attached to the live
+                decision; the current revision stays trusted until the developer approves.
+    source_files: repo-relative files or directory prefixes (max 10) described by this decision.
+                Use trailing slashes for prefixes, e.g. `contexer/`; existing directories are
+                normalized automatically. Include described files for comprehension summaries
+                so changed code can flag them as possibly stale. Anchors use fresh files + current
+                HEAD on new decisions and replace_id corrections once corrected text is live:
+                immediately for trivial corrections or re-capture of still-accurate content;
+                only on developer approval for significant corrections, while OLD content stays live.
+                Never re-anchor on recurrence. For "[may be stale: ...]", re-read the named files
+                and re-capture via replace_id with source_files again to refresh immediately or
+                on approval. Omitting source_files keeps the old anchor and stale warning.
+    title: concise, one-line, imperative summary (<=100 chars), e.g. 'Use Postgres for decision store'.
+           Omit only if you cannot summarize better than the store's derivation from content.
+
+    applies_when: up to eight specific task phrases (2+ words, <=100 characters each)
+    describing situations that need this decision, each with a situation-specific word (not
+    only generic words like "fix test" or "new feature"). Use task vocabulary, for example
+    ["slow upstream reads", "making fetches faster"]. They aid deterministic retrieval;
+    they grant no approval or file authority. Omit when unknown.
+
     """
     # This is a model-facing tool. Human provenance belongs only to host paths that directly
     # observe a developer gesture (`capture_user_constraint` and the review actions below); a
