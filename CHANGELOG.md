@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.51.1](https://github.com/bhargavamin/contexer/compare/v0.51.0...v0.51.1) (2026-10-11)
+
+
+### Bug Fixes
+
+* **mcp:** keep capture tool description within host limit ([#405](https://github.com/bhargavamin/contexer/issues/405)) ([63fba85](https://github.com/bhargavamin/contexer/commit/63fba8515de40ace86f8f271a4c3c261a2760f17))
+
+
+### Documentation
+
+* add prompt capture and retrieval diagrams ([#402](https://github.com/bhargavamin/contexer/issues/402)) ([74e1226](https://github.com/bhargavamin/contexer/commit/74e1226c00c01b498addea9f384e11a83473cada))
+
 ## [0.51.0](https://github.com/bhargavamin/contexer/compare/v0.50.1...v0.51.0) (2026-10-09)
 
 
