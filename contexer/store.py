@@ -1945,21 +1945,26 @@ _AMBIGUOUS_OPERATION_OBJECT = re.compile(
 
 
 def _directive_policy_text(text: str) -> str:
-    """Directive-shaped text with one-shot task clauses removed.
+    """Policy candidate, retaining uncertain implicit task extraction for review."""
+    return _directive_policy_candidate(text)[0]
 
-    A single ordinary prohibition remains eligible ("Do not log secrets").  We only discard
-    what carries an explicit task scope, or weak directive clauses embedded in a multi-action
-    request.  Strong durable clauses survive that request as independent policy text.
+
+def _directive_policy_candidate(text: str) -> tuple[str, bool]:
+    """Return policy text and whether implicit extraction needs human review.
+
+    Explicit task scope can separate lasting policy from this run's instructions.
+    Sentence shape alone cannot: a proposed removal may be a lasting requirement.
+    Keep the full candidate pending whenever that ambiguity would shorten a rule.
     """
     candidate = _directive_candidate_text(text).strip()
     if not candidate:
-        return ""
+        return "", False
     if _CONTEXER_DECISION_EDIT_COMMAND.match(candidate):
-        return ""
+        return "", False
     # Keep the existing pasted-blob refusal load-bearing: task-clause filtering must not
     # shorten an over-limit document into something that suddenly looks authoritative.
     if len(candidate) > _MAX_DIRECTIVE_LEN:
-        return candidate
+        return candidate, False
     fragments = [part.strip(" ,;") for part in re.split(
         r"(?<=[.!?])\s+|;\s*|\n+|,\s+(?:but|and)\s+|\s+but\s+", candidate,
         flags=re.IGNORECASE) if part.strip(" ,")]
@@ -1977,15 +1982,56 @@ def _directive_policy_text(text: str) -> str:
             if clauses is None:
                 # Keep the scope and the original wording: capture routes this
                 # mixed instruction to review, never to approved standing policy.
-                return candidate
+                return candidate, True
             durable.extend(clauses)
-        return ". ".join(clause for clause in durable if clause)
+        return ". ".join(clause for clause in durable if clause), False
     task_actions = sum(bool(_TASK_IMPERATIVE.search(part)) for part in fragments)
     if task_actions < 2:
-        return candidate if not _TASK_SCOPE_MARKER.search(candidate) else ""
+        extracted = _without_work_items(candidate) if not _TASK_SCOPE_MARKER.search(candidate) else ""
+        if extracted and extracted != candidate:
+            return candidate, True
+        return extracted, False
     durable = [part for part in fragments if _DURABLE_DIRECTIVE.search(part)
                and not _TASK_SCOPE_MARKER.search(part)]
-    return ". ".join(durable)
+    if durable and len(durable) < len(fragments):
+        return candidate, True
+    return ". ".join(durable), False
+
+
+# A work-item sentence commissions this turn's change ("Add a resend command to the gateway.",
+# "Fix the date bug in the exporter."): a clause-initial build verb with an object, standing on
+# its own. Kept beside an explicit rule, it was stored and trusted as part of that rule. "add"
+# takes any object; the other verbs need a determiner.
+_WORK_ITEM_SENTENCE = re.compile(
+    r"^\s*(?:please\s+)?(?:add\s+\S"
+    r"|(?:build|implement|create|wire\s+up|write|fix|refactor|update)\s+(?:a|an|the|new|some|our)\b)",
+    re.IGNORECASE,
+)
+
+
+# A sentence that recurs ("for each one", the multi-action branch's own durability words) or
+# points back at the rule ("them", "instead") continues the rule, not this turn's work.
+_RULE_CONTINUATION = re.compile(
+    r"\b(?:every|each|them|they|those|these|instead|otherwise)\b", re.IGNORECASE)
+
+
+def _is_work_item(sentence: str) -> bool:
+    """Propose a task-shaped sentence for extraction, without deciding its meaning.
+
+    Known rule continuations and deictic references stay. Other matches may still
+    be lasting requirements; the caller retains mixed candidates for review.
+    """
+    return bool(_WORK_ITEM_SENTENCE.match(sentence)
+                and not _CONSTRAINT_TRIGGER.search(sentence)
+                and not _RULE_CONTINUATION.search(sentence)
+                and not _is_deictic(sentence))
+
+
+def _without_work_items(candidate: str) -> str:
+    """Proposed extraction; mixed candidates must retain their original text for review."""
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+|\n+", candidate) if s.strip()]
+    kept = [s for s in sentences if not _is_work_item(s)]
+    return " ".join(s.strip() for s in kept) if len(kept) < len(sentences) else candidate
 
 
 def _independent_lasting_clauses(part: str) -> list[str] | None:
@@ -2243,8 +2289,8 @@ def capture_user_constraint_with_meta(
 ) -> tuple:
     """Called on every UserPromptSubmit. Detects prescriptive 'always/never/from now on' directives
     and stores them as decisions. A directive whose scope or authority is ambiguous is stored
-    but NOT auto-trusted: deictic referents (see _is_deictic), arbitrary speaker labels, and a
-    bare ``X can only Y`` declaration land pending_approval so the developer can generalize,
+    but NOT auto-trusted: uncertain implicit task extraction, deictic referents (see _is_deictic),
+    arbitrary speaker labels, and a bare ``X can only Y`` declaration land pending_approval so the developer can generalize,
     approve, or discard them via review_pending.
 
     A clean restatement that no longer requires review and matches - via the standard >70%
@@ -2286,6 +2332,7 @@ def capture_user_constraint_with_meta(
     reason: only the caller knows which host prompt hook it came from.
     """
     lifecycle_revision = prompt_capture.environment_lifecycle_revision(prompt)
+    policy_content, ambiguous_extraction = _directive_policy_candidate(prompt)
     is_constraint, subtype = _is_prescriptive_constraint(prompt)
     if lifecycle_revision is not None:
         subtype = "constraint"
@@ -2300,7 +2347,7 @@ def capture_user_constraint_with_meta(
         content = scope_candidate[:600]
     else:
         confirmation_required = False
-        content = _sanitize_directive(_directive_policy_text(prompt).strip())[:600]
+        content = _sanitize_directive(policy_content.strip())[:600]
     if not _is_storable(content):
         return None, None, None, {}
     deictic = _is_deictic(content) or bool(_TASK_SCOPE_MARKER.search(content))
@@ -2318,7 +2365,7 @@ def capture_user_constraint_with_meta(
         or _EXPLICIT_AUTHORITY_LABEL.search(content)
     )
     status = ("confirmation_required" if confirmation_required else
-              "pending_approval" if deictic or ambiguous_label or bare_can_only else "approved")
+              "pending_approval" if ambiguous_extraction or deictic or ambiguous_label or bare_can_only else "approved")
     review_required = status != "approved"
     entry_status_value = "pending_approval" if review_required else "approved"
     with store_lock(repo_slug(repo_path), blocking=blocking):

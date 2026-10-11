@@ -3600,8 +3600,10 @@ class TestTaskScopedDirectiveCapture:
 
         entry_id, content, status = store.capture_user_constraint(tmp_repo, prompt, "s1")
 
-        assert entry_id and status == "approved"
-        assert content == "Always use Conventional Commits"
+        # Implicit sibling actions might qualify the rule. The owner-approved
+        # extraction contract retains them for review rather than trusting a slice.
+        assert entry_id and status == "pending_approval"
+        assert content == prompt.rstrip(".")
 
     @pytest.mark.parametrize("prompt", [
         "Never log raw customer emails.",
