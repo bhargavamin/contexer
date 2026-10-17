@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.51.2](https://github.com/bhargavamin/contexer/compare/v0.51.1...v0.51.2) (2026-10-17)
+
+
+### Bug Fixes
+
+* **capture:** retain ambiguous mixed rules for review ([#406](https://github.com/bhargavamin/contexer/issues/406)) ([dfd99ec](https://github.com/bhargavamin/contexer/commit/dfd99ec55b81ce0551d64c97668fbc24e9133e48))
+
 ## [0.51.1](https://github.com/bhargavamin/contexer/compare/v0.51.0...v0.51.1) (2026-10-11)
 
 
