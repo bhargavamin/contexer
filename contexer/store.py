@@ -1296,13 +1296,17 @@ _DECISION_LABEL = (
     r"|any|some|no|store)\b)[a-z][\w-]*\s+){0,2}"
     r"(?:decision|convention|constraint|policy)(?:\s+(?:for|on|about|in)\s+[^:\n]{1,60})?"
 )
+_RESTRICTIVE_ONLY = (
+    r"can\s+only"
+    r"|(?:comes?|flows?|go(?:es)?|(?:is|are)\s+(?:loaded|read|fetched))\s+only\s+(?:from|through|via)"
+)
 _CONSTRAINT_TRIGGER = re.compile(
     r"\b(?:"
     r"store\s+this\s+decision(?=\s*:)"  # explicit human capture command
     r"|"
     r"al+w(?:ay|ya)s"               # always + common typos: allways, alwyas
     r"|never"                        # never
-    r"|can\s+only"                  # plain restrictive declaration: "orders.py can only import X"
+    rf"|{_RESTRICTIVE_ONLY}"         # plain restrictive declaration: "orders.py can only import X"
     r"|must\s+(?:always|never)"      # must always / must never
     r"|should\s+(?:always|never)"    # should always / should never
     r"|at\s+all\s+times"             # at all times
@@ -1330,7 +1334,7 @@ _CONSTRAINT_TRIGGER = re.compile(
     r")\b",
     re.IGNORECASE,
 )
-_CAN_ONLY_TRIGGER = re.compile(r"\bcan\s+only\b", re.IGNORECASE)
+_CAN_ONLY_TRIGGER = re.compile(rf"\b(?:{_RESTRICTIVE_ONLY})\b", re.IGNORECASE)
 _DECISION_LABEL_TRIGGER = re.compile(_DECISION_LABEL + r"\s*:(?=\s*\S)", re.IGNORECASE)
 _POSITIVE_POLARITY = re.compile(
     r"\b(?:al+w(?:ay|ya)s|must(?!\s+(?:not|never)\b|n['’]t))\b", re.IGNORECASE)
