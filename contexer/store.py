@@ -2426,7 +2426,7 @@ def capture_user_constraint_with_meta(
     without_weak_signals = _CAN_ONLY_TRIGGER.sub(
         "", _DECISION_LABEL_TRIGGER.sub("", content)).strip()
     bare_can_only = bool(_CAN_ONLY_TRIGGER.search(content)) and not (
-        _CONSTRAINT_TRIGGER.search(without_weak_signals)
+        _is_prescriptive_constraint(without_weak_signals)[0]
         or _EXPLICIT_AUTHORITY_LABEL.search(content)
     )
     bare_decision_label = (bool(_DECISION_LABEL_TRIGGER.search(content))
