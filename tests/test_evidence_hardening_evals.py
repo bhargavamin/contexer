@@ -129,6 +129,8 @@ DIRECTIVE_NEGATIVES = {
     "quoted-doc-blockquote": "> Always run the migrations before deploying.",
     "quoted-doc-attribution":
         'the README says "never use pip install -e ." in this project',
+    "quoted-doc-modified-source":
+        "The vendor docs say: never call the token endpoint more than once per minute.",
     "changelog-entry": "- fix(store): never drop an unreadable outbox on enqueue (#241)",
     # host and tool injection
     "system-reminder-injection":
@@ -481,6 +483,8 @@ def test_scoped_topic_directives_preserve_explicit_recall(tmp_repo, prompt):
 @pytest.mark.parametrize(("prompt", "expected"), [
     ("The README says use pip, but from now on always use uv.",
      "from now on always use uv"),
+    ("The vendor docs say tokens expire hourly, but from now on always refresh tokens early.",
+     "from now on always refresh tokens early"),
     ("According to Alice, never use pip, but I am telling you to always use uv.",
      "always use uv"),
 ])
