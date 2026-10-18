@@ -773,6 +773,26 @@ class TestIsPrescriptiveConstraint:
         is_c, _ = store._is_prescriptive_constraint("it always worked before the last deployment")
         assert is_c is False
 
+    @pytest.mark.parametrize("text", [
+        "We previously always used Redis for queues, but that pattern is deprecated now.",
+        "We used to always deploy on Fridays; we stopped that.",
+        "We historically never squashed commits, but that changed last year.",
+        "I previously always ran the formatter by hand.",
+        "it formerly never retried failed jobs",
+    ])
+    def test_personal_past_habit_excluded(self, text):
+        is_c, _ = store._is_prescriptive_constraint(text)
+        assert is_c is False
+
+    @pytest.mark.parametrize("text", [
+        "We previously always used Redis for queues, but from now on always use the outbox table.",
+        "We used to always deploy on Fridays. Never deploy on Fridays from now on.",
+        "Always use the outbox table for queues.",
+    ])
+    def test_rule_beside_past_habit_is_prescriptive(self, text):
+        is_c, _ = store._is_prescriptive_constraint(text)
+        assert is_c is True
+
     def test_it_should_always_is_prescriptive(self):
         # "should" sits between "it" and "always" so the personal descriptor does not strip it
         is_c, subtype = store._is_prescriptive_constraint("it should always return 200 for the health endpoint")
