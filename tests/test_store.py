@@ -832,6 +832,28 @@ class TestIsPrescriptiveConstraint:
         is_c, _ = store._is_prescriptive_constraint(text)
         assert is_c is False
 
+    @pytest.mark.parametrize("new, old", [
+        ("Never use uv for Python tooling.", "Always use uv for Python tooling"),
+        ("Always squash merge pull requests.", "Do not squash merge pull requests"),
+        ("From now on never use uv.", "From now on use uv"),
+        ("You must not deploy on Fridays.", "You must deploy on Fridays"),
+        ("You must always deploy directly to production.",
+         "You must never deploy directly to production"),
+        ("You must never deploy directly to production.",
+         "You must always deploy directly to production"),
+    ])
+    def test_polarity_reversal_detected(self, new, old):
+        assert store._is_polarity_reversal(new, old) is True
+
+    @pytest.mark.parametrize("new, old", [
+        ("Always use uv for Python tooling.", "Always use uv for Python tooling"),
+        ("Avoid logging secrets.", "Never log secrets"),
+        ("Never use uv for Python tooling.", "Always use uv, never pip, for Python tooling"),
+        ("Never log secrets, always mask them.", "Never log secrets"),
+    ])
+    def test_same_or_mixed_polarity_is_not_reversal(self, new, old):
+        assert store._is_polarity_reversal(new, old) is False
+
     def test_it_should_always_is_prescriptive(self):
         # "should" sits between "it" and "always" so the personal descriptor does not strip it
         is_c, subtype = store._is_prescriptive_constraint("it should always return 200 for the health endpoint")
@@ -924,6 +946,49 @@ class TestIsPrescriptiveConstraint:
     def test_explicit_local_scope_is_ignored(self, tmp_repo, prompt):
         assert store.capture_user_constraint(tmp_repo, prompt, "s1") == (None, None, None)
         assert store.load(tmp_repo)["entries"] == []
+
+    def test_reversed_rule_is_proposed_not_counted_as_repeat(self, tmp_repo):
+        store.capture_user_constraint(tmp_repo, "Always use uv for Python tooling.", "s1")
+        _, _, status = store.capture_user_constraint(
+            tmp_repo, "Never use uv for Python tooling.", "s2")
+        assert status == "revision_proposed"
+        [rule] = [e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision"]
+        assert revisions.current_content(rule) == "Always use uv for Python tooling"
+        assert rule["proposed_revision"]["content"] == "Never use uv for Python tooling"
+        assert rule.get("occurrence_count", 1) == 1
+
+    @pytest.mark.parametrize("rule_text, reversal_text", [
+        ("Always run migrations inside a transaction.",
+         "Never run migrations inside a transaction. Add a migration for invoices."),
+        ("Always run database migrations inside a single transaction so a failed step rolls "
+         "back cleanly.",
+         "Never run database migrations inside a single transaction so a failed step rolls "
+         "back cleanly. Add the invoices migration."),
+    ])
+    def test_reversed_rule_with_task_leaves_trusted_rule_untouched(
+            self, tmp_repo, rule_text, reversal_text):
+        store.capture_user_constraint(tmp_repo, rule_text, "s1")
+        _, _, status = store.capture_user_constraint(tmp_repo, reversal_text, "s2")
+        assert status == "pending_approval"
+        rule, reversal = [e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision"]
+        assert rule["status"] == "approved"
+        assert revisions.current_content(rule) == rule_text.rstrip(".")
+        assert rule.get("proposed_revision") is None
+        assert rule.get("occurrence_count", 1) == 1
+        assert reversal["status"] == "pending_approval"
+
+    def test_repeated_reversal_with_task_reuses_its_pending_entry(self, tmp_repo):
+        rule_text = ("Always run database migrations inside a single transaction so a failed "
+                     "step rolls back cleanly.")
+        reversal_text = ("Never run database migrations inside a single transaction so a failed "
+                         "step rolls back cleanly. Add the invoices migration.")
+        store.capture_user_constraint(tmp_repo, rule_text, "s1")
+        store.capture_user_constraint(tmp_repo, reversal_text, "s2")
+        store.capture_user_constraint(tmp_repo, reversal_text, "s3")
+        rule, reversal = [e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision"]
+        assert rule.get("occurrence_count", 1) == 1
+        assert reversal["status"] == "pending_approval"
+        assert reversal["occurrence_count"] == 2
 
     def test_durable_environment_rule_still_stores(self, tmp_repo):
         entry_id, content, status = store.capture_user_constraint(
