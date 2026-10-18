@@ -2453,6 +2453,10 @@ def capture_user_constraint_with_meta(
             # sessions are the corroboration a reviewer reads, and the meta lets the evidence
             # wrapper spool the repetition. Still no new entry, no status change, no
             # confidence change - repetition is not approval.
+            if (not review_required and entry_status(match) in ("approved", "suggested")
+                    and _tokenize(revisions.current_content(match)) < _tokenize(content)):
+                return _route_containment(repo_path, data, match, content, subtype,
+                                          status, session_id, source)
             matched = _match_overlap(content, match)
             _record_recurrence(match, session_id, source=source, overlap=matched)
             save(repo_path, data)
@@ -2579,6 +2583,8 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
             return hit["id"], revisions.current_content(hit), "promoted", {}
         if pending:
             return _recurred()  # never propose on an unreviewed base
+        if review_required and not confirmation_required:
+            return _recurred()
         norm = content if confirmation_required else revisions.normalize_content(content)
         prop = hit.get("proposed_revision")
         displaced = False
