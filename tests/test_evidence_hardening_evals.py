@@ -131,6 +131,9 @@ DIRECTIVE_NEGATIVES = {
         'the README says "never use pip install -e ." in this project',
     "quoted-doc-modified-source":
         "The vendor docs say: never call the token endpoint more than once per minute.",
+    # requests for an example rule
+    "example-rule-request": "Show me an example of an engineering rule, like never log secrets.",
+    "rule-look-like-question": "What does a good rule look like, for instance always pin versions",
     "changelog-entry": "- fix(store): never drop an unreadable outbox on enqueue (#241)",
     # host and tool injection
     "system-reminder-injection":
