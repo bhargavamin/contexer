@@ -1332,6 +1332,25 @@ _CONSTRAINT_TRIGGER = re.compile(
 )
 _CAN_ONLY_TRIGGER = re.compile(r"\bcan\s+only\b", re.IGNORECASE)
 _DECISION_LABEL_TRIGGER = re.compile(_DECISION_LABEL + r"\s*:(?=\s*\S)", re.IGNORECASE)
+_POSITIVE_POLARITY = re.compile(r"\b(?:al+w(?:ay|ya)s|must(?!\s+not\b|n['’]t))\b", re.IGNORECASE)
+_NEGATIVE_POLARITY = re.compile(
+    r"\b(?:never|do\s*n['’]?t|do\s+not|must\s+not|mustn['’]t|should\s+not|shouldn['’]t|"
+    r"no\s+longer|avoid)\b",
+    re.IGNORECASE,
+)
+
+
+def _rule_polarity(text: str) -> str:
+    positive = bool(_POSITIVE_POLARITY.search(text))
+    negative = bool(_NEGATIVE_POLARITY.search(text))
+    if positive and negative:
+        return "mixed"
+    return "negative" if negative else "positive" if positive else "none"
+
+
+def _is_polarity_reversal(new: str, old: str) -> bool:
+    pair = {_rule_polarity(new), _rule_polarity(old)}
+    return "negative" in pair and bool(pair & {"positive", "none"})
 
 # Soft conversational prose that contains "don't/do not/avoid" but is NOT a directive:
 # "don't worry about the tests", "I don't know why", "don't hesitate to ask". These are
@@ -2431,6 +2450,10 @@ def capture_user_constraint_with_meta(
         # This hook fires on every prompt; a near-duplicate is normally a silent no-op (no
         # write) - EXCEPT a clean restatement of this path's own pending twin, which promotes.
         match = _find_match(content, match_candidates)
+        unrouted_reversal = (match is not None and review_required and not confirmation_required
+                             and _is_polarity_reversal(content, revisions.current_content(match)))
+        if unrouted_reversal:
+            match = None
         if match is not None:
             if confirmation_required and entry_status(match) == "pending_approval":
                 return match["id"], content, "confirmation_conflict", {}
@@ -2453,10 +2476,13 @@ def capture_user_constraint_with_meta(
             # sessions are the corroboration a reviewer reads, and the meta lets the evidence
             # wrapper spool the repetition. Still no new entry, no status change, no
             # confidence change - repetition is not approval.
+            match_content = revisions.current_content(match)
+            reversed_rule = _is_polarity_reversal(content, match_content)
             if (not review_required and entry_status(match) in ("approved", "suggested")
-                    and _tokenize(revisions.current_content(match)) < _tokenize(content)):
+                    and (reversed_rule or _tokenize(match_content) < _tokenize(content))):
                 return _route_containment(repo_path, data, match, content, subtype,
-                                          status, session_id, source)
+                                          status, session_id, source,
+                                          reversed_rule=reversed_rule)
             matched = _match_overlap(content, match)
             _record_recurrence(match, session_id, source=source, overlap=matched)
             save(repo_path, data)
@@ -2467,10 +2493,14 @@ def capture_user_constraint_with_meta(
         # Containment routing: a superset/subset restatement of a stored rule evades the
         # max-denominator metric above - consolidate onto the first contained entry
         # instead of accumulating a new overlapping one.
-        hit = _find_containment(content, match_candidates)
+        hit = None if unrouted_reversal else _find_containment(content, match_candidates)
+        if (hit is not None and review_required and not confirmation_required
+                and _is_polarity_reversal(content, revisions.current_content(hit))):
+            hit = None
         if hit is not None:
-            return _route_containment(repo_path, data, hit, content, subtype,
-                                      status, session_id, source)
+            return _route_containment(
+                repo_path, data, hit, content, subtype, status, session_id, source,
+                reversed_rule=_is_polarity_reversal(content, revisions.current_content(hit)))
         if near_misses is not None:
             near_misses.extend(_near_misses(content, match_candidates))
         entry = _new_decision_entry(content, session_id, subtype,
@@ -2510,7 +2540,8 @@ def capture_user_constraint_with_meta(
 
 
 def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subtype: str,
-                       capture_status: str, session_id: str, source: str = "") -> tuple:
+                       capture_status: str, session_id: str, source: str = "", *,
+                       reversed_rule: bool = False) -> tuple:
     """Route a containment hit from capture_user_constraint onto the matched entry `hit`.
     Called under the store lock; saves and returns the capture 4-tuple (see
     capture_user_constraint_with_meta - the recurrence branches carry the meta that lets a
@@ -2557,7 +2588,7 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
     if confirmation_required and pending:
         return hit["id"], content, "confirmation_conflict", {}
 
-    if longer:
+    if longer or reversed_rule:
         if pending_twin:
             if review_required:
                 # Pre-approval amend precedent: rewrite v1 in place, stays pending.
