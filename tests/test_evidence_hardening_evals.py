@@ -134,6 +134,10 @@ DIRECTIVE_NEGATIVES = {
     # requests for an example rule
     "example-rule-request": "Show me an example of an engineering rule, like never log secrets.",
     "rule-look-like-question": "What does a good rule look like, for instance always pin versions",
+    # past habits
+    "past-habit-deprecated":
+        "We previously always used Redis for queues, but that pattern is deprecated now.",
+    "used-to-habit": "We used to always deploy on Fridays; we stopped that.",
     "changelog-entry": "- fix(store): never drop an unreadable outbox on enqueue (#241)",
     # host and tool injection
     "system-reminder-injection":
