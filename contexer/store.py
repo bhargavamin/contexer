@@ -2065,11 +2065,21 @@ def _is_work_item(sentence: str) -> bool:
                 and not _is_deictic(sentence))
 
 
+_COORDINATED_CLAUSE = re.compile(r",\s*(?:and\s+|then\s+)+|\s+and\s+(?:then\s+)?", re.IGNORECASE)
+
+
 def _without_work_items(candidate: str) -> str:
     """Proposed extraction; mixed candidates must retain their original text for review."""
     sentences = [s for s in re.split(r"(?<=[.!?])\s+|\n+", candidate) if s.strip()]
-    kept = [s for s in sentences if not _is_work_item(s)]
-    return " ".join(s.strip() for s in kept) if len(kept) < len(sentences) else candidate
+    kept = []
+    for sentence in sentences:
+        if _is_work_item(sentence):
+            continue
+        clauses = _COORDINATED_CLAUSE.split(sentence)
+        work = next((i for i, clause in enumerate(clauses) if i and _is_work_item(clause)), None)
+        kept.append(sentence if work is None else ", ".join(clauses[:work]))
+    stripped = " ".join(s.strip() for s in kept)
+    return stripped if stripped != " ".join(s.strip() for s in sentences) else candidate
 
 
 def _independent_lasting_clauses(part: str) -> list[str] | None:
