@@ -808,6 +808,29 @@ class TestIsPrescriptiveConstraint:
         is_c, _ = store._is_prescriptive_constraint(text)
         assert is_c is True
 
+    @pytest.mark.parametrize("text", [
+        "Decision for scheduled sends: use the outbox table, not in-process timers.",
+        "Template convention: variables are snake_case and must be declared in the front matter.",
+        "Policy: all public endpoints require an API key.",
+        "Constraint: the billing service owns the invoices table.",
+        "Our policy on refunds: customers get 30 days.",
+    ])
+    def test_decision_label_is_prescriptive(self, text):
+        is_c, _ = store._is_prescriptive_constraint(text)
+        assert is_c is True
+
+    @pytest.mark.parametrize("text", [
+        "The decision: we went with Postgres last year.",
+        "My decision: I'll take the afternoon off.",
+        "What was the decision: did we pick Postgres?",
+        "Please read the policy: it's in docs/policy.md",
+        "We made a decision: Postgres.",
+        "Decision: ?",
+    ])
+    def test_non_label_decision_mention_excluded(self, text):
+        is_c, _ = store._is_prescriptive_constraint(text)
+        assert is_c is False
+
     def test_it_should_always_is_prescriptive(self):
         # "should" sits between "it" and "always" so the personal descriptor does not strip it
         is_c, subtype = store._is_prescriptive_constraint("it should always return 200 for the health endpoint")
