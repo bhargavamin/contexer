@@ -1332,7 +1332,8 @@ _CONSTRAINT_TRIGGER = re.compile(
 )
 _CAN_ONLY_TRIGGER = re.compile(r"\bcan\s+only\b", re.IGNORECASE)
 _DECISION_LABEL_TRIGGER = re.compile(_DECISION_LABEL + r"\s*:(?=\s*\S)", re.IGNORECASE)
-_POSITIVE_POLARITY = re.compile(r"\b(?:al+w(?:ay|ya)s|must(?!\s+not\b|n['’]t))\b", re.IGNORECASE)
+_POSITIVE_POLARITY = re.compile(
+    r"\b(?:al+w(?:ay|ya)s|must(?!\s+(?:not|never)\b|n['’]t))\b", re.IGNORECASE)
 _NEGATIVE_POLARITY = re.compile(
     r"\b(?:never|do\s*n['’]?t|do\s+not|must\s+not|mustn['’]t|should\s+not|shouldn['’]t|"
     r"no\s+longer|avoid)\b",
@@ -2447,13 +2448,13 @@ def capture_user_constraint_with_meta(
         # candidate. Letting it fall through ordinary overlap/containment routing would undo
         # the lifecycle target gate and could attach the correction to one arbitrary candidate.
         match_candidates = [] if lifecycle_revision is not None else decisions_only
+        if review_required and not confirmation_required:
+            match_candidates = [
+                entry for entry in match_candidates
+                if not _is_polarity_reversal(content, revisions.current_content(entry))]
         # This hook fires on every prompt; a near-duplicate is normally a silent no-op (no
         # write) - EXCEPT a clean restatement of this path's own pending twin, which promotes.
         match = _find_match(content, match_candidates)
-        unrouted_reversal = (match is not None and review_required and not confirmation_required
-                             and _is_polarity_reversal(content, revisions.current_content(match)))
-        if unrouted_reversal:
-            match = None
         if match is not None:
             if confirmation_required and entry_status(match) == "pending_approval":
                 return match["id"], content, "confirmation_conflict", {}
@@ -2493,10 +2494,7 @@ def capture_user_constraint_with_meta(
         # Containment routing: a superset/subset restatement of a stored rule evades the
         # max-denominator metric above - consolidate onto the first contained entry
         # instead of accumulating a new overlapping one.
-        hit = None if unrouted_reversal else _find_containment(content, match_candidates)
-        if (hit is not None and review_required and not confirmation_required
-                and _is_polarity_reversal(content, revisions.current_content(hit))):
-            hit = None
+        hit = _find_containment(content, match_candidates)
         if hit is not None:
             return _route_containment(
                 repo_path, data, hit, content, subtype, status, session_id, source,

@@ -836,6 +836,10 @@ class TestIsPrescriptiveConstraint:
         ("Always squash merge pull requests.", "Do not squash merge pull requests"),
         ("From now on never use uv.", "From now on use uv"),
         ("You must not deploy on Fridays.", "You must deploy on Fridays"),
+        ("You must always deploy directly to production.",
+         "You must never deploy directly to production"),
+        ("You must never deploy directly to production.",
+         "You must always deploy directly to production"),
     ])
     def test_polarity_reversal_detected(self, new, old):
         assert store._is_polarity_reversal(new, old) is True
@@ -971,6 +975,19 @@ class TestIsPrescriptiveConstraint:
         assert rule.get("proposed_revision") is None
         assert rule.get("occurrence_count", 1) == 1
         assert reversal["status"] == "pending_approval"
+
+    def test_repeated_reversal_with_task_reuses_its_pending_entry(self, tmp_repo):
+        rule_text = ("Always run database migrations inside a single transaction so a failed "
+                     "step rolls back cleanly.")
+        reversal_text = ("Never run database migrations inside a single transaction so a failed "
+                         "step rolls back cleanly. Add the invoices migration.")
+        store.capture_user_constraint(tmp_repo, rule_text, "s1")
+        store.capture_user_constraint(tmp_repo, reversal_text, "s2")
+        store.capture_user_constraint(tmp_repo, reversal_text, "s3")
+        rule, reversal = [e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision"]
+        assert rule.get("occurrence_count", 1) == 1
+        assert reversal["status"] == "pending_approval"
+        assert reversal["occurrence_count"] == 2
 
     def test_durable_environment_rule_still_stores(self, tmp_repo):
         entry_id, content, status = store.capture_user_constraint(
