@@ -779,6 +779,9 @@ class TestIsPrescriptiveConstraint:
         "We historically never squashed commits, but that changed last year.",
         "I previously always ran the formatter by hand.",
         "it formerly never retried failed jobs",
+        "We previously always used Redis and never used RabbitMQ.",
+        "We used to always deploy on Fridays and never ran the smoke tests.",
+        "I previously never pinned versions or always rebased by hand.",
     ])
     def test_personal_past_habit_excluded(self, text):
         is_c, _ = store._is_prescriptive_constraint(text)
@@ -787,6 +790,9 @@ class TestIsPrescriptiveConstraint:
     @pytest.mark.parametrize("text", [
         "We previously always used Redis for queues, but from now on always use the outbox table.",
         "We used to always deploy on Fridays. Never deploy on Fridays from now on.",
+        "We previously always used Redis, but from now on never use it for queues.",
+        "We previously always used Redis and from now on always use the outbox table.",
+        "We always use Redis and never use RabbitMQ.",
         "Always use the outbox table for queues.",
     ])
     def test_rule_beside_past_habit_is_prescriptive(self, text):

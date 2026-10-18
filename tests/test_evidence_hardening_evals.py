@@ -138,6 +138,7 @@ DIRECTIVE_NEGATIVES = {
     "past-habit-deprecated":
         "We previously always used Redis for queues, but that pattern is deprecated now.",
     "used-to-habit": "We used to always deploy on Fridays; we stopped that.",
+    "past-habit-coordinated": "We previously always used Redis and never used RabbitMQ.",
     "changelog-entry": "- fix(store): never drop an unreadable outbox on enqueue (#241)",
     # host and tool injection
     "system-reminder-injection":
