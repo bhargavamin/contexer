@@ -1582,10 +1582,6 @@ _NON_DIRECTIVE_CONTAINER = re.compile(
     r"going\s+forward\b|ensure\b|make\s+sure\b|avoid\b|prefer\b|use\b|"
     r"[^\n]{0,120}\bcan\s+only\b))"
     r"|according\s+to\s+[^,:\n]{1,80}[,:]"      # attributed statement
-    # A determiner may carry up to two modifiers naming whose source it is ("the vendor docs",
-    # "our vendor's documentation"). Modifiers need the determiner, so an instruction about a
-    # document ("Ensure the docs say ...") still reads as the developer's own words.
-    # ponytail: an undetermined source ("Vendor docs say ...") is still a directive.
     r"|(?:(?:the|our)\s+(?:[\w'-]+\s+){0,2})?"
     r"(?:README|documentation|docs?|release\s+notes?|issues?|changelog|log|output)"
     r"\s+(?:says?|said|states?|reads)\b"
