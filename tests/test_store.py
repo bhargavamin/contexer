@@ -2,6 +2,7 @@
 import contextlib
 import json
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -1583,6 +1584,42 @@ class TestEnvironmentLifecycleRevision:
 
         assert "reusable operational context" in ack
         assert "reusable deployment constraint" not in ack
+
+
+class TestCaptureAckAlreadyRecorded:
+    """The hook's ack names the recorded entry so the agent refines it via replace_id
+    instead of saving a reworded duplicate through update_context."""
+
+    @pytest.mark.parametrize("status", [
+        "approved", "pending_approval", "promoted", "revision_proposed"])
+    def test_recorded_entry_ack_points_to_replace_id(self, status):
+        ack = store.constraint_ack("Always use uv", status, "0123456789abcdef")
+        assert "already recorded in Contexer (id=01234567)" in ack
+        assert 'replace_id="01234567"' in ack
+
+    @pytest.mark.parametrize("status", [
+        "confirmation_required", "confirmation_conflict", "revision_already_pending"])
+    def test_unrecorded_or_unconfirmed_ack_has_no_replace_hint(self, status):
+        ack = store.constraint_ack("Always use uv", status, "0123456789abcdef")
+        assert "replace_id" not in ack
+
+    def test_no_entry_id_means_no_hint(self):
+        assert "replace_id" not in store.constraint_ack("Always use uv", "approved", "")
+
+    def test_following_the_hint_refines_instead_of_duplicating(self, tmp_repo):
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo, "Always write the idempotency key to the store before calling a provider.",
+            "s1")
+        ack = store.constraint_ack(content, status, entry_id)
+        hinted = re.search(r'replace_id="([0-9a-f]{8})"', ack).group(1)
+        store.update_decision(
+            tmp_repo, "Always persist a message's idempotency key before calling a provider, "
+            "so redelivered messages are detected and skipped.", "s1",
+            subtype="constraint", created_by="ai", replace_id=hinted)
+        decisions = [e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision"]
+        assert len(decisions) == 1
+        assert decisions[0]["id"] == entry_id
+        assert decisions[0]["proposed_revision"]["source"] == "ai"
 
 
 class TestConstraintNoiseGuards:

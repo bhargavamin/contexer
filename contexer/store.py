@@ -2653,6 +2653,11 @@ def constraint_ack(content: str, status: str, entry_id: str = "",
     between hosts. `entry_id` names the touched entry (used by revision_proposed);
     `near_misses` (from capture_user_constraint's out-list) appends a consolidation hint
     for grey-zone lexical matches on a brand-new entry."""
+    recorded_note = (
+        f" This rule is already recorded in Contexer (id={entry_id[:8]}): do not save it "
+        "again with update_context. To refine its wording or reasoning, call update_context "
+        f'with replace_id="{entry_id[:8]}".'
+    ) if entry_id else ""
     near_note = ""
     if near_misses:
         near_note = (
@@ -2668,7 +2673,7 @@ def constraint_ack(content: str, status: str, entry_id: str = "",
             "so it is not yet trusted. Briefly tell "
             "the developer it was stored pending review. Do NOT approve it yourself; only the "
             "developer decides (they can run `contexer review`, or ask you to show it via "
-            "review_pending)." + near_note
+            "review_pending)." + recorded_note + near_note
         )
     if status == "confirmation_required":
         return (
@@ -2690,7 +2695,7 @@ def constraint_ack(content: str, status: str, entry_id: str = "",
     if status == "promoted":
         return (
             f"Your restated rule replaced the pending one - '{content}' is now active. "
-            "Acknowledge this briefly to the user."
+            "Acknowledge this briefly to the user." + recorded_note
         )
     if status == "revision_proposed":
         return (
@@ -2698,7 +2703,7 @@ def constraint_ack(content: str, status: str, entry_id: str = "",
             "The current rule stays active until it is reviewed. Briefly tell the developer "
             "a suggested update to that rule is pending their review. Do NOT approve it "
             "yourself; only the developer decides (they can run `contexer review`, or ask "
-            "you to show it via review_pending)."
+            "you to show it via review_pending)." + recorded_note
         )
     if status == "revision_already_pending":
         return (
@@ -2710,7 +2715,7 @@ def constraint_ack(content: str, status: str, entry_id: str = "",
     return (
         f"Auto-stored as constraint: '{content}'. "
         "Acknowledge this briefly to the user - e.g. 'Stored as a constraint in Contexer.'"
-        + near_note
+        + recorded_note + near_note
     )
 
 
