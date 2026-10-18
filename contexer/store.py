@@ -1472,7 +1472,8 @@ _PERSONAL_DESCRIPTOR = re.compile(
     r"\b(?:i|we|it)\s+(?:"
     r"(?:previously|historically|formerly|originally|traditionally|used\s+to)\s+"
     r"(?:have\s+|has\s+|did\s+|does\s+)?(?:always|never)\b"
-    r"(?:[^,;:.!?\n]*?\b(?:and|or)\s+(?:also\s+)?(?:always|never)\b)*"
+    r"(?:(?:(?!\b(?:always|never|now|henceforth|going\s+forward)\b)[^,;:.!?\n])*?"
+    r"\b(?:and|or)\s+(?:also\s+)?(?:always|never)\b)*"
     r"|(?:have\s+|has\s+|did\s+|does\s+)?(?:always|never)\b)",
     re.IGNORECASE,
 )

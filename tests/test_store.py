@@ -782,6 +782,7 @@ class TestIsPrescriptiveConstraint:
         "We previously always used Redis and never used RabbitMQ.",
         "We used to always deploy on Fridays and never ran the smoke tests.",
         "I previously never pinned versions or always rebased by hand.",
+        "We previously always used Redis instead of Kafka and never used RabbitMQ.",
     ])
     def test_personal_past_habit_excluded(self, text):
         is_c, _ = store._is_prescriptive_constraint(text)
@@ -793,6 +794,11 @@ class TestIsPrescriptiveConstraint:
         "We previously always used Redis, but from now on never use it for queues.",
         "We previously always used Redis and from now on always use the outbox table.",
         "We always use Redis and never use RabbitMQ.",
+        "We previously always used Redis and from now on always use PostgreSQL and never use RabbitMQ.",
+        "We previously always used Redis and from now on use PostgreSQL and never use RabbitMQ.",
+        "We previously always used Redis and must always use PostgreSQL and never use RabbitMQ.",
+        "We previously always used Redis and going forward never use RabbitMQ.",
+        "We used to always deploy on Fridays and now never deploy on Fridays.",
         "Always use the outbox table for queues.",
     ])
     def test_rule_beside_past_habit_is_prescriptive(self, text):

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "fixture_version": "1.17.1",
+  "fixture_version": "1.17.2",
   "required_case_ids": [
     "P01-always", "P01-task-list-handoff", "P01-always-squash-merge",
     "P01-slash-option-label-reversed", "P01-slash-option-label-multiword",
@@ -18,7 +18,7 @@
     "P01-work-item-sarcasm-refusal", "P01-work-item-question-refusal", "P01-write-question-refusal", "P01-build-question-refusal", "P01-deictic-question-refusal", "P01-work-item-question-before-rule",
     "P01-attributed-modified-docs-refusal", "P01-attributed-possessive-documentation-refusal", "P01-attributed-modified-correction-tail", "P01-doc-instruction-kept",
     "P01-example-request-refusal", "P01-rule-look-like-refusal", "P01-rule-with-example-kept", "P01-examples-directive-kept", "P01-example-request-then-rule-line",
-    "P01-past-habit-refusal", "P01-used-to-habit-refusal", "P01-historical-never-refusal", "P01-past-habit-then-rule-kept", "P01-used-to-then-rule-line", "P01-past-habit-coordinated-refusal", "P01-past-habit-or-refusal", "P01-past-habit-and-durable-rule-kept",
+    "P01-past-habit-refusal", "P01-used-to-habit-refusal", "P01-historical-never-refusal", "P01-past-habit-then-rule-kept", "P01-used-to-then-rule-line", "P01-past-habit-coordinated-refusal", "P01-past-habit-or-refusal", "P01-past-habit-and-durable-rule-kept", "P01-past-habit-then-rule-and-never-kept", "P01-past-habit-then-untriggered-rule-kept",
     "P01-review-gate-filler-because", "P01-review-gate-filler-so", "P01-review-gate-filler-hence", "P01-review-gate-filler-which", "P01-review-gate-filler-reverse", "P01-review-gate-filler-multi", "P01-clean-filler-sanitization",
     "P01-review-gate-hash-write", "P01-review-gate-hash-indefinite", "P01-review-gate-hash-build", "P01-review-gate-hash-salt", "P01-review-gate-hash-negation", "P01-review-gate-hash-reverse", "P01-review-gate-audit-recurring", "P01-review-gate-no-bypass", "P01-review-gate-hash-fix", "P01-review-gate-hash-semicolon", "P01-review-gate-hash-three-actions", "P01-review-gate-plain-task", "P01-review-gate-explicit-task",
     "P02-original-n8n", "P03-weak-pages", "P04-mixed-question-scope",
@@ -140,6 +140,8 @@
     {"case_id":"P01-past-habit-coordinated-refusal","family":"P01","kind":"capture","prompt":"We previously always used Redis and never used RabbitMQ.","expected":{"result_status":null,"entry_count":0}},
     {"case_id":"P01-past-habit-or-refusal","family":"P01","kind":"capture","prompt":"I previously never pinned versions or always rebased by hand.","expected":{"result_status":null,"entry_count":0}},
     {"case_id":"P01-past-habit-and-durable-rule-kept","family":"P01","kind":"capture","prompt":"We previously always used Redis and from now on always use the outbox table.","expected":{"result_status":"approved","entry_count":1,"result_content":"We previously always used Redis and from now on always use the outbox table","live_status":"approved","live_content":"We previously always used Redis and from now on always use the outbox table"}},
+    {"case_id":"P01-past-habit-then-rule-and-never-kept","family":"P01","kind":"capture","prompt":"We previously always used Redis and from now on always use PostgreSQL and never use RabbitMQ.","expected":{"result_status":"approved","entry_count":1,"result_content":"We previously always used Redis and from now on always use PostgreSQL and never use RabbitMQ","live_status":"approved","live_content":"We previously always used Redis and from now on always use PostgreSQL and never use RabbitMQ"}},
+    {"case_id":"P01-past-habit-then-untriggered-rule-kept","family":"P01","kind":"capture","prompt":"We previously always used Redis and from now on use PostgreSQL and never use RabbitMQ.","expected":{"result_status":"approved","entry_count":1,"result_content":"We previously always used Redis and from now on use PostgreSQL and never use RabbitMQ","live_status":"approved","live_content":"We previously always used Redis and from now on use PostgreSQL and never use RabbitMQ"}},
     {"case_id":"P01-work-item-question-before-rule","family":"P01","kind":"capture","prompt":"Add a health check? Always use uv.","expected":{"result_status":"pending_approval","entry_count":1,"result_content":"Add a health check? Always use uv","live_status":"pending_approval","live_content":"Add a health check? Always use uv"}},
 
     {"case_id":"P01-review-gate-filler-because","family":"P01","kind":"capture","prompt":"Always hash passwords because this protects users. Write the hash with argon2id.","expected":{"result_status":"pending_approval","entry_count":1,"result_content":"Always hash passwords because this protects users. Write the hash with argon2id","live_status":"pending_approval","live_content":"Always hash passwords because this protects users. Write the hash with argon2id","revision_count":1}},
