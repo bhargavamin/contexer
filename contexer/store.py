@@ -1582,6 +1582,10 @@ _NON_DIRECTIVE_CONTAINER = re.compile(
     r"going\s+forward\b|ensure\b|make\s+sure\b|avoid\b|prefer\b|use\b|"
     r"[^\n]{0,120}\bcan\s+only\b))"
     r"|according\s+to\s+[^,:\n]{1,80}[,:]"      # attributed statement
+    r"|(?:please\s+)?(?:show|give|write|draft|share)\s+(?:me\s+|us\s+)?(?:an?\s+|some\s+)?"
+    r"(?:examples?|samples?)\s+of\b"
+    r"|what\s+(?:does|would)\s+an?\s+(?:[\w-]+\s+){0,2}"
+    r"(?:rule|convention|constraint|policy)\s+look\s+like\b"
     r"|(?:(?:the|our)\s+(?:[\w'-]+\s+){0,2})?"
     r"(?:README|documentation|docs?|release\s+notes?|issues?|changelog|log|output)"
     r"\s+(?:says?|said|states?|reads)\b"
