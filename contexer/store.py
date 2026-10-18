@@ -1291,6 +1291,11 @@ _DIRECTIVE_OPERATION_VERBS = (
     r"approve|grant|allow|authorize|execute|apply|restart|start|stop|rerun|rebuild|"
     r"revert|reset|sync|migrate|provision|destroy|scale|configure|validate|verify"
 )
+_DECISION_LABEL = (
+    r"^(?:(?!(?:the|a|an|my|your|his|her|their|its|this|that|these|those|what|which|whose"
+    r"|any|some|no|store)\b)[a-z][\w-]*\s+){0,2}"
+    r"(?:decision|convention|constraint|policy)(?:\s+(?:for|on|about|in)\s+[^:\n]{1,60})?"
+)
 _CONSTRAINT_TRIGGER = re.compile(
     r"\b(?:"
     r"store\s+this\s+decision(?=\s*:)"  # explicit human capture command
@@ -1316,6 +1321,7 @@ _CONSTRAINT_TRIGGER = re.compile(
     r"|make\s+sure\s+(?:you\s+|that\s+you\s+)"  # make sure you / make sure that you
     r"|(?:make|create|add|set|establish)\s+(?:a\s+|the\s+)?rule"  # "create a rule …"
     r"|^\s*rule(?=\s*[:\-])"        # "rule: never X" / "rule - …" at the start
+    rf"|{_DECISION_LABEL}(?=\s*:\s*\S)"
     r"|do\s*n['’]?t"                # don't (prohibition)
     r"|do\s+not"                    # do not
     r"|avoid"                       # avoid
@@ -1325,6 +1331,7 @@ _CONSTRAINT_TRIGGER = re.compile(
     re.IGNORECASE,
 )
 _CAN_ONLY_TRIGGER = re.compile(r"\bcan\s+only\b", re.IGNORECASE)
+_DECISION_LABEL_TRIGGER = re.compile(_DECISION_LABEL + r"\s*:(?=\s*\S)", re.IGNORECASE)
 
 # Soft conversational prose that contains "don't/do not/avoid" but is NOT a directive:
 # "don't worry about the tests", "I don't know why", "don't hesitate to ask". These are
@@ -2381,8 +2388,11 @@ def capture_user_constraint_with_meta(
         _CONSTRAINT_TRIGGER.search(_CAN_ONLY_TRIGGER.sub("", content))
         or _EXPLICIT_AUTHORITY_LABEL.search(content)
     )
+    bare_decision_label = bool(_DECISION_LABEL_TRIGGER.search(content)) and not (
+        _CONSTRAINT_TRIGGER.search(_DECISION_LABEL_TRIGGER.sub("", content)))
     status = ("confirmation_required" if confirmation_required else
-              "pending_approval" if ambiguous_extraction or deictic or ambiguous_label or bare_can_only else "approved")
+              "pending_approval" if (ambiguous_extraction or deictic or ambiguous_label
+                                     or bare_can_only or bare_decision_label) else "approved")
     review_required = status != "approved"
     entry_status_value = "pending_approval" if review_required else "approved"
     with store_lock(repo_slug(repo_path), blocking=blocking):
