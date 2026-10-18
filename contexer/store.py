@@ -2031,7 +2031,8 @@ def _directive_policy_candidate(text: str) -> tuple[str, bool]:
         return extracted, False
     durable = [part for part in fragments if _DURABLE_DIRECTIVE.search(part)
                and not _TASK_SCOPE_MARKER.search(part)]
-    if durable and len(durable) < len(fragments):
+    if durable and (len(durable) < len(fragments)
+                    or any(_without_work_items(part) != part for part in durable)):
         return candidate, True
     return ". ".join(durable), False
 
