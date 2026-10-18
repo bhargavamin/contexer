@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.51.3](https://github.com/bhargavamin/contexer/compare/v0.51.2...v0.51.3) (2026-10-18)
+
+
+### Bug Fixes
+
+* **capture:** drop the whole past-habit clause, not just its first trigger ([#412](https://github.com/bhargavamin/contexer/issues/412)) ([7e7a9ce](https://github.com/bhargavamin/contexer/commit/7e7a9ce3a4aecc7eaafd341a50747b90e60af781))
+* **capture:** treat modified document sources as attributed statements ([#408](https://github.com/bhargavamin/contexer/issues/408)) ([4d6d93d](https://github.com/bhargavamin/contexer/commit/4d6d93d40ce88963fa629cb2bb002aca5c1b1427))
+* **capture:** treat past-habit descriptions as non-directive ([#411](https://github.com/bhargavamin/contexer/issues/411)) ([e410a3b](https://github.com/bhargavamin/contexer/commit/e410a3bdd4f1d00d8758c0e72e44ba2072ad3c0e))
+* **capture:** treat requests for an example rule as non-directive ([#410](https://github.com/bhargavamin/contexer/issues/410)) ([458692c](https://github.com/bhargavamin/contexer/commit/458692cecd62fbddf613f53d5062517017846ce8))
+
 ## [0.51.2](https://github.com/bhargavamin/contexer/compare/v0.51.1...v0.51.2) (2026-10-17)
 
 
