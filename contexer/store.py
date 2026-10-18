@@ -1469,9 +1469,13 @@ _CONVENTION_SIGNALS = re.compile(
 # the capture path keeps it but routes the ambiguity to pending review.
 # NOTE: "it should always" is NOT caught here because "should" sits between "it" and "always".
 _PERSONAL_DESCRIPTOR = re.compile(
-    r"\b(?:i|we|it)\s+"
-    r"(?:(?:previously|historically|formerly|originally|traditionally|used\s+to)\s+)?"
-    r"(?:have\s+|has\s+|did\s+|does\s+)?(?:always|never)\b",
+    r"\b(?:i|we|it)\s+(?:"
+    r"(?:previously|historically|formerly|originally|traditionally|used\s+to)\s+"
+    r"(?:have\s+|has\s+|did\s+|does\s+)?(?:always|never)\b"
+    r"(?:(?:(?!\b(?:always|never|(?:and|or|but)\s+now|from\s+now\s+on|henceforth"
+    r"|going\s+forward)\b)[^,;:.!?\n])*?"
+    r"\b(?:and|or)\s+(?:also\s+)?(?:always|never)\b)*"
+    r"|(?:have\s+|has\s+|did\s+|does\s+)?(?:always|never)\b)",
     re.IGNORECASE,
 )
 
