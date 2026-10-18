@@ -2384,12 +2384,15 @@ def capture_user_constraint_with_meta(
     # Capture it rather than miss it, but never mint trusted human policy from that phrase
     # alone. A second independent directive signal or an explicit authority label is enough
     # to make the developer's normative intent unambiguous.
+    without_weak_signals = _CAN_ONLY_TRIGGER.sub(
+        "", _DECISION_LABEL_TRIGGER.sub("", content)).strip()
     bare_can_only = bool(_CAN_ONLY_TRIGGER.search(content)) and not (
-        _CONSTRAINT_TRIGGER.search(_CAN_ONLY_TRIGGER.sub("", content))
+        _CONSTRAINT_TRIGGER.search(without_weak_signals)
         or _EXPLICIT_AUTHORITY_LABEL.search(content)
     )
-    bare_decision_label = bool(_DECISION_LABEL_TRIGGER.search(content)) and not (
-        _CONSTRAINT_TRIGGER.search(_DECISION_LABEL_TRIGGER.sub("", content)))
+    bare_decision_label = (bool(_DECISION_LABEL_TRIGGER.search(content))
+                           and not _CAN_ONLY_TRIGGER.search(content)
+                           and not _is_prescriptive_constraint(without_weak_signals)[0])
     status = ("confirmation_required" if confirmation_required else
               "pending_approval" if (ambiguous_extraction or deictic or ambiguous_label
                                      or bare_can_only or bare_decision_label) else "approved")
