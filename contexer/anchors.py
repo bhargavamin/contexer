@@ -22,8 +22,11 @@ Shape mirrors `store.verify_scan_conventions` deliberately:
     site in store.py) - never a direct status flip, and never a retirement.
 
 Per anchored, active-status entry with no proposal already pending, each `source_files`
-path is classified against the working tree:
-  - exists on disk -> nothing.
+path is classified against EVERY worktree sharing the store (`_worktree_roots`), not just
+the session's own: a file present only in another worktree (untracked, ignored, or on
+another branch) is not lost (#428). If that set is unknown, the entry is left unverified:
+  - exists on disk in any worktree -> nothing; no rename lookup, so a rename seen in one
+    worktree never rewrites a path another worktree still holds.
   - a trailing-slash directory prefix that is missing -> collected directly; directories have
     no safe file-style rename inference, and skipping it keeps their verification cost constant.
   - missing, but git confidently identifies exactly one rename target (and that target
@@ -112,13 +115,14 @@ _RENAME_CHAIN_MAX = 4
 # single, currently-existing target — so the file counts as missing under the entry's
 # existing missing/partial/total-loss classification (a possibly-spurious proposal or list
 # trim, not a hung verify run); a human reviewing that proposal can always dismiss it.
-_ANCHOR_GIT_BUDGET = _RENAME_CHAIN_MAX * 2 * store.MAX_SOURCE_FILES + 1
+_ANCHOR_GIT_BUDGET = _RENAME_CHAIN_MAX * 2 * store.MAX_SOURCE_FILES + 2
 # git calls per verify_anchors run — a session-start latency guarantee, same spirit as the
 # guard engine's budgets. The number is DERIVED, not picked: one entry's worst case is every
 # one of its (at most MAX_SOURCE_FILES) anchored paths missing, and each of those paths
 # potentially needing the full rename chain (up to _RENAME_CHAIN_MAX hops, 2 calls per hop
 # — `log` + `show`) before resolving or giving up, plus at most one `rev-parse HEAD` for
-# the outcome - so a budget of `_RENAME_CHAIN_MAX * 2 * MAX_SOURCE_FILES + 1` guarantees
+# the outcome and the run's single `worktree list` (made lazily, on the first miss) - so a
+# budget of `_RENAME_CHAIN_MAX * 2 * MAX_SOURCE_FILES + 2` guarantees
 # the FIRST entry of every run always completes. That guarantee is what makes the run make
 # forward progress: a smaller budget lets a single fat entry exhaust it inside its own file
 # loop, so that entry — and every entry after it — is skipped on every run, forever,
@@ -181,7 +185,51 @@ def _parse_rename_target(name_status: str, old_path: str) -> str | None:
     return None
 
 
-def _confident_rename(repo_path: str, old_path: str, repo_root: Path, call) -> str | None:
+def _worktree_roots(repo_path: str, call) -> list[Path] | None:
+    """Every worktree root that shares this repo's store, current worktree first. All
+    worktrees share one store (`store.repo_slug` keys on the main worktree), so an anchor is
+    lost only when no worktree still holds it (#428).
+
+    The set comes from `git worktree list --porcelain` through `call` (the budgeted
+    wrapper), bare entries skipped. If the list can't be read, it falls back to the current
+    worktree plus the main worktree `store.canonical_store_key` already derives; if the
+    current path is a linked worktree whose main root is unknown, it returns None, meaning
+    "a miss here can't be trusted" so the caller leaves the entry unverified."""
+    current = Path(repo_path)
+    roots = [current]
+
+    def _add(path: str) -> None:
+        candidate = Path(path)
+        if candidate not in roots and candidate.is_dir():
+            roots.append(candidate)
+
+    listed = call("worktree", "list", "--porcelain")
+    if listed:
+        for block in listed.split("\n\n"):
+            lines = block.splitlines()
+            if not lines or not lines[0].startswith("worktree ") or "bare" in lines[1:]:
+                continue
+            _add(lines[0][len("worktree "):])
+    main = store.canonical_store_key(repo_path)
+    if main != repo_path:
+        _add(main)
+    elif not listed and (current / ".git").is_file():
+        return None
+    return roots
+
+
+def _present(roots: list[Path], path: str) -> bool:
+    """True when `path` exists in any of `roots`; a trailing-slash prefix must be a directory."""
+    if path.endswith("/"):
+        return any((root / path).is_dir() for root in roots)
+    return any((root / path).exists() for root in roots)
+
+
+class _Unverifiable(Exception):
+    """Raised inside one entry's check when the worktree set is unknown: leave it untouched."""
+
+
+def _confident_rename(repo_path: str, old_path: str, roots: list[Path], call) -> str | None:
     """Best-effort git rename detection for one vanished anchor path, using `call` (the
     caller's budget-tracking wrapper around `_run_git`, which RAISES `_BudgetExceeded`
     once the run's git budget is spent rather than returning a value indistinguishable
@@ -213,7 +261,7 @@ def _confident_rename(repo_path: str, old_path: str, repo_root: Path, call) -> s
         target = _parse_rename_target(name_status, current)
         if target is None or target == current:
             return None
-        if (repo_root / target).exists():
+        if _present(roots, target):
             return target
         current = target  # this hop's target vanished too — chase it one more hop
     return None
@@ -272,6 +320,7 @@ def verify_anchors(repo_path: str, force: bool = False) -> dict:
 
             repo_root = Path(repo_path)
             calls_used = 0
+            all_roots: list[list[Path] | None] = []
 
             def _call(*args):
                 nonlocal calls_used
@@ -279,6 +328,13 @@ def verify_anchors(repo_path: str, force: bool = False) -> dict:
                     raise _BudgetExceeded
                 calls_used += 1
                 return _run_git(repo_path, *args)
+
+            def _roots() -> list[Path]:
+                if not all_roots:
+                    all_roots.append(_worktree_roots(repo_path, _call))
+                if all_roots[0] is None:
+                    raise _Unverifiable
+                return all_roots[0]
 
             now = datetime.now(timezone.utc).isoformat()
             reanchored = 0
@@ -295,17 +351,13 @@ def verify_anchors(repo_path: str, force: bool = False) -> dict:
                     missing: list[str] = []
                     renamed = False
                     for f in files:
-                        target_path = repo_root / f
-                        if f.endswith("/"):
-                            if target_path.is_dir():
-                                surviving.append(f)
-                            else:
-                                missing.append(f)
-                            continue
-                        if target_path.exists():
+                        if _present([repo_root], f) or _present(_roots(), f):
                             surviving.append(f)
                             continue
-                        target = _confident_rename(repo_path, f, repo_root, _call)
+                        if f.endswith("/"):
+                            missing.append(f)
+                            continue
+                        target = _confident_rename(repo_path, f, _roots(), _call)
                         if target is not None:
                             surviving.append(target)
                             renamed = True
@@ -367,6 +419,8 @@ def verify_anchors(repo_path: str, force: bool = False) -> dict:
                     # re-anchor. Whatever entries finished before this one keep their
                     # already-applied result.
                     break
+                except _Unverifiable:
+                    continue
 
             if changed:
                 store.save(repo_path, data)
