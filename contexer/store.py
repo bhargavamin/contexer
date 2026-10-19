@@ -1088,8 +1088,8 @@ _REASON_CLAUSE = re.compile(
 
 
 def _states_opposite_rule(content: str, entry: dict) -> bool:
-    """True when `content` reverses `entry`, judged on each rule without its trailing reason."""
-    rule = _REASON_CLAUSE.sub("", content.strip())
+    """True when `content`'s first rule reverses `entry`'s, each judged without its trailing reason."""
+    rule = _REASON_CLAUSE.sub("", (_first_sentence_of(content) or content).strip())
     statement = _REASON_CLAUSE.sub("", _decision_statement(entry).strip())
     return _is_polarity_reversal(rule, statement)
 
