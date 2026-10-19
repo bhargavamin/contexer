@@ -128,7 +128,7 @@ wheels = [
 
 [[package]]
 name = "contexer"
-version = "0.51.3"
+version = "0.52.0"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },
