@@ -163,7 +163,7 @@ class TestFastPathAndTTL:
 
         assert anchors.verify_anchors(str(repo), force=True) == {
             "reanchored": 0, "proposed": 1}
-        assert calls == []
+        assert calls == [(str(repo), "worktree", "list", "--porcelain")]
         assert "pkg/ no longer exist" in _reload(repo)["proposed_lifecycle"]["reason"]
 
     def test_prefix_replaced_by_regular_file_is_treated_as_missing(
@@ -180,7 +180,7 @@ class TestFastPathAndTTL:
 
         assert anchors.verify_anchors(str(repo), force=True) == {
             "reanchored": 0, "proposed": 1}
-        assert calls == []
+        assert calls == [(str(repo), "worktree", "list", "--porcelain")]
         assert "pkg/ no longer exist" in _reload(repo)["proposed_lifecycle"]["reason"]
 
     def test_missing_prefix_is_dropped_when_another_anchor_survives(
@@ -197,7 +197,7 @@ class TestFastPathAndTTL:
 
         assert anchors.verify_anchors(str(repo), force=True) == {
             "reanchored": 1, "proposed": 0}
-        assert calls == []
+        assert calls == [(str(repo), "worktree", "list", "--porcelain")]
         assert _reload(repo)["source_files"] == ["keep.py"]
 
 
@@ -861,3 +861,116 @@ class TestAnchorCountHasOneWriter:
         store._promote_proposal(str(repo), entry)
         assert "source_files" not in entry
         assert "source_files_total" not in entry
+
+
+# ── worktrees sharing one store (issue #428) ──────────────────────────────────
+
+class TestEveryWorktreeSharingTheStore:
+    """Every worktree of a repo shares one store, so a path counts as lost only when it is
+    missing from every worktree, never because the session's own worktree lacks it."""
+
+    @pytest.fixture
+    def linked(self, repo):
+        _write(repo, "tracked.py")
+        _git(repo, "add", "tracked.py")
+        _commit(repo)
+        wt = repo.parent / "wt"
+        _git(repo, "worktree", "add", "-q", "-b", "side", str(wt))
+        assert store.repo_slug(str(wt)) == store.repo_slug(str(repo))
+        return wt
+
+    @staticmethod
+    def _without_worktree_list(monkeypatch):
+        real = anchors._run_git
+
+        def no_worktree_list(repo_path, *args):
+            return None if args[:1] == ("worktree",) else real(repo_path, *args)
+        monkeypatch.setattr(anchors, "_run_git", no_worktree_list)
+
+    def test_file_only_in_main_is_not_lost_from_a_linked_session(self, repo, linked):
+        _write(repo, "notes/plan.md")
+        _seed_entry(repo, "Plan lives in notes/plan.md.", source_files=["notes/plan.md"])
+
+        assert anchors.verify_anchors(str(linked), force=True) == {
+            "reanchored": 0, "proposed": 0}
+        entry = _reload(repo)
+        assert entry.get("proposed_lifecycle") is None
+        assert entry["source_files"] == ["notes/plan.md"]
+
+    def test_file_only_in_linked_is_not_lost_from_a_main_session(self, repo, linked):
+        _write(linked, "scratch/local.md")
+        _seed_entry(repo, "Local notes in scratch/local.md.", source_files=["scratch/local.md"])
+
+        assert anchors.verify_anchors(str(repo), force=True) == {
+            "reanchored": 0, "proposed": 0}
+        assert _reload(repo).get("proposed_lifecycle") is None
+
+    def test_partial_loss_keeps_a_file_another_worktree_holds(self, repo, linked):
+        _write(repo, "notes/plan.md")
+        _seed_entry(repo, "Plan and gone.", source_files=["notes/plan.md", "gone.md"])
+
+        assert anchors.verify_anchors(str(linked), force=True) == {
+            "reanchored": 1, "proposed": 0}
+        assert _reload(repo)["source_files"] == ["notes/plan.md"]
+
+    def test_directory_prefix_in_another_worktree_survives(self, repo, linked):
+        _write(repo, "local_pkg/a.py")
+        _seed_entry(repo, "Decision for local_pkg.", source_files=["local_pkg/"])
+
+        assert anchors.verify_anchors(str(linked), force=True) == {
+            "reanchored": 0, "proposed": 0}
+        assert _reload(repo).get("proposed_lifecycle") is None
+
+    def test_file_missing_from_every_worktree_is_still_proposed(self, repo, linked):
+        _write(repo, "notes/plan.md")
+        _seed_entry(repo, "Plan lives in notes/plan.md.", source_files=["notes/plan.md"])
+        (repo / "notes" / "plan.md").unlink()
+
+        assert anchors.verify_anchors(str(linked), force=True) == {
+            "reanchored": 0, "proposed": 1}
+        assert "notes/plan.md no longer exist" in _reload(repo)["proposed_lifecycle"]["reason"]
+
+    def test_unreadable_worktree_list_falls_back_to_the_main_worktree(
+            self, repo, linked, monkeypatch):
+        _write(repo, "notes/plan.md")
+        _seed_entry(repo, "Plan lives in notes/plan.md.", source_files=["notes/plan.md"])
+        self._without_worktree_list(monkeypatch)
+
+        assert anchors.verify_anchors(str(linked), force=True) == {
+            "reanchored": 0, "proposed": 0}
+        assert _reload(repo).get("proposed_lifecycle") is None
+
+    def test_unreadable_worktree_list_still_proposes_a_real_loss(
+            self, repo, linked, monkeypatch):
+        _seed_entry(repo, "Plan lives in notes/plan.md.", source_files=["notes/plan.md"])
+        self._without_worktree_list(monkeypatch)
+
+        assert anchors.verify_anchors(str(linked), force=True) == {
+            "reanchored": 0, "proposed": 1}
+
+    def test_unknown_main_worktree_never_proposes(self, repo, linked, monkeypatch):
+        _seed_entry(repo, "Plan and gone.", source_files=["notes/plan.md", "tracked.py"])
+        self._without_worktree_list(monkeypatch)
+        real_slug = store.repo_slug(str(repo))
+        monkeypatch.setattr(store, "canonical_store_key", lambda path: path)
+        monkeypatch.setattr(store, "repo_slug", lambda path: real_slug)
+
+        assert anchors.verify_anchors(str(linked), force=True) == {
+            "reanchored": 0, "proposed": 0}
+        entry = _reload(repo)
+        assert entry.get("proposed_lifecycle") is None
+        assert entry["source_files"] == ["notes/plan.md", "tracked.py"]
+
+    def test_rename_in_one_worktree_does_not_rewrite_a_path_another_still_has(
+            self, repo, linked):
+        _write(repo, "old.py", "a\n")
+        _git(repo, "add", "old.py")
+        _commit(repo, "add old.py on main")
+        _seed_entry(repo, "Decision about old.py", source_files=["old.py"])
+        _git(linked, "merge", "-q", "--ff-only", store.run_git(str(repo), "rev-parse", "HEAD"))
+        _git(linked, "mv", "old.py", "new.py")
+        _commit(linked, "rename on side")
+
+        assert anchors.verify_anchors(str(linked), force=True) == {
+            "reanchored": 0, "proposed": 0}
+        assert _reload(repo)["source_files"] == ["old.py"]
