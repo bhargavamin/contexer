@@ -1083,6 +1083,12 @@ def _reverses_decision(content: str, entry: dict) -> bool:
     return not any(tokens <= _tokenize(s) for s in re.split(r"(?<=[.!?])\s+", body)[1:])
 
 
+def _states_opposite_rule(content: str, entry: dict) -> bool:
+    """True when `content` reverses `entry` and both state an explicit rule direction."""
+    polarities = (_rule_polarity(content), _rule_polarity(_decision_statement(entry)))
+    return "none" not in polarities and _reverses_decision(content, entry)
+
+
 def _decision_statement(entry: dict) -> str:
     """First sentence of an ai/plan decision's current content, else the whole content."""
     content = revisions.current_content(entry)
@@ -3938,7 +3944,7 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
         if not _is_storable(content):
             return False, None, {}
         decisions_only = [e for e in data["entries"] if e["type"] == "decision"]
-        candidates = [e for e in decisions_only if not _reverses_decision(content, e)]
+        candidates = [e for e in decisions_only if not _states_opposite_rule(content, e)]
         match = (_find_match(content, candidates)
                  or _find_statement_restatement(content, candidates))
         if match is not None:
