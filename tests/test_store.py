@@ -7900,3 +7900,108 @@ class TestScanConventionVerify:
         assert store.verify_scan_conventions(repo, force=True) == 0
         second_prop = store.load(repo)["entries"][-1]["proposed_revision"]
         assert second_prop == first_prop  # untouched, not replaced
+
+
+class TestDecisionStatementMatching:
+    """A model capture opens with its decision; later sentences (reasoning, rejected options)
+    must not set the rule's polarity or hide a terse restatement of it."""
+
+    RULE = ("Always use the injected fake_clock fixture for time in tests, because freezing "
+            "system time leaks between tests.")
+    REVERSAL = "Never use the injected fake_clock fixture for time in tests."
+
+    @pytest.mark.parametrize("rejected", [
+        "Avoid freezegun, because it patches time globally and broke parallel runs.",
+        "We don't use freezegun, because it patches time globally.",
+        "Never use a sleep-based wait, because it made the suite slow.",
+    ])
+    def test_reversal_detected_despite_prohibitive_rejected_option(self, tmp_repo, rejected):
+        stored, entry_id = store.update_decision(
+            tmp_repo, f"{self.RULE} {rejected}", "s1", "convention", created_by="ai")
+        assert stored
+        _, _, status = store.capture_user_constraint(tmp_repo, self.REVERSAL, "s2")
+        assert status == "revision_proposed"
+        (entry,) = [e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision"]
+        assert entry["id"] == entry_id
+        assert entry["proposed_revision"]["content"].startswith("Never use the injected")
+
+    def test_close_length_reversal_detected_despite_rejected_option(self, tmp_repo):
+        store.update_decision(
+            tmp_repo, "Always use the injected fake_clock fixture for time in tests. Avoid freezegun.",
+            "s1", "convention", created_by="ai")
+        _, _, status = store.capture_user_constraint(tmp_repo, self.REVERSAL, "s2")
+        assert status == "revision_proposed"
+
+    def test_reversal_with_task_is_not_recorded_as_recurrence(self, tmp_repo):
+        store.update_decision(
+            tmp_repo, "Always use the injected fake_clock fixture for time in tests. Avoid freezegun.",
+            "s1", "convention", created_by="ai")
+        _, _, status = store.capture_user_constraint(
+            tmp_repo, "Never use the injected fake_clock fixture for time in tests. "
+            "Add the scheduler test.", "s2")
+        assert status == "pending_approval"
+        rule = next(e for e in store.load(tmp_repo)["entries"] if e["created_by"] == "ai")
+        assert rule.get("occurrence_count", 1) == 1
+
+    def test_restatement_with_prohibitive_rejected_option_stays_recurrence(self, tmp_repo):
+        store.update_decision(
+            tmp_repo, f"{self.RULE} Avoid freezegun, because it patches time globally.",
+            "s1", "convention", created_by="ai")
+        _, _, status = store.capture_user_constraint(
+            tmp_repo, "Always use the injected fake_clock fixture for time in tests.", "s2")
+        assert status is None
+        (entry,) = [e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision"]
+        assert entry.get("proposed_revision") is None
+        assert entry["occurrence_count"] == 2
+
+    def test_human_entry_polarity_reads_its_whole_text(self):
+        text = "Always use pnpm for installs. Never use npm for installs."
+        assert store._decision_statement({"content": text, "created_by": "human"}) == text
+        assert store._decision_statement(
+            {"content": text, "created_by": "ai"}) == "Always use pnpm for installs."
+
+    def test_terse_restatement_of_long_ai_capture_is_recurrence(self, tmp_repo):
+        long_text = (f"{self.RULE} Rejected: freezegun, because it patches time globally and "
+                     "broke parallel runs; a sleep-based wait, because it was slow and flaky.")
+        store.update_decision(tmp_repo, long_text, "s1", "convention", created_by="ai")
+        stored, _ = store.update_decision(tmp_repo, self.RULE, "s2", "convention",
+                                          created_by="ai")
+        assert stored is False
+        (entry,) = [e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision"]
+        assert entry["occurrence_count"] == 2
+        assert "slow and flaky" in revisions.current_content(entry)
+
+    def test_richer_restatement_is_not_dropped(self, tmp_repo):
+        store.update_decision(tmp_repo, self.RULE, "s1", "convention", created_by="ai")
+        richer = (f"{self.RULE} Rejected: freezegun, because it patches time globally and "
+                  "broke parallel runs; a sleep-based wait, because it was slow and flaky.")
+        stored, _ = store.update_decision(tmp_repo, richer, "s2", "convention",
+                                          created_by="ai")
+        assert stored is True
+
+    def test_same_statement_with_different_reasoning_is_not_dropped(self, tmp_repo):
+        store.update_decision(
+            tmp_repo, f"{self.RULE} Rejected: freezegun, because it patches time globally and "
+            "broke parallel runs across the whole suite last quarter.", "s1", "convention",
+            created_by="ai")
+        stored, _ = store.update_decision(
+            tmp_repo, f"{self.RULE} Ownership moved to the platform team in October.", "s2",
+            "convention", created_by="ai")
+        assert stored is True
+
+    def test_terse_restatement_adding_one_word_is_not_dropped(self, tmp_repo):
+        long_text = (f"{self.RULE} Rejected: freezegun, because it patches time globally and "
+                     "broke parallel runs; a sleep-based wait, because it was slow and flaky.")
+        store.update_decision(tmp_repo, long_text, "s1", "convention", created_by="ai")
+        stored, _ = store.update_decision(
+            tmp_repo, "Always use the injected fake_clock fixture for time in integration tests.",
+            "s2", "convention", created_by="ai")
+        assert stored is True
+
+    def test_terse_restatement_of_human_entry_keeps_existing_matching(self, tmp_repo):
+        long_text = (f"{self.RULE} Rejected: freezegun, because it patches time globally and "
+                     "broke parallel runs; a sleep-based wait, because it was slow and flaky.")
+        store.update_decision(tmp_repo, long_text, "s1", "convention", created_by="human")
+        stored, _ = store.update_decision(tmp_repo, self.RULE, "s2", "convention",
+                                          created_by="ai")
+        assert stored is True

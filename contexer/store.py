@@ -831,6 +831,22 @@ def _find_containment(content: str, existing: list) -> dict | None:
     return best
 
 
+def _find_statement_restatement(content: str, existing: list) -> dict | None:
+    """First ai/plan entry that `content` restates more tersely, or None."""
+    statement = _tokenize(_first_sentence_of(content))
+    tokens = _tokenize(content)
+    if not statement or not tokens:
+        return None
+    for entry in existing:
+        if entry.get("created_by") not in ("ai", "plan"):
+            continue
+        if not tokens <= _tokenize(entry.get("content", "")):
+            continue
+        if _overlap_ratio(statement, _tokenize(_decision_statement(entry))) > 0.7:
+            return entry
+    return None
+
+
 _NEAR_MISS_FLOOR = 0.25
 _NEAR_MISS_CAP = 3
 
@@ -1050,6 +1066,22 @@ def _lint_section_labels(content: str) -> set[str]:
     return labels
 
 
+def _first_sentence_of(text: str) -> str:
+    """The first sentence of the first line of `text` ('' for blank text)."""
+    stripped = text.strip()
+    if not stripped:
+        return ""
+    return re.split(r"(?<=[.!?])\s", stripped.splitlines()[0], maxsplit=1)[0]
+
+
+def _decision_statement(entry: dict) -> str:
+    """First sentence of an ai/plan decision's current content, else the whole content."""
+    content = revisions.current_content(entry)
+    if entry.get("created_by") not in ("ai", "plan"):
+        return content
+    return _first_sentence_of(content) or content
+
+
 def capture_lint(content: str, created_by: str = "ai", replace_id: str = "") -> str:
     """Deterministic capture-shape gate for model-authored captures ('' = passes).
 
@@ -1065,8 +1097,7 @@ def capture_lint(content: str, created_by: str = "ai", replace_id: str = "") -> 
     text = content.strip()
     if len(text) <= _LINT_MIN_LEN:
         return ""
-    first_line = text.splitlines()[0]
-    first_sentence = re.split(r"(?<=[.!?])\s", first_line, maxsplit=1)[0]
+    first_sentence = _first_sentence_of(text)
     if _LINT_NARRATIVE_RE.match(first_sentence):
         return _LINT_BOUNCE
     if len(first_sentence.split()) > _LINT_MAX_FIRST_SENT:
@@ -2519,7 +2550,7 @@ def capture_user_constraint_with_meta(
         if review_required and not confirmation_required:
             match_candidates = [
                 entry for entry in match_candidates
-                if not _is_polarity_reversal(content, revisions.current_content(entry))]
+                if not _is_polarity_reversal(content, _decision_statement(entry))]
         # This hook fires on every prompt; a near-duplicate is normally a silent no-op (no
         # write) - EXCEPT a clean restatement of this path's own pending twin, which promotes.
         match = _find_match(content, match_candidates)
@@ -2546,7 +2577,7 @@ def capture_user_constraint_with_meta(
             # wrapper spool the repetition. Still no new entry, no status change, no
             # confidence change - repetition is not approval.
             match_content = revisions.current_content(match)
-            reversed_rule = _is_polarity_reversal(content, match_content)
+            reversed_rule = _is_polarity_reversal(content, _decision_statement(match))
             if (not review_required and entry_status(match) in ("approved", "suggested")
                     and (reversed_rule or _tokenize(match_content) < _tokenize(content))):
                 return _route_containment(repo_path, data, match, content, subtype,
@@ -2566,7 +2597,7 @@ def capture_user_constraint_with_meta(
         if hit is not None:
             return _route_containment(
                 repo_path, data, hit, content, subtype, status, session_id, source,
-                reversed_rule=_is_polarity_reversal(content, revisions.current_content(hit)))
+                reversed_rule=_is_polarity_reversal(content, _decision_statement(hit)))
         if near_misses is not None:
             near_misses.extend(_near_misses(content, match_candidates))
         entry = _new_decision_entry(content, session_id, subtype,
@@ -3898,7 +3929,8 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
         if not _is_storable(content):
             return False, None, {}
         decisions_only = [e for e in data["entries"] if e["type"] == "decision"]
-        match = _find_match(content, decisions_only)
+        match = (_find_match(content, decisions_only)
+                 or _find_statement_restatement(content, decisions_only))
         if match is not None:
             if entry_status(match) == "ignored":
                 # An INACTIVE decision restated is not a recurrence of a live rule: bumping
