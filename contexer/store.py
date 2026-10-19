@@ -1340,13 +1340,22 @@ _DIRECTIVE_OPERATION_VERBS = (
     r"approve|grant|allow|authorize|execute|apply|restart|start|stop|rerun|rebuild|"
     r"revert|reset|sync|migrate|provision|destroy|scale|configure|validate|verify"
 )
+_DECISION_LABEL = (
+    r"^(?:(?!(?:the|a|an|my|your|his|her|their|its|this|that|these|those|what|which|whose"
+    r"|any|some|no|store)\b)[a-z][\w-]*\s+){0,2}"
+    r"(?:decision|convention|constraint|policy)(?:\s+(?:for|on|about|in)\s+[^:\n]{1,60})?"
+)
+_RESTRICTIVE_ONLY = (
+    r"can\s+only"
+    r"|(?:comes?|flows?|go(?:es)?|(?:is|are)\s+(?:loaded|read|fetched))\s+only\s+(?:from|through|via)"
+)
 _CONSTRAINT_TRIGGER = re.compile(
     r"\b(?:"
     r"store\s+this\s+decision(?=\s*:)"  # explicit human capture command
     r"|"
     r"al+w(?:ay|ya)s"               # always + common typos: allways, alwyas
     r"|never"                        # never
-    r"|can\s+only"                  # plain restrictive declaration: "orders.py can only import X"
+    rf"|{_RESTRICTIVE_ONLY}"         # plain restrictive declaration: "orders.py can only import X"
     r"|must\s+(?:always|never)"      # must always / must never
     r"|should\s+(?:always|never)"    # should always / should never
     r"|at\s+all\s+times"             # at all times
@@ -1365,6 +1374,7 @@ _CONSTRAINT_TRIGGER = re.compile(
     r"|make\s+sure\s+(?:you\s+|that\s+you\s+)"  # make sure you / make sure that you
     r"|(?:make|create|add|set|establish)\s+(?:a\s+|the\s+)?rule"  # "create a rule …"
     r"|^\s*rule(?=\s*[:\-])"        # "rule: never X" / "rule - …" at the start
+    rf"|{_DECISION_LABEL}(?=\s*:\s*\S)"
     r"|do\s*n['’]?t"                # don't (prohibition)
     r"|do\s+not"                    # do not
     r"|avoid"                       # avoid
@@ -1373,7 +1383,28 @@ _CONSTRAINT_TRIGGER = re.compile(
     r")\b",
     re.IGNORECASE,
 )
-_CAN_ONLY_TRIGGER = re.compile(r"\bcan\s+only\b", re.IGNORECASE)
+_CAN_ONLY_TRIGGER = re.compile(rf"\b(?:{_RESTRICTIVE_ONLY})\b", re.IGNORECASE)
+_DECISION_LABEL_TRIGGER = re.compile(_DECISION_LABEL + r"\s*:(?=\s*\S)", re.IGNORECASE)
+_POSITIVE_POLARITY = re.compile(
+    r"\b(?:al+w(?:ay|ya)s|must(?!\s+(?:not|never)\b|n['’]t))\b", re.IGNORECASE)
+_NEGATIVE_POLARITY = re.compile(
+    r"\b(?:never|do\s*n['’]?t|do\s+not|must\s+not|mustn['’]t|should\s+not|shouldn['’]t|"
+    r"no\s+longer|avoid)\b",
+    re.IGNORECASE,
+)
+
+
+def _rule_polarity(text: str) -> str:
+    positive = bool(_POSITIVE_POLARITY.search(text))
+    negative = bool(_NEGATIVE_POLARITY.search(text))
+    if positive and negative:
+        return "mixed"
+    return "negative" if negative else "positive" if positive else "none"
+
+
+def _is_polarity_reversal(new: str, old: str) -> bool:
+    pair = {_rule_polarity(new), _rule_polarity(old)}
+    return "negative" in pair and bool(pair & {"positive", "none"})
 
 # Soft conversational prose that contains "don't/do not/avoid" but is NOT a directive:
 # "don't worry about the tests", "I don't know why", "don't hesitate to ask". These are
@@ -1518,7 +1549,13 @@ _CONVENTION_SIGNALS = re.compile(
 # the capture path keeps it but routes the ambiguity to pending review.
 # NOTE: "it should always" is NOT caught here because "should" sits between "it" and "always".
 _PERSONAL_DESCRIPTOR = re.compile(
-    r"\b(?:i|we|it)\s+(?:have\s+|has\s+|did\s+|does\s+)?(?:always|never)\b",
+    r"\b(?:i|we|it)\s+(?:"
+    r"(?:previously|historically|formerly|originally|traditionally|used\s+to)\s+"
+    r"(?:have\s+|has\s+|did\s+|does\s+)?(?:always|never)\b"
+    r"(?:(?:(?!\b(?:always|never|(?:and|or|but)\s+now|from\s+now\s+on|henceforth"
+    r"|going\s+forward)\b)[^,;:.!?\n])*?"
+    r"\b(?:and|or)\s+(?:also\s+)?(?:always|never)\b)*"
+    r"|(?:have\s+|has\s+|did\s+|does\s+)?(?:always|never)\b)",
     re.IGNORECASE,
 )
 
@@ -1631,7 +1668,12 @@ _NON_DIRECTIVE_CONTAINER = re.compile(
     r"going\s+forward\b|ensure\b|make\s+sure\b|avoid\b|prefer\b|use\b|"
     r"[^\n]{0,120}\bcan\s+only\b))"
     r"|according\s+to\s+[^,:\n]{1,80}[,:]"      # attributed statement
-    r"|(?:the\s+)?(?:README|documentation|docs?|release\s+notes?|issues?|changelog|log|output)"
+    r"|(?:please\s+)?(?:show|give|write|draft|share)\s+(?:me\s+|us\s+)?(?:an?\s+|some\s+)?"
+    r"(?:examples?|samples?)\s+of\b"
+    r"|what\s+(?:does|would)\s+an?\s+(?:[\w-]+\s+){0,2}"
+    r"(?:rule|convention|constraint|policy)\s+look\s+like\b"
+    r"|(?:(?:the|our)\s+(?:[\w'-]+\s+){0,2})?"
+    r"(?:README|documentation|docs?|release\s+notes?|issues?|changelog|log|output)"
     r"\s+(?:says?|said|states?|reads)\b"
     r"|(?:as\s+)?(?:the\s+|our\s+)?(?:README|documentation|docs?|release\s+notes?|"
     r"issues?|changelog|log|output|CI\s+(?:error|output)|lead|manager|developer|maintainer|"
@@ -1994,21 +2036,26 @@ _AMBIGUOUS_OPERATION_OBJECT = re.compile(
 
 
 def _directive_policy_text(text: str) -> str:
-    """Directive-shaped text with one-shot task clauses removed.
+    """Policy candidate, retaining uncertain implicit task extraction for review."""
+    return _directive_policy_candidate(text)[0]
 
-    A single ordinary prohibition remains eligible ("Do not log secrets").  We only discard
-    what carries an explicit task scope, or weak directive clauses embedded in a multi-action
-    request.  Strong durable clauses survive that request as independent policy text.
+
+def _directive_policy_candidate(text: str) -> tuple[str, bool]:
+    """Return policy text and whether implicit extraction needs human review.
+
+    Explicit task scope can separate lasting policy from this run's instructions.
+    Sentence shape alone cannot: a proposed removal may be a lasting requirement.
+    Keep the full candidate pending whenever that ambiguity would shorten a rule.
     """
     candidate = _directive_candidate_text(text).strip()
     if not candidate:
-        return ""
+        return "", False
     if _CONTEXER_DECISION_EDIT_COMMAND.match(candidate):
-        return ""
+        return "", False
     # Keep the existing pasted-blob refusal load-bearing: task-clause filtering must not
     # shorten an over-limit document into something that suddenly looks authoritative.
     if len(candidate) > _MAX_DIRECTIVE_LEN:
-        return candidate
+        return candidate, False
     fragments = [part.strip(" ,;") for part in re.split(
         r"(?<=[.!?])\s+|;\s*|\n+|,\s+(?:but|and)\s+|\s+but\s+", candidate,
         flags=re.IGNORECASE) if part.strip(" ,")]
@@ -2026,15 +2073,71 @@ def _directive_policy_text(text: str) -> str:
             if clauses is None:
                 # Keep the scope and the original wording: capture routes this
                 # mixed instruction to review, never to approved standing policy.
-                return candidate
+                return candidate, True
             durable.extend(clauses)
-        return ". ".join(clause for clause in durable if clause)
+        return ". ".join(clause for clause in durable if clause), False
     task_actions = sum(bool(_TASK_IMPERATIVE.search(part)) for part in fragments)
     if task_actions < 2:
-        return candidate if not _TASK_SCOPE_MARKER.search(candidate) else ""
+        extracted = _without_work_items(candidate) if not _TASK_SCOPE_MARKER.search(candidate) else ""
+        if extracted and extracted != candidate:
+            return candidate, True
+        return extracted, False
     durable = [part for part in fragments if _DURABLE_DIRECTIVE.search(part)
                and not _TASK_SCOPE_MARKER.search(part)]
-    return ". ".join(durable)
+    if (not durable and any(_CONSTRAINT_TRIGGER.search(part) for part in fragments)
+            and any(not _TASK_IMPERATIVE.search(part) and not _CONSTRAINT_TRIGGER.search(part)
+                    and not _is_work_item(part) for part in fragments)):
+        return candidate, True
+    if durable and (len(durable) < len(fragments)
+                    or any(_without_work_items(part) != part for part in durable)):
+        return candidate, True
+    return ". ".join(durable), False
+
+
+# A work-item sentence commissions this turn's change ("Add a resend command to the gateway.",
+# "Fix the date bug in the exporter."): a clause-initial build verb with an object, standing on
+# its own. Kept beside an explicit rule, it was stored and trusted as part of that rule. "add"
+# takes any object; the other verbs need a determiner.
+_WORK_ITEM_SENTENCE = re.compile(
+    r"^\s*(?:please\s+)?(?:add\s+\S"
+    r"|(?:build|implement|create|wire\s+up|write|fix|refactor|update)\s+(?:a|an|the|new|some|our)\b)",
+    re.IGNORECASE,
+)
+
+
+# A sentence that recurs ("for each one", the multi-action branch's own durability words) or
+# points back at the rule ("them", "instead") continues the rule, not this turn's work.
+_RULE_CONTINUATION = re.compile(
+    r"\b(?:every|each|them|they|those|these|instead|otherwise)\b", re.IGNORECASE)
+
+
+def _is_work_item(sentence: str) -> bool:
+    """Propose a task-shaped sentence for extraction, without deciding its meaning.
+
+    Known rule continuations and deictic references stay. Other matches may still
+    be lasting requirements; the caller retains mixed candidates for review.
+    """
+    return bool(_WORK_ITEM_SENTENCE.match(sentence)
+                and not _CONSTRAINT_TRIGGER.search(sentence)
+                and not _RULE_CONTINUATION.search(sentence)
+                and not _is_deictic(sentence))
+
+
+_COORDINATED_CLAUSE = re.compile(r",\s*(?:and\s+|then\s+)+|\s+and\s+(?:then\s+)?", re.IGNORECASE)
+
+
+def _without_work_items(candidate: str) -> str:
+    """Proposed extraction; mixed candidates must retain their original text for review."""
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+|\n+", candidate) if s.strip()]
+    kept = []
+    for sentence in sentences:
+        if _is_work_item(sentence):
+            continue
+        clauses = _COORDINATED_CLAUSE.split(sentence)
+        work = next((i for i, clause in enumerate(clauses) if i and _is_work_item(clause)), None)
+        kept.append(sentence if work is None else ", ".join(clauses[:work]))
+    stripped = " ".join(s.strip() for s in kept)
+    return stripped if stripped != " ".join(s.strip() for s in sentences) else candidate
 
 
 def _independent_lasting_clauses(part: str) -> list[str] | None:
@@ -2292,8 +2395,8 @@ def capture_user_constraint_with_meta(
 ) -> tuple:
     """Called on every UserPromptSubmit. Detects prescriptive 'always/never/from now on' directives
     and stores them as decisions. A directive whose scope or authority is ambiguous is stored
-    but NOT auto-trusted: deictic referents (see _is_deictic), arbitrary speaker labels, and a
-    bare ``X can only Y`` declaration land pending_approval so the developer can generalize,
+    but NOT auto-trusted: uncertain implicit task extraction, deictic referents (see _is_deictic),
+    arbitrary speaker labels, and a bare ``X can only Y`` declaration land pending_approval so the developer can generalize,
     approve, or discard them via review_pending.
 
     A clean restatement that no longer requires review and matches - via the standard >70%
@@ -2335,6 +2438,7 @@ def capture_user_constraint_with_meta(
     reason: only the caller knows which host prompt hook it came from.
     """
     lifecycle_revision = prompt_capture.environment_lifecycle_revision(prompt)
+    policy_content, ambiguous_extraction = _directive_policy_candidate(prompt)
     is_constraint, subtype = _is_prescriptive_constraint(prompt)
     if lifecycle_revision is not None:
         subtype = "constraint"
@@ -2349,7 +2453,13 @@ def capture_user_constraint_with_meta(
         content = scope_candidate[:600]
     else:
         confirmation_required = False
-        content = _sanitize_directive(_directive_policy_text(prompt).strip())[:600]
+        if ambiguous_extraction:
+            # Review must expose the retained candidate, including rationale and later
+            # requirements. The semantic sanitizer can delete everything after a filler
+            # connector such as "because this", weakening even a pending decision.
+            content = revisions.normalize_content(policy_content).rstrip("!?,. ")[:600]
+        else:
+            content = _sanitize_directive(policy_content.strip())[:600]
     if not _is_storable(content):
         return None, None, None, {}
     deictic = _is_deictic(content) or bool(_TASK_SCOPE_MARKER.search(content))
@@ -2362,12 +2472,18 @@ def capture_user_constraint_with_meta(
     # Capture it rather than miss it, but never mint trusted human policy from that phrase
     # alone. A second independent directive signal or an explicit authority label is enough
     # to make the developer's normative intent unambiguous.
+    without_weak_signals = _CAN_ONLY_TRIGGER.sub(
+        "", _DECISION_LABEL_TRIGGER.sub("", content)).strip()
     bare_can_only = bool(_CAN_ONLY_TRIGGER.search(content)) and not (
-        _CONSTRAINT_TRIGGER.search(_CAN_ONLY_TRIGGER.sub("", content))
+        _is_prescriptive_constraint(without_weak_signals)[0]
         or _EXPLICIT_AUTHORITY_LABEL.search(content)
     )
+    bare_decision_label = (bool(_DECISION_LABEL_TRIGGER.search(content))
+                           and not _CAN_ONLY_TRIGGER.search(content)
+                           and not _is_prescriptive_constraint(without_weak_signals)[0])
     status = ("confirmation_required" if confirmation_required else
-              "pending_approval" if deictic or ambiguous_label or bare_can_only else "approved")
+              "pending_approval" if (ambiguous_extraction or deictic or ambiguous_label
+                                     or bare_can_only or bare_decision_label) else "approved")
     review_required = status != "approved"
     entry_status_value = "pending_approval" if review_required else "approved"
     with store_lock(repo_slug(repo_path), blocking=blocking):
@@ -2400,6 +2516,10 @@ def capture_user_constraint_with_meta(
         # candidate. Letting it fall through ordinary overlap/containment routing would undo
         # the lifecycle target gate and could attach the correction to one arbitrary candidate.
         match_candidates = [] if lifecycle_revision is not None else decisions_only
+        if review_required and not confirmation_required:
+            match_candidates = [
+                entry for entry in match_candidates
+                if not _is_polarity_reversal(content, revisions.current_content(entry))]
         # This hook fires on every prompt; a near-duplicate is normally a silent no-op (no
         # write) - EXCEPT a clean restatement of this path's own pending twin, which promotes.
         match = _find_match(content, match_candidates)
@@ -2425,6 +2545,13 @@ def capture_user_constraint_with_meta(
             # sessions are the corroboration a reviewer reads, and the meta lets the evidence
             # wrapper spool the repetition. Still no new entry, no status change, no
             # confidence change - repetition is not approval.
+            match_content = revisions.current_content(match)
+            reversed_rule = _is_polarity_reversal(content, match_content)
+            if (not review_required and entry_status(match) in ("approved", "suggested")
+                    and (reversed_rule or _tokenize(match_content) < _tokenize(content))):
+                return _route_containment(repo_path, data, match, content, subtype,
+                                          status, session_id, source,
+                                          reversed_rule=reversed_rule)
             matched = _match_overlap(content, match)
             _record_recurrence(match, session_id, source=source, overlap=matched)
             save(repo_path, data)
@@ -2437,8 +2564,9 @@ def capture_user_constraint_with_meta(
         # instead of accumulating a new overlapping one.
         hit = _find_containment(content, match_candidates)
         if hit is not None:
-            return _route_containment(repo_path, data, hit, content, subtype,
-                                      status, session_id, source)
+            return _route_containment(
+                repo_path, data, hit, content, subtype, status, session_id, source,
+                reversed_rule=_is_polarity_reversal(content, revisions.current_content(hit)))
         if near_misses is not None:
             near_misses.extend(_near_misses(content, match_candidates))
         entry = _new_decision_entry(content, session_id, subtype,
@@ -2478,7 +2606,8 @@ def capture_user_constraint_with_meta(
 
 
 def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subtype: str,
-                       capture_status: str, session_id: str, source: str = "") -> tuple:
+                       capture_status: str, session_id: str, source: str = "", *,
+                       reversed_rule: bool = False) -> tuple:
     """Route a containment hit from capture_user_constraint onto the matched entry `hit`.
     Called under the store lock; saves and returns the capture 4-tuple (see
     capture_user_constraint_with_meta - the recurrence branches carry the meta that lets a
@@ -2525,7 +2654,7 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
     if confirmation_required and pending:
         return hit["id"], content, "confirmation_conflict", {}
 
-    if longer:
+    if longer or reversed_rule:
         if pending_twin:
             if review_required:
                 # Pre-approval amend precedent: rewrite v1 in place, stays pending.
@@ -2553,6 +2682,8 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
             return hit["id"], revisions.current_content(hit), "promoted", {}
         if pending:
             return _recurred()  # never propose on an unreviewed base
+        if review_required and not confirmation_required:
+            return _recurred()
         norm = content if confirmation_required else revisions.normalize_content(content)
         prop = hit.get("proposed_revision")
         displaced = False
@@ -2621,6 +2752,11 @@ def constraint_ack(content: str, status: str, entry_id: str = "",
     between hosts. `entry_id` names the touched entry (used by revision_proposed);
     `near_misses` (from capture_user_constraint's out-list) appends a consolidation hint
     for grey-zone lexical matches on a brand-new entry."""
+    recorded_note = (
+        f" This rule is already recorded in Contexer (id={entry_id[:8]}): do not save it "
+        "again with update_context. To refine its wording or reasoning, call update_context "
+        f'with replace_id="{entry_id[:8]}".'
+    ) if entry_id else ""
     near_note = ""
     if near_misses:
         near_note = (
@@ -2636,7 +2772,7 @@ def constraint_ack(content: str, status: str, entry_id: str = "",
             "so it is not yet trusted. Briefly tell "
             "the developer it was stored pending review. Do NOT approve it yourself; only the "
             "developer decides (they can run `contexer review`, or ask you to show it via "
-            "review_pending)." + near_note
+            "review_pending)." + recorded_note + near_note
         )
     if status == "confirmation_required":
         return (
@@ -2658,7 +2794,7 @@ def constraint_ack(content: str, status: str, entry_id: str = "",
     if status == "promoted":
         return (
             f"Your restated rule replaced the pending one - '{content}' is now active. "
-            "Acknowledge this briefly to the user."
+            "Acknowledge this briefly to the user." + recorded_note
         )
     if status == "revision_proposed":
         return (
@@ -2666,7 +2802,7 @@ def constraint_ack(content: str, status: str, entry_id: str = "",
             "The current rule stays active until it is reviewed. Briefly tell the developer "
             "a suggested update to that rule is pending their review. Do NOT approve it "
             "yourself; only the developer decides (they can run `contexer review`, or ask "
-            "you to show it via review_pending)."
+            "you to show it via review_pending)." + recorded_note
         )
     if status == "revision_already_pending":
         return (
@@ -2678,7 +2814,7 @@ def constraint_ack(content: str, status: str, entry_id: str = "",
     return (
         f"Auto-stored as constraint: '{content}'. "
         "Acknowledge this briefly to the user - e.g. 'Stored as a constraint in Contexer.'"
-        + near_note
+        + recorded_note + near_note
     )
 
 

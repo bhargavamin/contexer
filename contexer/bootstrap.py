@@ -491,7 +491,11 @@ def validate_findings(scan: dict, findings: list[dict]) -> list[dict]:
         candidate_id = row.get("candidate_id", "")
         if candidate_id:
             if candidate_id not in candidates:
-                raise ValueError("Unknown document candidate")
+                known = ", ".join(sorted(candidates)[:10]) or "none in this scan"
+                raise ValueError(
+                    f"Unknown document candidate: candidate_id must be one of this scan's "
+                    f"candidates ({known}). For a code-only finding, leave candidate_id out "
+                    f"and set topic to a lowercase slug such as 'delivery-path'")
             if row["kind"] != "inferred":
                 raise ValueError("A documented prescription is inferred guidance, not an observed fact")
             key = "doc:" + candidate_id
@@ -501,7 +505,10 @@ def validate_findings(scan: dict, findings: list[dict]) -> list[dict]:
         else:
             topic = row.get("topic")
             if not isinstance(topic, str) or not re.fullmatch(r"[a-z0-9-]{1,80}", topic):
-                raise ValueError("Code finding needs a stable lowercase topic")
+                raise ValueError(
+                    "Code finding needs a stable lowercase topic: set the topic field to a "
+                    "slug of lowercase letters, digits and hyphens (at most 80), such as "
+                    "'delivery-path'. candidate_id is only for this scan's document candidates")
             key = "code:" + topic + ":" + row["scope"]
         if key in keys:
             raise ValueError("Duplicate finding in batch")

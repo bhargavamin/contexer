@@ -750,7 +750,9 @@ def install(home: Path) -> list[str]:
         "if [ -f \"$FLAG\" ]; then "
         "rm -f \"$FLAG\" 2>/dev/null || true; "
         "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"UserPromptSubmit\", "
-        "\"additionalContext\": \"Contexer: last turn settled - reconcile decisions before continuing. "
+        "\"additionalContext\": \"Contexer: last turn settled - reconcile decisions before continuing, "
+        "but only if the Contexer MCP tools (update_context, approve_decision) are available in "
+        "this session; if they are not, ignore this note. "
         "(1) NEW decisions that STUCK: call update_context with the full reasoning. "
         "(2) A PROVISIONAL decision from earlier this session (e.g. from an approved plan) that HELD: "
         "approve it; that CHANGED during implementation: call update_context with the new value "
@@ -770,7 +772,8 @@ def install(home: Path) -> list[str]:
     # (created_by=plan -> suggested, never authoritative) and reconciled at the next prompt's anchor.
     plan_cmd = (
         "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"PostToolUse\", "
-        "\"additionalContext\": \"Contexer: plan approved. Capture each key decision in the plan now "
+        "\"additionalContext\": \"Contexer: plan approved. If the Contexer MCP tools are available "
+        "in this session (otherwise ignore this note), capture each key decision in the plan now "
         "via update_context with created_by=plan - architecture choices, constraints, conventions, "
         "including the REASONING not just the conclusion. They are stored as PROVISIONAL (suggested), "
         "not authoritative, until implementation validates them; you will reconcile them (approve / "

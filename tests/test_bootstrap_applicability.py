@@ -426,3 +426,40 @@ def test_bootstrap_metadata_and_caveats_do_not_enter_share_projection(project):
     projected = store.get_shareable(str(project), did)
     assert projected and sentinel not in json.dumps(projected)
     assert sentinel not in json.dumps(share._payload(projected, "local-fixture"))
+
+
+def _code_finding(project, **extra):
+    row = {"content": "Charges and their outbox email are written in one transaction.",
+           "kind": "observed", "subtype": "architecture", "scope": "billing service",
+           "assessment": "supported", "reason": "Read in billing.py",
+           "sources": [fixtures.ref(project, "billing.py", 2, 4, "implementation")]}
+    row.update(extra)
+    return row
+
+
+def test_code_finding_without_topic_names_the_topic_field(project):
+    scan = bootstrap.run(str(project), "test")
+    with pytest.raises(ValueError, match="set the topic field") as error:
+        finish(project, scan, [_code_finding(project)])
+    assert "candidate_id is only for this scan's document candidates" in str(error.value)
+
+
+def test_unknown_candidate_says_to_use_topic_for_code_findings(project):
+    scan = bootstrap.run(str(project), "test")
+    with pytest.raises(ValueError, match="Unknown document candidate") as error:
+        finish(project, scan, [_code_finding(project, candidate_id="billing-transaction")])
+    assert "none in this scan" in str(error.value)
+    assert "leave candidate_id out and set topic" in str(error.value)
+
+
+def test_unknown_candidate_lists_this_scans_candidates(project):
+    scan = scan_rule(project)
+    with pytest.raises(ValueError, match="Unknown document candidate") as error:
+        finish(project, scan, [{**finding(project, scan), "candidate_id": "invented"}])
+    assert scan["candidates"][0]["candidate_id"] in str(error.value)
+
+
+def test_code_finding_with_topic_is_accepted(project):
+    scan = bootstrap.run(str(project), "test")
+    receipt = finish(project, scan, [_code_finding(project, topic="billing-transaction")])
+    assert receipt["stage"] == "reported_complete"

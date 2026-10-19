@@ -58,3 +58,6 @@ CLAUDE.local.md
 # Written by Claude Code into a loaded mod folder (editor types); never source.
 contexer/claude_mod/.claude-plugin/types/
 contexer/claude_mod/tsconfig.json
+
+# Archify diagram workspaces (sources and renders); published SVGs live in assets/diagrams/
+.archify/

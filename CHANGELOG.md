@@ -1,5 +1,57 @@
 # Changelog
 
+## [0.52.0](https://github.com/bhargavamin/contexer/compare/v0.51.3...v0.52.0) (2026-10-18)
+
+
+### Features
+
+* **capture:** hold labelled decisions without a trigger word for review ([#413](https://github.com/bhargavamin/contexer/issues/413)) ([84dff87](https://github.com/bhargavamin/contexer/commit/84dff875d4820a2b8c1cca9b22eca4e72abf1f37))
+
+
+### Bug Fixes
+
+* **bootstrap:** name the expected field when a finding is rejected ([#424](https://github.com/bhargavamin/contexer/issues/424)) ([3cff5f7](https://github.com/bhargavamin/contexer/commit/3cff5f793c9989d83fcb53e6f9e00b5fbc54ddea))
+* **capture:** hold "X comes only from Y" declarations for review ([#423](https://github.com/bhargavamin/contexer/issues/423)) ([540f70d](https://github.com/bhargavamin/contexer/commit/540f70d99986f918061530fc1f60d41d6cb2785a))
+* **capture:** hold a reversed restatement of a trusted rule for review ([#419](https://github.com/bhargavamin/contexer/issues/419)) ([dcbaeaa](https://github.com/bhargavamin/contexer/commit/dcbaeaaec930482e38af15f24da1fabead4d9712))
+* **capture:** hold a rule joined to a task by "and" or "then" for review ([#421](https://github.com/bhargavamin/contexer/issues/421)) ([51f7612](https://github.com/bhargavamin/contexer/commit/51f761263c71a12c01edd5abb38ab8cab6ddffe7))
+* **capture:** keep a reasoned prohibition beside a task for review ([#422](https://github.com/bhargavamin/contexer/issues/422)) ([c7e4a44](https://github.com/bhargavamin/contexer/commit/c7e4a444474ed483049442d0901f40b888619472))
+* **capture:** tell the agent a hook-captured rule is already recorded ([#420](https://github.com/bhargavamin/contexer/issues/420)) ([03ed4d2](https://github.com/bhargavamin/contexer/commit/03ed4d2bf8c0da4541fd8a3cc5a9b3789e2becfc))
+* **capture:** turn an amended restatement of a trusted rule into a Suggested Update ([#416](https://github.com/bhargavamin/contexer/issues/416)) ([dd92550](https://github.com/bhargavamin/contexer/commit/dd925509eb56dd8187fe09663f74f09b9ebe4f63))
+
+
+### Documentation
+
+* note that labelled decisions are recorded for review ([#415](https://github.com/bhargavamin/contexer/issues/415)) ([51b7550](https://github.com/bhargavamin/contexer/commit/51b7550e3600b810878b3e646bd1d7509dbe51df))
+
+## [0.51.3](https://github.com/bhargavamin/contexer/compare/v0.51.2...v0.51.3) (2026-10-18)
+
+
+### Bug Fixes
+
+* **capture:** drop the whole past-habit clause, not just its first trigger ([#412](https://github.com/bhargavamin/contexer/issues/412)) ([7e7a9ce](https://github.com/bhargavamin/contexer/commit/7e7a9ce3a4aecc7eaafd341a50747b90e60af781))
+* **capture:** treat modified document sources as attributed statements ([#408](https://github.com/bhargavamin/contexer/issues/408)) ([4d6d93d](https://github.com/bhargavamin/contexer/commit/4d6d93d40ce88963fa629cb2bb002aca5c1b1427))
+* **capture:** treat past-habit descriptions as non-directive ([#411](https://github.com/bhargavamin/contexer/issues/411)) ([e410a3b](https://github.com/bhargavamin/contexer/commit/e410a3bdd4f1d00d8758c0e72e44ba2072ad3c0e))
+* **capture:** treat requests for an example rule as non-directive ([#410](https://github.com/bhargavamin/contexer/issues/410)) ([458692c](https://github.com/bhargavamin/contexer/commit/458692cecd62fbddf613f53d5062517017846ce8))
+
+## [0.51.2](https://github.com/bhargavamin/contexer/compare/v0.51.1...v0.51.2) (2026-10-17)
+
+
+### Bug Fixes
+
+* **capture:** retain ambiguous mixed rules for review ([#406](https://github.com/bhargavamin/contexer/issues/406)) ([dfd99ec](https://github.com/bhargavamin/contexer/commit/dfd99ec55b81ce0551d64c97668fbc24e9133e48))
+
+## [0.51.1](https://github.com/bhargavamin/contexer/compare/v0.51.0...v0.51.1) (2026-10-11)
+
+
+### Bug Fixes
+
+* **mcp:** keep capture tool description within host limit ([#405](https://github.com/bhargavamin/contexer/issues/405)) ([63fba85](https://github.com/bhargavamin/contexer/commit/63fba8515de40ace86f8f271a4c3c261a2760f17))
+
+
+### Documentation
+
+* add prompt capture and retrieval diagrams ([#402](https://github.com/bhargavamin/contexer/issues/402)) ([74e1226](https://github.com/bhargavamin/contexer/commit/74e1226c00c01b498addea9f384e11a83473cada))
+
 ## [0.51.0](https://github.com/bhargavamin/contexer/compare/v0.50.1...v0.51.0) (2026-10-09)
 
 

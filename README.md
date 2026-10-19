@@ -136,6 +136,10 @@ Store that decision, including why we rejected the other option.
 Store that globally: use conventional commits across my projects.
 ```
 
+<p align="center">
+  <img src="assets/diagrams/how-contexer-keeps-decisions.svg" alt="How Contexer keeps your decisions: each message starts two helpers. One looks up the decisions that match and hands up to 3 to the AI; the other spots rules like always or never, checks whether they are clear and new, and records them for you to approve." width="900">
+</p>
+
 Deep dive: **[how it works](docs/how-it-works.md)** · **[day-to-day usage & CLI](docs/usage.md)**
 
 ### Review and trust

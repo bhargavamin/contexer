@@ -63,6 +63,8 @@ Ask which decisions govern a specific file (or files) and Contexer returns only 
 
 ## Review pending decisions
 
+Contexer can hold a mixed message pending when it cannot safely separate a standing rule from a possible temporary instruction. For example, `Always hash passwords. Write the hash with argon2id.` keeps both sentences, so the algorithm requirement survives. Review or edit the candidate to state the lasting rule clearly; it stays out of active context and team proposals until approved. A separately stated rule beside an explicit `For this task, ...` instruction can still be captured on its own.
+
 AI-proposed architecture and constraint decisions — and any change to a decision you have already approved — are held for your review instead of being trusted automatically. They are stored, but not replayed into AI sessions until you approve them. Review them whenever you like:
 
 ```bash

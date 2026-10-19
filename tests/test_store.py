@@ -2,6 +2,7 @@
 import contextlib
 import json
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -773,6 +774,86 @@ class TestIsPrescriptiveConstraint:
         is_c, _ = store._is_prescriptive_constraint("it always worked before the last deployment")
         assert is_c is False
 
+    @pytest.mark.parametrize("text", [
+        "We previously always used Redis for queues, but that pattern is deprecated now.",
+        "We used to always deploy on Fridays; we stopped that.",
+        "We historically never squashed commits, but that changed last year.",
+        "I previously always ran the formatter by hand.",
+        "it formerly never retried failed jobs",
+        "We previously always used Redis and never used RabbitMQ.",
+        "We used to always deploy on Fridays and never ran the smoke tests.",
+        "I previously never pinned versions or always rebased by hand.",
+        "We previously always used Redis instead of Kafka and never used RabbitMQ.",
+        "We previously always used the now deprecated Redis client and never used RabbitMQ.",
+    ])
+    def test_personal_past_habit_excluded(self, text):
+        is_c, _ = store._is_prescriptive_constraint(text)
+        assert is_c is False
+
+    @pytest.mark.parametrize("text", [
+        "We previously always used Redis for queues, but from now on always use the outbox table.",
+        "We used to always deploy on Fridays. Never deploy on Fridays from now on.",
+        "We previously always used Redis, but from now on never use it for queues.",
+        "We previously always used Redis and from now on always use the outbox table.",
+        "We always use Redis and never use RabbitMQ.",
+        "We previously always used Redis and from now on always use PostgreSQL and never use RabbitMQ.",
+        "We previously always used Redis and from now on use PostgreSQL and never use RabbitMQ.",
+        "We previously always used Redis and must always use PostgreSQL and never use RabbitMQ.",
+        "We previously always used Redis and going forward never use RabbitMQ.",
+        "We used to always deploy on Fridays and now never deploy on Fridays.",
+        "We used to always deploy on Fridays and now use PostgreSQL and never use RabbitMQ.",
+        "We used to always deploy on Fridays but now never deploy on Fridays.",
+        "Always use the outbox table for queues.",
+    ])
+    def test_rule_beside_past_habit_is_prescriptive(self, text):
+        is_c, _ = store._is_prescriptive_constraint(text)
+        assert is_c is True
+
+    @pytest.mark.parametrize("text", [
+        "Decision for scheduled sends: use the outbox table, not in-process timers.",
+        "Template convention: variables are snake_case and must be declared in the front matter.",
+        "Policy: all public endpoints require an API key.",
+        "Constraint: the billing service owns the invoices table.",
+        "Our policy on refunds: customers get 30 days.",
+    ])
+    def test_decision_label_is_prescriptive(self, text):
+        is_c, _ = store._is_prescriptive_constraint(text)
+        assert is_c is True
+
+    @pytest.mark.parametrize("text", [
+        "The decision: we went with Postgres last year.",
+        "My decision: I'll take the afternoon off.",
+        "What was the decision: did we pick Postgres?",
+        "Please read the policy: it's in docs/policy.md",
+        "We made a decision: Postgres.",
+        "Decision: ?",
+    ])
+    def test_non_label_decision_mention_excluded(self, text):
+        is_c, _ = store._is_prescriptive_constraint(text)
+        assert is_c is False
+
+    @pytest.mark.parametrize("new, old", [
+        ("Never use uv for Python tooling.", "Always use uv for Python tooling"),
+        ("Always squash merge pull requests.", "Do not squash merge pull requests"),
+        ("From now on never use uv.", "From now on use uv"),
+        ("You must not deploy on Fridays.", "You must deploy on Fridays"),
+        ("You must always deploy directly to production.",
+         "You must never deploy directly to production"),
+        ("You must never deploy directly to production.",
+         "You must always deploy directly to production"),
+    ])
+    def test_polarity_reversal_detected(self, new, old):
+        assert store._is_polarity_reversal(new, old) is True
+
+    @pytest.mark.parametrize("new, old", [
+        ("Always use uv for Python tooling.", "Always use uv for Python tooling"),
+        ("Avoid logging secrets.", "Never log secrets"),
+        ("Never use uv for Python tooling.", "Always use uv, never pip, for Python tooling"),
+        ("Never log secrets, always mask them.", "Never log secrets"),
+    ])
+    def test_same_or_mixed_polarity_is_not_reversal(self, new, old):
+        assert store._is_polarity_reversal(new, old) is False
+
     def test_it_should_always_is_prescriptive(self):
         # "should" sits between "it" and "always" so the personal descriptor does not strip it
         is_c, subtype = store._is_prescriptive_constraint("it should always return 200 for the health endpoint")
@@ -865,6 +946,49 @@ class TestIsPrescriptiveConstraint:
     def test_explicit_local_scope_is_ignored(self, tmp_repo, prompt):
         assert store.capture_user_constraint(tmp_repo, prompt, "s1") == (None, None, None)
         assert store.load(tmp_repo)["entries"] == []
+
+    def test_reversed_rule_is_proposed_not_counted_as_repeat(self, tmp_repo):
+        store.capture_user_constraint(tmp_repo, "Always use uv for Python tooling.", "s1")
+        _, _, status = store.capture_user_constraint(
+            tmp_repo, "Never use uv for Python tooling.", "s2")
+        assert status == "revision_proposed"
+        [rule] = [e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision"]
+        assert revisions.current_content(rule) == "Always use uv for Python tooling"
+        assert rule["proposed_revision"]["content"] == "Never use uv for Python tooling"
+        assert rule.get("occurrence_count", 1) == 1
+
+    @pytest.mark.parametrize("rule_text, reversal_text", [
+        ("Always run migrations inside a transaction.",
+         "Never run migrations inside a transaction. Add a migration for invoices."),
+        ("Always run database migrations inside a single transaction so a failed step rolls "
+         "back cleanly.",
+         "Never run database migrations inside a single transaction so a failed step rolls "
+         "back cleanly. Add the invoices migration."),
+    ])
+    def test_reversed_rule_with_task_leaves_trusted_rule_untouched(
+            self, tmp_repo, rule_text, reversal_text):
+        store.capture_user_constraint(tmp_repo, rule_text, "s1")
+        _, _, status = store.capture_user_constraint(tmp_repo, reversal_text, "s2")
+        assert status == "pending_approval"
+        rule, reversal = [e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision"]
+        assert rule["status"] == "approved"
+        assert revisions.current_content(rule) == rule_text.rstrip(".")
+        assert rule.get("proposed_revision") is None
+        assert rule.get("occurrence_count", 1) == 1
+        assert reversal["status"] == "pending_approval"
+
+    def test_repeated_reversal_with_task_reuses_its_pending_entry(self, tmp_repo):
+        rule_text = ("Always run database migrations inside a single transaction so a failed "
+                     "step rolls back cleanly.")
+        reversal_text = ("Never run database migrations inside a single transaction so a failed "
+                         "step rolls back cleanly. Add the invoices migration.")
+        store.capture_user_constraint(tmp_repo, rule_text, "s1")
+        store.capture_user_constraint(tmp_repo, reversal_text, "s2")
+        store.capture_user_constraint(tmp_repo, reversal_text, "s3")
+        rule, reversal = [e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision"]
+        assert rule.get("occurrence_count", 1) == 1
+        assert reversal["status"] == "pending_approval"
+        assert reversal["occurrence_count"] == 2
 
     def test_durable_environment_rule_still_stores(self, tmp_repo):
         entry_id, content, status = store.capture_user_constraint(
@@ -1525,6 +1649,42 @@ class TestEnvironmentLifecycleRevision:
 
         assert "reusable operational context" in ack
         assert "reusable deployment constraint" not in ack
+
+
+class TestCaptureAckAlreadyRecorded:
+    """The hook's ack names the recorded entry so the agent refines it via replace_id
+    instead of saving a reworded duplicate through update_context."""
+
+    @pytest.mark.parametrize("status", [
+        "approved", "pending_approval", "promoted", "revision_proposed"])
+    def test_recorded_entry_ack_points_to_replace_id(self, status):
+        ack = store.constraint_ack("Always use uv", status, "0123456789abcdef")
+        assert "already recorded in Contexer (id=01234567)" in ack
+        assert 'replace_id="01234567"' in ack
+
+    @pytest.mark.parametrize("status", [
+        "confirmation_required", "confirmation_conflict", "revision_already_pending"])
+    def test_unrecorded_or_unconfirmed_ack_has_no_replace_hint(self, status):
+        ack = store.constraint_ack("Always use uv", status, "0123456789abcdef")
+        assert "replace_id" not in ack
+
+    def test_no_entry_id_means_no_hint(self):
+        assert "replace_id" not in store.constraint_ack("Always use uv", "approved", "")
+
+    def test_following_the_hint_refines_instead_of_duplicating(self, tmp_repo):
+        entry_id, content, status = store.capture_user_constraint(
+            tmp_repo, "Always write the idempotency key to the store before calling a provider.",
+            "s1")
+        ack = store.constraint_ack(content, status, entry_id)
+        hinted = re.search(r'replace_id="([0-9a-f]{8})"', ack).group(1)
+        store.update_decision(
+            tmp_repo, "Always persist a message's idempotency key before calling a provider, "
+            "so redelivered messages are detected and skipped.", "s1",
+            subtype="constraint", created_by="ai", replace_id=hinted)
+        decisions = [e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision"]
+        assert len(decisions) == 1
+        assert decisions[0]["id"] == entry_id
+        assert decisions[0]["proposed_revision"]["source"] == "ai"
 
 
 class TestConstraintNoiseGuards:
@@ -3600,8 +3760,10 @@ class TestTaskScopedDirectiveCapture:
 
         entry_id, content, status = store.capture_user_constraint(tmp_repo, prompt, "s1")
 
-        assert entry_id and status == "approved"
-        assert content == "Always use Conventional Commits"
+        # Implicit sibling actions might qualify the rule. The owner-approved
+        # extraction contract retains them for review rather than trusting a slice.
+        assert entry_id and status == "pending_approval"
+        assert content == prompt.rstrip(".")
 
     @pytest.mark.parametrize("prompt", [
         "Never log raw customer emails.",
