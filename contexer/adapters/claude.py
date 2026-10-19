@@ -55,11 +55,14 @@ _ANCHOR_GUARD = 'rm -f "$FLAG" 2>/dev/null'
 # session's id into the flag, and only a prompt from that same session consumes it: the flag
 # is one global file, so a new session would otherwise inherit an earlier session's reminder.
 # An empty flag (written by an older post_write, or by a host that sends no session id)
-# keeps the old fire-on-any-prompt behaviour.
+# keeps the old fire-on-any-prompt behaviour. The match is on the payload's own
+# "session_id" key with whitespace removed; quotes inside prompt text arrive escaped, so a
+# prompt that merely contains an id cannot match.
 _SETTLE_GATE = (
-    'FLAG="$HOME/.contexer/.pending_capture"; IN=$(cat); SID=$(cat "$FLAG" 2>/dev/null); '
+    'FLAG="$HOME/.contexer/.pending_capture"; IN=$(tr -d "[:space:]"); '
+    'SID=$(cat "$FLAG" 2>/dev/null); '
     'if [ -f "$FLAG" ] && { [ -z "$SID" ] || '
-    'case "$IN" in *"\\"$SID\\""*) true;; *) false;; esac; }; then '
+    'case "$IN" in *"\\"session_id\\":\\"$SID\\""*) true;; *) false;; esac; }; then '
 )
 _SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
@@ -424,7 +427,7 @@ def post_write(repo_path: str, raw: str) -> str:
             store.ensure_store_dir()
             sid = store.session_from_hook_stdin(raw)
             sid = sid if isinstance(sid, str) and _SESSION_ID.fullmatch(sid) else ""
-            store.sidecar_path("pending_capture").write_text(sid, encoding="utf-8")
+            store.atomic_write(store.sidecar_path("pending_capture"), sid)
         except OSError:
             pass
         # Shadow-mode evidence, emitted LAST so neither existing signal above can be
