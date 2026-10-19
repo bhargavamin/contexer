@@ -1083,10 +1083,15 @@ def _reverses_decision(content: str, entry: dict) -> bool:
     return not any(tokens <= _tokenize(s) for s in re.split(r"(?<=[.!?])\s+", body)[1:])
 
 
+_REASON_CLAUSE = re.compile(
+    r"[,;]?\s+(?:because|since|so that|to avoid|to prevent|in order to)\b.*$", re.IGNORECASE | re.DOTALL)
+
+
 def _states_opposite_rule(content: str, entry: dict) -> bool:
-    """True when `content` reverses `entry` and both state an explicit rule direction."""
-    polarities = (_rule_polarity(content), _rule_polarity(_decision_statement(entry)))
-    return "none" not in polarities and _reverses_decision(content, entry)
+    """True when `content` reverses `entry`, judged on each rule without its trailing reason."""
+    rule = _REASON_CLAUSE.sub("", content.strip())
+    statement = _REASON_CLAUSE.sub("", _decision_statement(entry).strip())
+    return _is_polarity_reversal(rule, statement)
 
 
 def _decision_statement(entry: dict) -> str:
