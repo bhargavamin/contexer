@@ -51,6 +51,21 @@ _HOOK_SENTINEL = "contexer-managed-hook"
 # anchor hook that still writes ~/.contexer unguarded. Also shared with the Codex adapter.
 _ANCHOR_GUARD = 'rm -f "$FLAG" 2>/dev/null'
 
+# The settle reminder's gate, shared with the Codex adapter. post_write writes the editing
+# session's id into the flag, and only a prompt from that same session consumes it: the flag
+# is one global file, so a new session would otherwise inherit an earlier session's reminder.
+# An empty flag (written by an older post_write, or by a host that sends no session id)
+# keeps the old fire-on-any-prompt behaviour. The match is on the payload's own
+# "session_id" key with whitespace removed; quotes inside prompt text arrive escaped, so a
+# prompt that merely contains an id cannot match.
+_SETTLE_GATE = (
+    'FLAG="$HOME/.contexer/.pending_capture"; IN=$(tr -d "[:space:]"); '
+    'SID=$(cat "$FLAG" 2>/dev/null); '
+    'if [ -f "$FLAG" ] && { [ -z "$SID" ] || '
+    'case "$IN" in *"\\"session_id\\":\\"$SID\\""*) true;; *) false;; esac; }; then '
+)
+_SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
 # Fingerprints of hooks the pre-CLI from-source installer (scripts/install.sh, June 2026)
 # wrote into a REPO's .claude/settings.json — before hooks went global (be12ecd). Modern
 # installs only manage ~/.claude/settings.json, so an upgrade left these behind: the stale
@@ -410,7 +425,9 @@ def post_write(repo_path: str, raw: str) -> str:
                 pass
         try:
             store.ensure_store_dir()
-            store.sidecar_path("pending_capture").touch()
+            sid = store.session_from_hook_stdin(raw)
+            sid = sid if isinstance(sid, str) and _SESSION_ID.fullmatch(sid) else ""
+            store.atomic_write(store.sidecar_path("pending_capture"), sid)
         except OSError:
             pass
         # Shadow-mode evidence, emitted LAST so neither existing signal above can be
@@ -746,8 +763,7 @@ def install(home: Path) -> list[str]:
     # The Python hooks resolve and anchor their workspace from stdin/PWD without spawning Git.
     # This shell-only reminder owns no repository identity and therefore cannot mis-key it.
     anchor_cmd = (
-        "FLAG=\"$HOME/.contexer/.pending_capture\"; "
-        "if [ -f \"$FLAG\" ]; then "
+        _SETTLE_GATE +
         "rm -f \"$FLAG\" 2>/dev/null || true; "
         "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"UserPromptSubmit\", "
         "\"additionalContext\": \"Contexer: last turn settled - reconcile decisions before continuing, "

@@ -328,6 +328,27 @@ class TestClaudePostWrite:
         claude.post_write(tmp_repo, raw)
         assert (store.STORE_DIR / ".pending_capture").exists()
 
+    def test_flag_names_the_session_that_armed_it(self, tmp_repo):
+        raw = _json.dumps({"session_id": "s1", "tool_input": {"file_path": "a.py"}})
+        claude.post_write(tmp_repo, raw)
+        assert (store.STORE_DIR / ".pending_capture").read_text() == "s1"
+
+    def test_flag_is_replaced_atomically(self, tmp_repo, monkeypatch):
+        writes = []
+        real = store.atomic_write
+        monkeypatch.setattr(store, "atomic_write", lambda path, text, **k: (writes.append((path, text)), real(path, text, **k)))
+        claude.post_write(tmp_repo, _json.dumps({"session_id": "s1", "tool_input": {"file_path": "a.py"}}))
+        flag = store.sidecar_path("pending_capture")
+        assert [w for w in writes if w[0] == flag] == [(flag, "s1")]
+
+    @pytest.mark.parametrize("session", [None, "", 42, 'x" *', "a" * 129])
+    def test_flag_is_empty_without_a_plain_session_id(self, tmp_repo, session):
+        payload = {"tool_input": {"file_path": "a.py"}}
+        if session is not None:
+            payload["session_id"] = session
+        claude.post_write(tmp_repo, _json.dumps(payload))
+        assert (store.STORE_DIR / ".pending_capture").read_text() == ""
+
     def test_always_returns_empty_json(self, tmp_repo):
         raw = _json.dumps({"session_id": "s1", "tool_input": {"file_path": "a.py"}})
         assert claude.post_write(tmp_repo, raw) == "{}"

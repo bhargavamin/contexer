@@ -1,6 +1,7 @@
 """Tests for contexer CLI install/uninstall commands."""
 import json
 import shlex
+import subprocess
 
 import pytest
 
@@ -507,6 +508,28 @@ class TestBookkeepingWritesAreFailSoft:
         assert "only if the Contexer MCP tools (update_context, approve_decision) are available" in reminder
         assert "if they are not, ignore this note" in reminder
         assert "If the Contexer MCP tools are available in this session (otherwise ignore this note)" in plan
+
+    @pytest.mark.parametrize("flag, payload, fires", [
+        ("sess-A", {"session_id": "sess-B", "prompt": "next"}, False),
+        ("sess-A", {"session_id": "sess-A", "prompt": "next"}, True),
+        ("", {"session_id": "sess-B", "prompt": "next"}, True),
+        ("sess-A", {"session_id": "sess-B", "prompt": "sess-A"}, False),
+        ("sess-A", {"session_id": "sess-B", "prompt": '"session_id": "sess-A"'}, False),
+        ("sess-A", {"session_id": "sess-B", "other": "sess-A"}, False),
+        ("sess-A", '{\n  "session_id" : "sess-A",\n  "prompt": "next"\n}', True),
+    ])
+    def test_settle_reminder_fires_only_for_the_session_that_armed_it(
+            self, installed_home, flag, payload, fires):
+        reminder = next(c for c in self._cmds(installed_home, "UserPromptSubmit")
+                        if "last turn settled" in c)
+        flag_path = installed_home / ".contexer" / ".pending_capture"
+        flag_path.parent.mkdir(exist_ok=True)
+        flag_path.write_text(flag)
+        out = subprocess.run(reminder, shell=True, capture_output=True, text=True,
+                             input=payload if isinstance(payload, str) else json.dumps(payload, separators=(",", ":")),
+                             env={"HOME": str(installed_home), "PATH": "/usr/bin:/bin"})
+        assert ("last turn settled" in out.stdout) is fires
+        assert flag_path.exists() is not fires
 
     def test_reinstall_replaces_an_unguarded_session_start_hook(self, clean_home):
         settings_path = clean_home / ".claude" / "settings.json"
