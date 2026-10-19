@@ -7975,9 +7975,10 @@ class TestDecisionStatementMatching:
         assert len(entries) == 2
         assert all(e.get("occurrence_count", 1) == 1 for e in entries)
 
-    def test_exact_repeat_with_a_prohibitive_later_sentence_is_a_recurrence(self, tmp_repo):
+    @pytest.mark.parametrize("created_by", ["ai", "human"])
+    def test_exact_repeat_with_a_prohibitive_later_sentence_is_a_recurrence(self, tmp_repo, created_by):
         text = "Use the injected fake_clock fixture for time in all scheduler unit tests. Never use freezegun."
-        store.update_decision(tmp_repo, text, "s1", "convention", created_by="ai")
+        store.update_decision(tmp_repo, text, "s1", "convention", created_by=created_by)
         stored, _ = store.update_decision(tmp_repo, text, "s2", "convention", created_by="ai")
         assert not stored
         (entry,) = [e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision"]
