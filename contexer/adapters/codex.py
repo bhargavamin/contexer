@@ -199,8 +199,7 @@ def install(home: Path) -> list[str]:
     )
     # Repository identity is owned by Python hooks, resolved from stdin/PWD without Git.
     anchor_cmd = (
-        "FLAG=\"$HOME/.contexer/.pending_capture\"; "
-        "if [ -f \"$FLAG\" ]; then "
+        claude._SETTLE_GATE +
         "rm -f \"$FLAG\" 2>/dev/null || true; "
         "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"UserPromptSubmit\", "
         "\"additionalContext\": \"Contexer: last turn settled - reconcile decisions before continuing, "
