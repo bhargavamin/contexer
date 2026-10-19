@@ -905,6 +905,18 @@ class TestEveryWorktreeSharingTheStore:
             "reanchored": 0, "proposed": 0}
         assert _reload(repo).get("proposed_lifecycle") is None
 
+    def test_file_only_in_a_second_linked_worktree_is_not_lost(self, repo, linked):
+        second = repo.parent / "wt2"
+        _git(repo, "worktree", "add", "-q", "-b", "other", str(second))
+        _write(second, "drafts/spec.md")
+        _seed_entry(repo, "Spec lives in drafts/spec.md.", source_files=["drafts/spec.md"])
+
+        assert anchors.verify_anchors(str(linked), force=True) == {
+            "reanchored": 0, "proposed": 0}
+        entry = _reload(repo)
+        assert entry.get("proposed_lifecycle") is None
+        assert entry["source_files"] == ["drafts/spec.md"]
+
     def test_partial_loss_keeps_a_file_another_worktree_holds(self, repo, linked):
         _write(repo, "notes/plan.md")
         _seed_entry(repo, "Plan and gone.", source_files=["notes/plan.md", "gone.md"])
