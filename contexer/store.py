@@ -842,6 +842,8 @@ def _find_statement_restatement(content: str, existing: list) -> dict | None:
             continue
         if not tokens <= _tokenize(entry.get("content", "")):
             continue
+        if _reverses_decision(content, entry):
+            continue
         if _overlap_ratio(statement, _tokenize(_decision_statement(entry))) > 0.7:
             return entry
     return None
@@ -1072,6 +1074,15 @@ def _first_sentence_of(text: str) -> str:
     if not stripped:
         return ""
     return re.split(r"(?<=[.!?])\s", stripped.splitlines()[0], maxsplit=1)[0]
+
+
+def _reverses_decision(content: str, entry: dict) -> bool:
+    """True when `content` reverses `entry`'s decision statement rather than repeating its body."""
+    if not _is_polarity_reversal(content, _decision_statement(entry)):
+        return False
+    tokens = _tokenize(content)
+    body = " ".join(revisions.current_content(entry).split())
+    return not any(tokens <= _tokenize(s) for s in re.split(r"(?<=[.!?])\s+", body)[1:])
 
 
 def _decision_statement(entry: dict) -> str:
@@ -2550,7 +2561,7 @@ def capture_user_constraint_with_meta(
         if review_required and not confirmation_required:
             match_candidates = [
                 entry for entry in match_candidates
-                if not _is_polarity_reversal(content, _decision_statement(entry))]
+                if not _reverses_decision(content, entry)]
         # This hook fires on every prompt; a near-duplicate is normally a silent no-op (no
         # write) - EXCEPT a clean restatement of this path's own pending twin, which promotes.
         match = _find_match(content, match_candidates)
@@ -2577,7 +2588,7 @@ def capture_user_constraint_with_meta(
             # wrapper spool the repetition. Still no new entry, no status change, no
             # confidence change - repetition is not approval.
             match_content = revisions.current_content(match)
-            reversed_rule = _is_polarity_reversal(content, _decision_statement(match))
+            reversed_rule = _reverses_decision(content, match)
             if (not review_required and entry_status(match) in ("approved", "suggested")
                     and (reversed_rule or _tokenize(match_content) < _tokenize(content))):
                 return _route_containment(repo_path, data, match, content, subtype,
@@ -2597,7 +2608,7 @@ def capture_user_constraint_with_meta(
         if hit is not None:
             return _route_containment(
                 repo_path, data, hit, content, subtype, status, session_id, source,
-                reversed_rule=_is_polarity_reversal(content, _decision_statement(hit)))
+                reversed_rule=_reverses_decision(content, hit))
         if near_misses is not None:
             near_misses.extend(_near_misses(content, match_candidates))
         entry = _new_decision_entry(content, session_id, subtype,

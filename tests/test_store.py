@@ -7925,6 +7925,36 @@ class TestDecisionStatementMatching:
         assert entry["id"] == entry_id
         assert entry["proposed_revision"]["content"].startswith("Never use the injected")
 
+    def test_terse_reversal_is_not_dropped_as_a_restatement(self, tmp_repo):
+        store.update_decision(
+            tmp_repo, "Always use the injected fake_clock fixture for time in tests. "
+            "Never use freezegun, because it patches time globally.", "s1", "convention", created_by="ai")
+        stored, _ = store.update_decision(tmp_repo, self.REVERSAL, "s2", "convention", created_by="ai")
+        assert stored
+        entries = [e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision"]
+        assert len(entries) == 2
+        assert all(e.get("occurrence_count", 1) == 1 for e in entries)
+
+    def test_repeating_a_rejected_option_is_a_recurrence(self, tmp_repo):
+        _, entry_id = store.update_decision(
+            tmp_repo, "Always use uv for Python tooling. Avoid pip, because it skips the lockfile.",
+            "s1", "convention", created_by="ai")
+        _, _, status = store.capture_user_constraint(
+            tmp_repo, "Avoid pip, because it skips the lockfile.", "s2")
+        assert status is None
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == entry_id)
+        assert entry.get("proposed_revision") is None
+        assert entry["occurrence_count"] == 2
+
+    def test_reversal_sharing_words_with_a_rejected_option_is_still_proposed(self, tmp_repo):
+        _, entry_id = store.update_decision(
+            tmp_repo, "Always use uv for Python tooling. Never use pip for Python tooling.",
+            "s1", "convention", created_by="ai")
+        _, _, status = store.capture_user_constraint(tmp_repo, "Never use uv for Python tooling.", "s2")
+        assert status == "revision_proposed"
+        entry = next(e for e in store.load(tmp_repo)["entries"] if e["id"] == entry_id)
+        assert entry["proposed_revision"]["content"].startswith("Never use uv")
+
     def test_close_length_reversal_detected_despite_rejected_option(self, tmp_repo):
         store.update_decision(
             tmp_repo, "Always use the injected fake_clock fixture for time in tests. Avoid freezegun.",
