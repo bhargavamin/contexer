@@ -369,6 +369,12 @@ class TestCodexBookkeepingWritesAreFailSoft:
         assert 'rm -f "$FLAG" 2>/dev/null || true' in reminder
         assert ".current_repo" not in reminder
 
+    def test_settle_reminder_applies_only_when_contexer_tools_are_available(self, home):
+        codex.install(home)
+        reminder = next(c for c in self._cmds(home, "UserPromptSubmit") if "last turn settled" in c)
+        assert "only if the Contexer MCP tools (update_context, approve_decision) are available" in reminder
+        assert "if they are not, ignore this note" in reminder
+
     def test_reinstall_replaces_the_unguarded_session_start_hook(self, home):
         # Verbatim shape of the hook that failed in the report.
         hooks_path = home / ".codex" / "hooks.json"
