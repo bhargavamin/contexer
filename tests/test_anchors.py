@@ -974,3 +974,19 @@ class TestEveryWorktreeSharingTheStore:
         assert anchors.verify_anchors(str(linked), force=True) == {
             "reanchored": 0, "proposed": 0}
         assert _reload(repo)["source_files"] == ["old.py"]
+
+    def test_rename_target_held_only_by_another_worktree_is_followed(self, repo, linked):
+        _write(repo, "old.py", "a\n")
+        _git(repo, "add", "old.py")
+        _commit(repo, "add old.py on main")
+        _seed_entry(repo, "Decision about old.py", source_files=["old.py"])
+        _git(linked, "merge", "-q", "--ff-only", store.run_git(str(repo), "rev-parse", "HEAD"))
+        _git(linked, "mv", "old.py", "new.py")
+        _commit(linked, "rename on side")
+        (linked / "new.py").unlink()
+        (repo / "old.py").unlink()
+        _write(repo, "new.py", "a\n")
+
+        assert anchors.verify_anchors(str(linked), force=True) == {
+            "reanchored": 1, "proposed": 0}
+        assert _reload(repo)["source_files"] == ["new.py"]
