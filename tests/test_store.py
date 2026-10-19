@@ -7935,6 +7935,26 @@ class TestDecisionStatementMatching:
         assert len(entries) == 2
         assert all(e.get("occurrence_count", 1) == 1 for e in entries)
 
+    @pytest.mark.parametrize("created_by", ["ai", "human"])
+    def test_one_sentence_reversal_via_update_decision_is_stored(self, tmp_repo, created_by):
+        rule = "Always use the injected fake_clock fixture for time in tests."
+        if created_by == "ai":
+            store.update_decision(tmp_repo, rule, "s1", "convention", created_by="ai")
+        else:
+            store.capture_user_constraint(tmp_repo, rule, "s1")
+        stored, _ = store.update_decision(tmp_repo, self.REVERSAL, "s2", "convention", created_by="ai")
+        assert stored
+        entries = [e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision"]
+        assert len(entries) == 2
+        assert all(e.get("occurrence_count", 1) == 1 for e in entries)
+
+    def test_exact_restatement_via_update_decision_is_still_a_recurrence(self, tmp_repo):
+        store.update_decision(tmp_repo, self.RULE, "s1", "convention", created_by="ai")
+        stored, _ = store.update_decision(tmp_repo, self.RULE, "s2", "convention", created_by="ai")
+        assert not stored
+        (entry,) = [e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision"]
+        assert entry["occurrence_count"] == 2
+
     def test_repeating_a_rejected_option_is_a_recurrence(self, tmp_repo):
         _, entry_id = store.update_decision(
             tmp_repo, "Always use uv for Python tooling. Avoid pip, because it skips the lockfile.",

@@ -842,8 +842,6 @@ def _find_statement_restatement(content: str, existing: list) -> dict | None:
             continue
         if not tokens <= _tokenize(entry.get("content", "")):
             continue
-        if _reverses_decision(content, entry):
-            continue
         if _overlap_ratio(statement, _tokenize(_decision_statement(entry))) > 0.7:
             return entry
     return None
@@ -3940,8 +3938,9 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
         if not _is_storable(content):
             return False, None, {}
         decisions_only = [e for e in data["entries"] if e["type"] == "decision"]
-        match = (_find_match(content, decisions_only)
-                 or _find_statement_restatement(content, decisions_only))
+        candidates = [e for e in decisions_only if not _reverses_decision(content, e)]
+        match = (_find_match(content, candidates)
+                 or _find_statement_restatement(content, candidates))
         if match is not None:
             if entry_status(match) == "ignored":
                 # An INACTIVE decision restated is not a recurrence of a live rule: bumping
