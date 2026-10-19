@@ -752,7 +752,7 @@ def test_capture_guidance_names_the_local_scopes_prompt_capture_ignores():
 
 def test_capture_guidance_asks_for_rejected_options_after_the_decision():
     text = " ".join(server._INSTRUCTIONS.split())
-    assert "state the decision and its why first, then name each option you weighed and rejected" in text
+    assert "then each option that was weighed and rejected (by you or the developer, including earlier in the discussion), with why" in text
     assert "never a brainstorm list" in text
 
 

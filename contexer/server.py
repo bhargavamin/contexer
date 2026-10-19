@@ -49,9 +49,10 @@ _INSTRUCTIONS = (
     "would surprise a future session. A synthesized understanding of how a subsystem works, reached "
     "by exploring the codebase to answer a question, is capture-worthy too (subtype=architecture) - "
     "store it the same turn, since the session may end with the answer. Pass the full reasoning, not "
-    "just the conclusion: state the decision and its why first, then name each option you weighed "
-    "and rejected, with why, so a later session does not re-propose it. Name only options actually "
-    "weighed for this decision, never a brainstorm list. Always pass a concise, one-line, "
+    "just the conclusion: state the decision and its why first, then each option that was weighed "
+    "and rejected (by you or the developer, including earlier in the discussion), with why, so a "
+    "later session does not re-propose it. Name only options actually weighed for this "
+    "decision, never a brainstorm list. Always pass a concise, one-line, "
     "imperative title (<= 100 chars) "
     "summarizing the decision - e.g. 'Use Postgres for decision store' - omit it only if you truly "
     "can't summarize better than the store's own derivation from content. When the content has more than "
@@ -89,7 +90,7 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
                    source_files: list[str] | None = None,
                    applies_when: list[str] | None = None, summary: str = "") -> str:
     """Called when Claude Code makes a significant decision mid-task. The server filters before storing.
-    Put the decision and its why first, then each option you weighed and rejected, with why.
+    Put the decision and its why first, then each option you or the developer weighed and rejected, with why.
 
     If this returns a 'pending review' notice, the decision is recorded but NOT yet trusted and
     does not block your work - keep going. Surface it to the developer for approval at a natural
