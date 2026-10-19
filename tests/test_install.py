@@ -500,6 +500,14 @@ class TestBookkeepingWritesAreFailSoft:
         assert 'rm -f "$FLAG" 2>/dev/null || true' in reminder
         assert ".current_repo" not in reminder
 
+    def test_tool_reminders_apply_only_when_contexer_tools_are_available(self, installed_home):
+        reminder = next(c for c in self._cmds(installed_home, "UserPromptSubmit")
+                        if "last turn settled" in c)
+        plan = next(c for c in self._cmds(installed_home, "PostToolUse") if "plan approved" in c)
+        assert "only if the Contexer MCP tools (update_context, approve_decision) are available" in reminder
+        assert "if they are not, ignore this note" in reminder
+        assert "If the Contexer MCP tools are available in this session (otherwise ignore this note)" in plan
+
     def test_reinstall_replaces_an_unguarded_session_start_hook(self, clean_home):
         settings_path = clean_home / ".claude" / "settings.json"
         settings_path.parent.mkdir(parents=True)
