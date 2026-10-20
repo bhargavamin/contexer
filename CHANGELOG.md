@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.53.0](https://github.com/bhargavamin/contexer/compare/v0.52.0...v0.53.0) (2026-10-20)
+
+
+### Features
+
+* **claude:** label the review pane's view and draw buttons in subtle theme tones ([b5bbd91](https://github.com/bhargavamin/contexer/commit/b5bbd91391320a3a72855081b9be61dd3511f3af))
+* **review:** show a short plain-English summary first when reviewing decisions ([3ee7134](https://github.com/bhargavamin/contexer/commit/3ee713493602398705534aeb7d246abe9d2974d1))
+
+
+### Bug Fixes
+
+* **anchors:** check every worktree before proposing retirement ([#430](https://github.com/bhargavamin/contexer/issues/430)) ([d9bbecd](https://github.com/bhargavamin/contexer/commit/d9bbecdcf278173b17bc3f8989a5f31d34fba88e))
+* **hooks:** fire the settle reminder only in the session that edited ([#427](https://github.com/bhargavamin/contexer/issues/427)) ([700d456](https://github.com/bhargavamin/contexer/commit/700d4567f8065625046b1b736b5cab048f6a899f))
+* **hooks:** make tool reminders conditional on Contexer tools being available ([#425](https://github.com/bhargavamin/contexer/issues/425)) ([294f6c0](https://github.com/bhargavamin/contexer/commit/294f6c04f0c80d51d1b546314b0ed26496c2ff5c))
+* **review:** name the approved decision by its title, not a cut of its text ([09409a3](https://github.com/bhargavamin/contexer/commit/09409a39bc6bca1aea93c0baed4016fc23a9e4e2))
+* **store:** correct a Suggested Update's summary in place, keeping its scope ([0644000](https://github.com/bhargavamin/contexer/commit/0644000df228ac68bae02b82b73540c10c0ed5c8))
+* **store:** keep a corrected summary on a retried Suggested Update ([6850f31](https://github.com/bhargavamin/contexer/commit/6850f31d500988e8986258a03a47f28bf205d1e6))
+
 ## [0.52.0](https://github.com/bhargavamin/contexer/compare/v0.51.3...v0.52.0) (2026-10-18)
 
 
