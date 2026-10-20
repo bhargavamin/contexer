@@ -197,6 +197,50 @@ class TestRevisions:
         assert entry["summary"] == SUMMARY
         assert entry["proposed_revision"]["summary"] == "Also use the helpers for global rules."
 
+    def test_a_retried_update_with_a_corrected_summary_replaces_the_proposal_summary(self, tmp_repo):
+        # PR #401 review: the same-content dedup used to return before the corrected summary
+        # was saved, so the call reported success and reviewers kept reading the old one.
+        eid = self._approved(tmp_repo)
+        changed = LONG + " Also for global rules."
+        store.update_decision(tmp_repo, changed, "s2", "architecture", replace_id=eid,
+                              summary="Also use the helpers for global rules.")
+        ok, _ = store.update_decision(tmp_repo, changed, "s3", "architecture", replace_id=eid,
+                                      summary="Use the helpers for every path. Global rules too.")
+        entry = _entry(tmp_repo, eid)
+        assert ok
+        assert entry["proposed_revision"]["summary"] == "Use the helpers for every path. Global rules too."
+        assert entry["proposed_revision"]["content"] == revisions.normalize_content(changed)
+        assert (revisions.current_content(entry), entry["summary"]) == (LONG, SUMMARY), \
+            "the trusted decision is untouched"
+
+    def test_a_retry_with_the_same_or_no_summary_leaves_the_proposal_alone(self, tmp_repo):
+        eid = self._approved(tmp_repo)
+        changed = LONG + " Also for global rules."
+        store.update_decision(tmp_repo, changed, "s2", "architecture", replace_id=eid,
+                              summary="Also use the helpers for global rules.")
+        first = _entry(tmp_repo, eid)["proposed_revision"]
+        for summary in ("Also use the helpers for global rules.", ""):
+            store.update_decision(tmp_repo, changed, "s3", "architecture", replace_id=eid,
+                                  summary=summary)
+            entry = _entry(tmp_repo, eid)
+            assert entry["proposed_revision"] == first, "no rebuild, nothing archived"
+            assert "superseded_proposals" not in entry
+
+    def test_a_model_summary_correction_never_replaces_a_higher_trust_proposal(self, tmp_repo):
+        eid = self._approved(tmp_repo)
+        changed = LONG + " Also for global rules."
+        store.update_decision(tmp_repo, changed, "s2", "architecture", replace_id=eid,
+                              summary="Also use the helpers for global rules.")
+        data = store.load(tmp_repo)
+        next(e for e in data["entries"] if e["id"] == eid)["proposed_revision"]["source"] = "plan"
+        store.save(tmp_repo, data)
+        stored, _, meta = store.update_decision_with_meta(
+            tmp_repo, changed, "s3", "architecture", replace_id=eid,
+            summary="A model rewording of the plan's summary.")
+        prop = _entry(tmp_repo, eid)["proposed_revision"]
+        assert stored and meta["refusal_ack"].startswith("Correction NOT stored")
+        assert (prop["source"], prop["summary"]) == ("plan", "Also use the helpers for global rules.")
+
     def test_approving_the_update_promotes_its_summary(self, tmp_repo):
         eid = self._approved(tmp_repo)
         store.update_decision(tmp_repo, LONG + " Also for global rules.", "s2", "architecture",

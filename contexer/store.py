@@ -3843,12 +3843,16 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
                     # Fix: don't overwrite an existing proposal if the new content AND its
                     # effective title are identical - the proposal is already pending for the same
                     # change. A same-content retry with a CHANGED title must rebuild it, or approval
-                    # would promote the stale proposal title.
+                    # would promote the stale proposal title. A changed review summary rebuilds it
+                    # too: the proposal is unreviewed, so its summary may still be corrected, and
+                    # dropping the correction would leave reviewers reading the old one.
                     existing_prop = target.get("proposed_revision")
                     new_prop_title = revisions.normalize_title(title) or revisions.derive_title(content)
+                    new_prop_summary = revisions.normalize_summary(summary)
                     if (existing_prop and existing_prop.get("content", "") == content
                             and existing_prop.get("title", "") == new_prop_title
-                            and (applies_when is None or existing_prop.get("applies_when", []) == applies_when)):
+                            and (applies_when is None or existing_prop.get("applies_when", []) == applies_when)
+                            and (not new_prop_summary or new_prop_summary == existing_prop.get("summary", ""))):
                         return True, target["id"], {}
                     # Same trust-ordered slot as the title-only branch above (#200).
                     if not review.claim_proposal_slot(target, "ai", now):
