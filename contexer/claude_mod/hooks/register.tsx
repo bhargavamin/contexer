@@ -11,7 +11,7 @@
 // It fails silent: no `contexer` answering, or a queue shape this mod does not know
 // (`protocol` mismatch after an upgrade mid-session), means no band and no pane content.
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, RenderChildren } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren, ThemeKey } from 'claude-code'
 
 import type { Applicability, ConflictAction, ConflictSide, CurrentConflict, ReviewAction, ReviewItem, ReviewItemKind, ReviewQueue } from '../types'
 
@@ -346,6 +346,23 @@ const ACTION_LABEL: Record<ReviewAction, string> = {
 
 const ACTION_HOTKEY: Record<ReviewAction, string> = { approve: 'a', edit: 'e', ignore: 'i', dismiss: 'd' }
 
+// Each button's colour says what a press does, in the person's theme colours (ThemeKey, so a
+// misspelt one fails the type check), so it reads on light and dark terminals alike. Settling
+// and closing sit on a soft tint; the rest are coloured text only, quieter: blue edits, yellow
+// sets aside, subtle moves. The view in use is bold blue text; the other view is dim.
+type Tone = 'settle' | 'edit' | 'aside' | 'close' | 'move' | 'view' | 'idle'
+type ToneStyle = { color?: ThemeKey; backgroundColor?: ThemeKey; bold?: boolean; dimColor?: boolean }
+const TONE: Record<Tone, ToneStyle> = {
+  settle: { color: 'success', backgroundColor: 'diffAddedDimmed', bold: true },
+  close: { color: 'error', backgroundColor: 'diffRemovedDimmed' },
+  edit: { color: 'suggestion' },
+  aside: { color: 'warning' },
+  move: { color: 'subtle' },
+  view: { color: 'suggestion', bold: true },
+  idle: { dimColor: true },
+}
+const ACTION_TONE: Record<ReviewAction, Tone> = { approve: 'settle', edit: 'edit', ignore: 'aside', dismiss: 'aside' }
+
 // Whole text, trailing space trimmed per line; paragraph breaks kept.
 function full(text: string): string {
   return text.split('\n').map(line => line.trimEnd()).join('\n').trim()
@@ -512,7 +529,18 @@ export const register: Register = on => {
     const q = await read($, queue)
     const message = await read($, note)
     const editingId = await read($, editing)
-    const close = <Button key="close" label="Close" role="dismiss" dimColor onPress={() => closePane($)} />
+    // A plain Button (its hotkey, then its label) whose label is drawn in its tone: one label
+    // names the control and is what it shows. The focus and the pointer still invert it.
+    type ChipButton = {
+      key: string; label: string; tone: Tone; onPress: () => unknown
+      hotkey?: string; variant?: 'primary'; role?: 'dismiss'
+    }
+    const chipButton = ({ key: id, label, tone, onPress, ...rest }: ChipButton) => (
+      <Button plain key={id} label={label} onPress={() => { void onPress() }} {...rest}>
+        <Text {...TONE[tone]}>{` ${label} `}</Text>
+      </Button>
+    )
+    const close = chipButton({ key: 'close', label: 'Close', tone: 'close', role: 'dismiss', onPress: () => closePane($) })
 
     if (!q) {
       return (
@@ -649,7 +677,7 @@ export const register: Register = on => {
                 ? act($, 'edit', item.id, { content: value.trim(), expect: item.basis })
                 : update($, note, () => 'Type the new wording, then press Enter.'))}
             />
-            <Button key={`cancel-${item.id}`} label="Cancel" dimColor onPress={() => update($, editing, () => null)} />
+            {chipButton({ key: `cancel-${item.id}`, label: 'Cancel', tone: 'move', onPress: () => update($, editing, () => null) })}
           </Box>
         )
       } else if (item.actions.length === 0) {
@@ -659,15 +687,14 @@ export const register: Register = on => {
           <Box key={`actions-${key}`} columnGap={1} flexWrap="wrap">
             {item.actions
               .filter(action => action !== 'edit' || Input)
-              .map(action => (
-                <Button
-                  key={`${action}-${item.id}`}
-                  label={actionLabel(item, action)}
-                  variant={action === 'approve' ? 'primary' : undefined}
-                  hotkey={ACTION_HOTKEY[action]}
-                  onPress={() => (action === 'edit' ? update($, editing, () => item.id) : act($, action, item.id, { expect: item.basis }))}
-                />
-              ))}
+              .map(action => chipButton({
+                key: `${action}-${item.id}`,
+                label: actionLabel(item, action),
+                tone: ACTION_TONE[action],
+                hotkey: ACTION_HOTKEY[action],
+                ...(action === 'approve' ? { variant: 'primary' as const } : {}),
+                onPress: () => (action === 'edit' ? update($, editing, () => item.id) : act($, action, item.id, { expect: item.basis })),
+              }))}
           </Box>
         )
       }
@@ -708,19 +735,41 @@ export const register: Register = on => {
             {sides.filter(([one]) => one.can_keep).map(([one, other]) => (
               // Keyed by pair too: one decision can contradict two others, and presses are
               // resolved by key, so a side-only key would let one press run another pair's Keep.
-              <Button
-                key={`keep-${key}-${one.id}`}
-                label={`Keep ${clip(one.title, KEEP_TITLE_CHARS)}`}
-                variant="primary"
-                onPress={() => act($, 'keep', one.id, { over: other.id, expect: pair.basis })}
-              />
+              chipButton({
+                key: `keep-${key}-${one.id}`,
+                label: `Keep ${clip(one.title, KEEP_TITLE_CHARS)}`,
+                tone: 'settle',
+                variant: 'primary',
+                onPress: () => act($, 'keep', one.id, { over: other.id, expect: pair.basis }),
+              })
             ))}
           </Box>
         )
     }
 
+    // The full text is what the model reads (and, on a card with Approve, what Approve signs):
+    // `f` switches to it and back, `s` returns to the summary. The card names the view it shows
+    // under its title, and the switch above it marks the view in use, so a reviewer always knows
+    // which one they read. A card whose summary view still shows a version in full (no summary
+    // and none being written) says so, rather than calling that text a summary.
+    const hasViews = hasStandIn || isWritingShown || isFull
+    const signs = card.kind === 'item' && card.item.actions.includes('approve')
+      ? 'the text the model reads and Approve signs'
+      : 'the text the model reads'
+    const [viewName, viewHint] = isFull
+      ? ['FULL TEXT', `${signs} · f or s for the summary`]
+      : lacksSummary
+        ? ['SUMMARY WHERE ONE EXISTS', 'a version with no summary shows in full · f for all full text']
+        : ['SUMMARY', 'f for the full text']
     // At the top, under the title: a reviewer reads down from there.
-    if (!isFull && lacksSummary) {
+    if (hasViews) {
+      body.splice(1, 0, (
+        <Box key={`view-${key}`} columnGap={2} flexWrap="wrap">
+          <Text {...TONE.view}>{viewName}</Text>
+          <Text dimColor>{viewHint}</Text>
+        </Box>
+      ))
+    } else if (lacksSummary) {
       body.splice(1, 0, <Text key={`no-summary-${key}`} dimColor>No summary</Text>)
     }
     if (!isFull && wants.some(want => !asked.has(summaryToken(want)))) {
@@ -731,9 +780,14 @@ export const register: Register = on => {
         void writeSummary($, key, wants)
       })
     }
-    // The full text is what the model reads and what Approve signs: one press away, `f`.
-    const fullToggle = hasStandIn || isWritingShown || isFull
-      ? <Button key="full" label={isFull ? 'Summary' : 'Full text'} hotkey="f" dimColor onPress={() => update($, showFull, () => (isFull ? null : key))} />
+    const views = hasViews
+      ? (
+        <Box key="views" columnGap={1} flexWrap="wrap">
+          <Text dimColor>VIEW</Text>
+          {chipButton({ key: 'summary', label: 'Summary', tone: isFull ? 'idle' : 'view', hotkey: 's', onPress: () => update($, showFull, () => null) })}
+          {chipButton({ key: 'full', label: 'Full text', tone: isFull ? 'view' : 'idle', hotkey: 'f', onPress: () => update($, showFull, () => (isFull ? null : key)) })}
+        </Box>
+      )
       : null
     const subtitle = card.kind === 'item' ? meta(card.item) : 'two current decisions disagree'
     const many = cards.length > 1
@@ -753,15 +807,15 @@ export const register: Register = on => {
             <Box flexShrink={1}><Text dimColor>{subtitle}</Text></Box>
           </Box>
           <Box columnGap={1} flexWrap="wrap" flexShrink={0}>
-            {fullToggle}
-            {many ? <Button key="prev" label="‹" hotkey="p" dimColor onPress={() => go((at + cards.length - 1) % cards.length)} /> : null}
+            {many ? chipButton({ key: 'prev', label: '‹', tone: 'move', hotkey: 'p', onPress: () => go((at + cards.length - 1) % cards.length) }) : null}
             <Text dimColor>{progress(at, cards.length)}</Text>
-            {many ? <Button key="next" label="›" hotkey="n" dimColor onPress={() => go((at + 1) % cards.length)} /> : null}
+            {many ? chipButton({ key: 'next', label: '›', tone: 'move', hotkey: 'n', onPress: () => go((at + 1) % cards.length) }) : null}
           </Box>
         </Box>
         {anchors}
         {actions}
         {message ? <Text key="note" color="green">{`› ${message}`}</Text> : null}
+        {views}
         <Box key={`card-${key}`} flexDirection="column" borderStyle="round" borderColor={frame} paddingX={1} gap={1}>
           {body}
         </Box>

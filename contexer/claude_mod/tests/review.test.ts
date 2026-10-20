@@ -625,9 +625,92 @@ describe('review pane', () => {
       const pane = await mountPane($, surface)
       expect(await pane.find({ type: 'Text', text: 'Do not delete rows for a deleted org. Warn instead.' })).toBeDefined()
       expect(await pane.find({ type: 'Text', text: /More detail about the deletion path/ })).toBeUndefined()
+      // The card names the view it shows, and the switch offers both.
+      expect(await pane.find({ type: 'Text', text: 'SUMMARY' })).toBeDefined()
+      expect(await pane.find({ key: 'summary' })).toBeDefined()
       await pane.press({ key: 'full' })
       expect(await pane.find({ type: 'Text', text: /More detail about the deletion path/ })).toBeDefined()
-      expect((await pane.find({ key: 'full' }))?.text).toContain('Summary')
+      expect(await pane.find({ type: 'Text', text: 'FULL TEXT' })).toBeDefined()
+      expect(await pane.find({ type: 'Text', text: 'SUMMARY' })).toBeUndefined()
+      expect(await pane.find({ type: 'Text', text: /the model reads and Approve signs/ })).toBeDefined()
+      // Back to the summary with one press, s or f again.
+      await pane.press({ key: 'summary' })
+      expect(await pane.find({ type: 'Text', text: /More detail about the deletion path/ })).toBeUndefined()
+      expect(await pane.find({ type: 'Text', text: 'SUMMARY' })).toBeDefined()
+      await pane.press({ key: 'full' })
+      await pane.press({ key: 'full' })
+      expect(await pane.find({ type: 'Text', text: /More detail about the deletion path/ })).toBeUndefined()
+      expect(await pane.find({ type: 'Text', text: 'SUMMARY' })).toBeDefined()
+    })
+
+    test(`a summary view that still shows a version in full does not call it a summary (${surface})`, async ($, on) => {
+      const long = `Use DynamoDB. ${'More detail about the table layout. '.repeat(10)}`
+      fakeContexer(on, [{
+        ...UPDATE, summary: 'Store decisions in Postgres.', needs_summary: false,
+        proposed: { ...UPDATE.proposed!, content: long, needs_summary: true },
+      }])
+      await start($, surface)
+      const pane = await mountPane($, surface)
+      expect(await pane.find({ type: 'Text', text: /More detail about the table layout/ })).toBeDefined()
+      expect(await pane.find({ type: 'Text', text: 'SUMMARY WHERE ONE EXISTS' })).toBeDefined()
+      expect(await pane.find({ type: 'Text', text: /^SUMMARY$/ })).toBeUndefined()
+    })
+
+    test(`the full view names Approve only on a card that has it (${surface})`, async ($, on) => {
+      fakeContexer(on, [], 1, [{
+        ...PAIR,
+        decisions: [
+          { ...PAIR.decisions[0], summary: 'Write versions with a v.' },
+          { ...PAIR.decisions[1], summary: 'Write versions with no prefix.' },
+        ] as CurrentConflict['decisions'],
+      }])
+      await start($, surface)
+      const pane = await mountPane($, surface)
+      await pane.press({ key: 'full' })
+      expect(await pane.find({ type: 'Text', text: 'FULL TEXT' })).toBeDefined()
+      expect(await pane.find({ type: 'Text', text: /the model reads/ })).toBeDefined()
+      expect(await pane.find({ type: 'Text', text: /Approve/ })).toBeUndefined()
+    })
+
+    test(`every pane button wears its tone, Close on a soft red (${surface})`, async ($, on) => {
+      fakeContexer(on, [{ ...NEW, summary: 'Warn instead.', needs_summary: false }, { ...NEW, id: 'gggg7777', title: 'Log it' }])
+      await start($, surface)
+      const pane = await mountPane($, surface)
+      const tone = async (label: string) => {
+        const props = (await pane.find({ type: 'Text', text: ` ${label} ` }))?.props
+        return props && [props.color, props.backgroundColor, props.dimColor]
+      }
+      // Theme colours, so the tones follow a light or dark terminal.
+      expect(await tone('Close')).toEqual(['error', 'diffRemovedDimmed', undefined])
+      expect(await tone('Approve')).toEqual(['success', 'diffAddedDimmed', undefined])
+      expect(await tone('Edit')).toEqual(['suggestion', undefined, undefined])
+      expect(await tone('Ignore')).toEqual(['warning', undefined, undefined])
+      expect(await tone('›')).toEqual(['subtle', undefined, undefined])
+      // The view in use is in colour; the other is dim, with no colour.
+      expect(await tone('Summary')).toEqual(['suggestion', undefined, undefined])
+      expect(await tone('Full text')).toEqual([undefined, undefined, true])
+      // Every button's drawn label is its own label.
+      for (const button of await pane.findAll({ type: 'Button' })) {
+        expect(button.text.trim()).toBe(String(button.props.label))
+      }
+      if (await pane.find({ key: `edit-${NEW.id}` })) {
+        await pane.press({ key: `edit-${NEW.id}` })
+        expect(await tone('Cancel')).toEqual(['subtle', undefined, undefined])
+      }
+    })
+
+    test(`Keep current sets aside and Keep a side settles (${surface})`, async ($, on) => {
+      fakeContexer(on, [UPDATE], 1, [PAIR])
+      await start($, surface)
+      const pane = await mountPane($, surface)
+      const tone = async (text: string | RegExp) => {
+        const props = (await pane.find({ type: 'Text', text }))?.props
+        return props && [props.color, props.backgroundColor]
+      }
+      expect(await tone(' Keep current ')).toEqual(['warning', undefined])
+      expect(await tone(' Take update ')).toEqual(['success', 'diffAddedDimmed'])
+      await pane.press({ key: 'next' })
+      expect(await tone(/^ Keep Prefix versions with v $/)).toEqual(['success', 'diffAddedDimmed'])
     })
 
     test(`a card starts on its summary after moving away or reopening (${surface})`, async ($, on) => {
