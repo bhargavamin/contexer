@@ -7995,7 +7995,16 @@ class TestDecisionStatementMatching:
         ("always to never", f"Always u{FAKE[1:]}.", f"Never u{FAKE[1:]}.", True),
         ("reversal past a rejected option", f"Always u{FAKE[1:]}. Never use freezegun.", f"Never u{FAKE[1:]}.", True),
         ("multi-sentence reversal", f"{FAKE}.", f"Never u{FAKE[1:]}. Always use freezegun.", True),
+        ("later rule reversed", f"{FAKE}. Use freezegun for integration tests.",
+         f"{FAKE}. Never use freezegun for integration tests.", True),
+        ("later rule repeated with a reason dropped", f"{FAKE}. Use freezegun for integration tests to avoid flakes.",
+         f"{FAKE}. Use freezegun for integration tests.", False),
     ]
+
+    def test_an_added_rule_on_another_subject_is_not_a_reversal(self):
+        entry = {"content": f"{self.FAKE}.", "created_by": "human"}
+        assert not store._states_opposite_rule(f"{self.FAKE}. Never commit secrets.", entry)
+        assert store._states_opposite_rule(f"{self.FAKE}. Never u{self.FAKE[1:]}.", entry)
 
     @pytest.mark.parametrize("created_by", ["ai", "human"])
     @pytest.mark.parametrize("name, old, new, is_new", UPDATE_MATRIX, ids=[c[0] for c in UPDATE_MATRIX])

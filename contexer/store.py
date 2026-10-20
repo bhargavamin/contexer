@@ -1087,14 +1087,24 @@ _REASON_CLAUSE = re.compile(
     r"[,;]?\s+(?:because|since|so that|to avoid|to prevent|in order to)\b.*$", re.IGNORECASE | re.DOTALL)
 
 
-def _leading_rule(text: str) -> str:
-    """The first sentence of `text` without its trailing reason clause."""
-    return _REASON_CLAUSE.sub("", (_first_sentence_of(text) or text).strip())
+def _rules(text: str) -> list[str]:
+    """Each sentence of `text` without its trailing reason clause."""
+    sentences = re.split(r"(?<=[.!?])\s+", " ".join(text.split()))
+    return [rule for rule in (_REASON_CLAUSE.sub("", s).strip() for s in sentences) if rule]
 
 
 def _states_opposite_rule(content: str, entry: dict) -> bool:
-    """True when the leading rule of `content` reverses the leading rule of `entry`."""
-    return _is_polarity_reversal(_leading_rule(content), _leading_rule(revisions.current_content(entry)))
+    """True when a rule in `content` reverses the rule in `entry` that covers the same subject."""
+    stored = [(rule, _tokenize(rule)) for rule in _rules(revisions.current_content(entry))]
+    for rule in _rules(content):
+        tokens = _tokenize(rule)
+        scored = [(_overlap_ratio(tokens, old_tokens), old) for old, old_tokens in stored if old_tokens]
+        if not tokens or not scored:
+            continue
+        overlap, old = max(scored, key=lambda pair: pair[0])
+        if overlap > 0.5 and _is_polarity_reversal(rule, old):
+            return True
+    return False
 
 
 def _decision_statement(entry: dict) -> str:
