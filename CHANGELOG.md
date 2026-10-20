@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.54.0](https://github.com/bhargavamin/contexer/compare/v0.53.0...v0.54.0) (2026-10-20)
+
+
+### Features
+
+* **server:** ask captures to name the options weighed and rejected ([b45645f](https://github.com/bhargavamin/contexer/commit/b45645f4998a4deb36b6ca2d18c338b0635593cb))
+* **server:** ask captures to name the options weighed and rejected ([4b0363c](https://github.com/bhargavamin/contexer/commit/4b0363cd47e50dd781f713e523ecbe579e829456))
+
+
+### Bug Fixes
+
+* **bench:** keep uv settings and --frozen on harness uv calls ([51b3749](https://github.com/bhargavamin/contexer/commit/51b3749e567240d53b450c36aa058c19fd817d5b))
+* **bench:** stop harness uv calls from rebuilding the shared venv ([355c009](https://github.com/bhargavamin/contexer/commit/355c009dab3bbfe93b1129ad3c587a86e9b63199))
+* **server:** include developer-raised options in the rejected-options ask ([7ec3b2b](https://github.com/bhargavamin/contexer/commit/7ec3b2bda18e94aac7b0fc69f77d666faaeb5b99))
+* **store:** compare each rule with the stored rule on the same subject ([49422c2](https://github.com/bhargavamin/contexer/commit/49422c24194b3c20231cfa3edd5086b548c3e853))
+* **store:** compare leading rules on both sides of update_decision ([368eb5a](https://github.com/bhargavamin/contexer/commit/368eb5a119bbdd3162e1aeb0bd6d223b79119e82))
+* **store:** filter update_decision matches only on explicit opposite rules ([4c185bd](https://github.com/bhargavamin/contexer/commit/4c185bde48d8c2d94bcb456fb063213f76b9f7f6))
+* **store:** judge the incoming rule on its first sentence too ([f884432](https://github.com/bhargavamin/contexer/commit/f884432e6c7e9076803ce358e45ab475ff48f79d))
+* **store:** judge update_decision reversals on the rule, not its reason ([f0bb73f](https://github.com/bhargavamin/contexer/commit/f0bb73f0df5b55910d2daf8f3f830caccddb70b9))
+* **store:** keep reversals out of restatement matching and repeats out of reversals ([34b5611](https://github.com/bhargavamin/contexer/commit/34b561164562dba98f7a0ca52957b5664a27a1bc))
+* **store:** match model captures on their decision statement ([775681c](https://github.com/bhargavamin/contexer/commit/775681c9bd082bb0acf429b7988ddb69b71f683b))
+* **store:** match model captures on their decision statement ([ffdd373](https://github.com/bhargavamin/contexer/commit/ffdd373947db2f2e7984a1e62122585eaaf00a11))
+* **store:** never count a reversal as a recurrence in update_decision ([1affc8b](https://github.com/bhargavamin/contexer/commit/1affc8b756d0ba0e0fbe402457facbb35f93e23c))
+* **store:** pair rules by containment so expanded reversals are caught ([a322626](https://github.com/bhargavamin/contexer/commit/a322626e1f315ba159f74d404501dbd7b658aed1))
+* **store:** read the incoming rule the same way as the stored decision ([ef07d96](https://github.com/bhargavamin/contexer/commit/ef07d9607fbc5a272bf643478492892435fdfb30))
+* **store:** tie-break rule pairing by overlap; keep restatements to the decision's own rule ([953007e](https://github.com/bhargavamin/contexer/commit/953007ec88467ac9758a330e48851486f8dcce46))
+
+
+### Documentation
+
+* describe first-sentence matching for model-authored decisions ([37cd1ea](https://github.com/bhargavamin/contexer/commit/37cd1ea157cce201d3c71498e1860961436fd6b9))
+* describe reversal handling for repeats and update_context ([dbbea64](https://github.com/bhargavamin/contexer/commit/dbbea64284701063464d6830b9bd9ceaa4553925))
+
 ## [0.53.0](https://github.com/bhargavamin/contexer/compare/v0.52.0...v0.53.0) (2026-10-20)
 
 
