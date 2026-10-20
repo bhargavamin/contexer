@@ -93,6 +93,21 @@ class TestSessionEnv:
         assert env["HOME"] == str(tmp_path)
         assert env["ANTHROPIC_API_KEY"] == "sk-test"
 
+    def test_uv_interpreter_settings_pass_through(self, tmp_path, monkeypatch):
+        # Issue #432: a child `uv run` in this checkout must resolve the same Python as the
+        # parent, or it rebuilds .venv; and a Python it installs must not land in the
+        # throwaway HOME, which is deleted after the session.
+        settings = {"UV_PYTHON": "3.13", "UV_PYTHON_INSTALL_DIR": "/opt/uv-python",
+                    "UV_PYTHON_PREFERENCE": "only-managed", "UV_PYTHON_DOWNLOADS": "never",
+                    "UV_CACHE_DIR": "/opt/uv-cache"}
+        for key, value in settings.items():
+            monkeypatch.setenv(key, value)
+        monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", "/should/not/leak")
+        env = _session_env(tmp_path, otel_port=0)
+        assert {k: env.get(k) for k in settings} == settings
+        assert "UV_PROJECT_ENVIRONMENT" not in env, "only interpreter and cache settings pass"
+        assert env["HOME"] == str(tmp_path)
+
     def test_otel_vars_present_when_port_given(self, tmp_path):
         env = _session_env(tmp_path, otel_port=4318)
         assert env["CLAUDE_CODE_ENABLE_TELEMETRY"] == "1"

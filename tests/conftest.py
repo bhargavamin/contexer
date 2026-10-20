@@ -1,6 +1,7 @@
 """Shared pytest fixtures for the contexer test suite."""
 import os
 import subprocess
+import sys
 import threading
 import time
 import types
@@ -343,6 +344,29 @@ def no_real_repo_settings_writes():
         f"tests rewrote the real {real}. An installer-driving test must pin the process cwd "
         "(monkeypatch.chdir into a temp dir) as well as HOME - clean_legacy_repo_settings "
         "resolves its target from os.getcwd(), not from the injected home."
+    )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def interpreter_never_relinked():
+    """Fail the run if the interpreter the suite runs on was relinked or removed (issue #432).
+
+    A child `uv run` inside this checkout with a stripped environment can rebuild `.venv` on
+    another Python: on a runner that has it, `.venv/bin/python` silently switches version and
+    the rest of the run tests the wrong interpreter; on one that does not, uv downloads it into
+    a throwaway HOME, and once that is deleted every later `subprocess.run([sys.executable,
+    ...])` fails with FileNotFoundError. This names the cause instead of either symptom.
+
+    It assumes a symlinked venv (uv's default on Linux and macOS, as in CI): a venv that copies
+    its interpreter and is rebuilt in place keeps the same path and is not caught."""
+    before = os.path.realpath(sys.executable)
+    yield
+    after = os.path.realpath(sys.executable)
+    assert after == before and os.path.exists(after), (
+        f"the test interpreter {sys.executable} was relinked during the run "
+        f"({before} -> {after}{'' if os.path.exists(after) else ', now missing'}). A child "
+        "`uv run` in this checkout probably rebuilt .venv on another Python: pass uv's "
+        "interpreter settings (UV_PYTHON, UV_PYTHON_INSTALL_DIR) through to it."
     )
 
 

@@ -31,7 +31,17 @@ from benchmarks.otel import OtelReceiver
 
 TASKS_FILE = Path(__file__).resolve().parent / "tasks.json"
 _ALLOWED_ENV = ("PATH", "ANTHROPIC_API_KEY", "TERM", "LANG", "LC_ALL",
-                "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")
+                "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+                # uv's interpreter and cache settings (issue #432). The harness runs `uv run`
+                # inside this checkout with the session env; without UV_PYTHON that child
+                # reads .python-version, finds a .venv built on another Python (CI sets
+                # UV_PYTHON=3.13 over the 3.12 pin) and rebuilds it, and with no
+                # UV_PYTHON_INSTALL_DIR a Python it downloads lands in the throwaway HOME and
+                # is deleted with it, leaving .venv/bin/python dangling. UV_PYTHON also
+                # applies to an A/B `source` checkout and the fixture repos, which follows the
+                # Python choice the developer already made for this run.
+                "UV_PYTHON", "UV_PYTHON_INSTALL_DIR", "UV_PYTHON_PREFERENCE",
+                "UV_PYTHON_DOWNLOADS", "UV_CACHE_DIR")
 _MANAGED_SETTINGS = Path("/Library/Application Support/ClaudeCode/managed-settings.json")
 _TELEMETRY_TOLERANCE = 0.05
 
