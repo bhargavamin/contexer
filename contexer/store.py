@@ -3843,16 +3843,26 @@ def update_decision_with_meta(repo_path: str, content: str, session_id: str, sub
                     # Fix: don't overwrite an existing proposal if the new content AND its
                     # effective title are identical - the proposal is already pending for the same
                     # change. A same-content retry with a CHANGED title must rebuild it, or approval
-                    # would promote the stale proposal title. A changed review summary rebuilds it
-                    # too: the proposal is unreviewed, so its summary may still be corrected, and
-                    # dropping the correction would leave reviewers reading the old one.
+                    # would promote the stale proposal title.
                     existing_prop = target.get("proposed_revision")
                     new_prop_title = revisions.normalize_title(title) or revisions.derive_title(content)
-                    new_prop_summary = revisions.normalize_summary(summary)
                     if (existing_prop and existing_prop.get("content", "") == content
                             and existing_prop.get("title", "") == new_prop_title
-                            and (applies_when is None or existing_prop.get("applies_when", []) == applies_when)
-                            and (not new_prop_summary or new_prop_summary == existing_prop.get("summary", ""))):
+                            and (applies_when is None or existing_prop.get("applies_when", []) == applies_when)):
+                        new_prop_summary = revisions.normalize_summary(summary)
+                        if not new_prop_summary or new_prop_summary == existing_prop.get("summary", ""):
+                            return True, target["id"], {}
+                        # Only the review summary changed. The proposal is unreviewed, so its
+                        # summary may still be corrected; dropping the correction would leave
+                        # reviewers reading the old one. It is corrected in place, not rebuilt:
+                        # a rebuild would reset the proposal's scope and drop its stashed
+                        # source_files whenever the retry omits them. The slot's trust order
+                        # still holds: a model never rewords a human or plan proposal.
+                        if review.outranks_proposal(existing_prop.get("source", ""), {"source": "ai"}):
+                            return True, target["id"], {"refusal_ack": review.refusal_ack(target)}
+                        revisions.set_summary(existing_prop, new_prop_summary)
+                        save(repo_path, data)
+                        touch_pending_review(repo_path)
                         return True, target["id"], {}
                     # Same trust-ordered slot as the title-only branch above (#200).
                     if not review.claim_proposal_slot(target, "ai", now):

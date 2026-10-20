@@ -213,6 +213,26 @@ class TestRevisions:
         assert (revisions.current_content(entry), entry["summary"]) == (LONG, SUMMARY), \
             "the trusted decision is untouched"
 
+    def test_a_summary_only_retry_keeps_the_proposal_scope_and_files(self, tmp_repo):
+        # PR #401 review: rebuilding the proposal for a summary correction reset its scope to
+        # the trusted decision's and dropped its stashed source_files when the retry omitted them.
+        eid = self._approved(tmp_repo)
+        changed = LONG + " Also for global rules."
+        store.update_decision(tmp_repo, changed, "s2", "architecture", replace_id=eid,
+                              summary="Also use the helpers for global rules.",
+                              applies_when=["store paths", "global rules"],
+                              source_files=["contexer/store.py"])
+        first = dict(_entry(tmp_repo, eid)["proposed_revision"])
+        store.update_decision(tmp_repo, changed, "s3", "architecture", replace_id=eid,
+                              summary="Use the helpers for every path. Global rules too.")
+        entry = _entry(tmp_repo, eid)
+        prop = entry["proposed_revision"]
+        assert prop == {**first, "summary": "Use the helpers for every path. Global rules too."}, \
+            "only the summary changed"
+        assert prop["applies_when"] == ["store paths", "global rules"]
+        assert prop["source_files"] == ["contexer/store.py"]
+        assert "superseded_proposals" not in entry, "corrected in place, nothing archived"
+
     def test_a_retry_with_the_same_or_no_summary_leaves_the_proposal_alone(self, tmp_repo):
         eid = self._approved(tmp_repo)
         changed = LONG + " Also for global rules."
