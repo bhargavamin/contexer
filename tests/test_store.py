@@ -7984,6 +7984,29 @@ class TestDecisionStatementMatching:
         (entry,) = [e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision"]
         assert entry["occurrence_count"] == 2
 
+    FAKE = "Use the injected fake_clock fixture for time in all scheduler unit tests"
+    UPDATE_MATRIX = [
+        ("exact repeat", f"{FAKE}.", f"{FAKE}.", False),
+        ("exact two-sentence repeat", f"{FAKE}. Never use freezegun.", f"{FAKE}. Never use freezegun.", False),
+        ("drops a reason", f"{FAKE} to avoid leaks.", f"{FAKE}.", False),
+        ("adds a reason", f"{FAKE}.", f"{FAKE} to avoid leaks.", False),
+        ("bare rule reversed", f"{FAKE}.", f"Never u{FAKE[1:]}.", True),
+        ("reversal with a reason", f"{FAKE}.", f"Never u{FAKE[1:]}, because it hides timing bugs.", True),
+        ("always to never", f"Always u{FAKE[1:]}.", f"Never u{FAKE[1:]}.", True),
+        ("reversal past a rejected option", f"Always u{FAKE[1:]}. Never use freezegun.", f"Never u{FAKE[1:]}.", True),
+        ("multi-sentence reversal", f"{FAKE}.", f"Never u{FAKE[1:]}. Always use freezegun.", True),
+    ]
+
+    @pytest.mark.parametrize("created_by", ["ai", "human"])
+    @pytest.mark.parametrize("name, old, new, is_new", UPDATE_MATRIX, ids=[c[0] for c in UPDATE_MATRIX])
+    def test_update_decision_repeat_and_reversal_matrix(self, tmp_repo, created_by, name, old, new, is_new):
+        store.update_decision(tmp_repo, old, "s1", "convention", created_by=created_by)
+        stored, _ = store.update_decision(tmp_repo, new, "s2", "convention", created_by="ai")
+        assert stored is is_new
+        entries = [e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision"]
+        assert len(entries) == (2 if is_new else 1)
+        assert sorted(e.get("occurrence_count", 1) for e in entries) == ([1, 1] if is_new else [2])
+
     def test_exact_restatement_via_update_decision_is_still_a_recurrence(self, tmp_repo):
         store.update_decision(tmp_repo, self.RULE, "s1", "convention", created_by="ai")
         stored, _ = store.update_decision(tmp_repo, self.RULE, "s2", "convention", created_by="ai")

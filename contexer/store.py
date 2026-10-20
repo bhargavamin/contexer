@@ -1087,12 +1087,14 @@ _REASON_CLAUSE = re.compile(
     r"[,;]?\s+(?:because|since|so that|to avoid|to prevent|in order to)\b.*$", re.IGNORECASE | re.DOTALL)
 
 
+def _leading_rule(text: str) -> str:
+    """The first sentence of `text` without its trailing reason clause."""
+    return _REASON_CLAUSE.sub("", (_first_sentence_of(text) or text).strip())
+
+
 def _states_opposite_rule(content: str, entry: dict) -> bool:
-    """True when `content` reverses `entry`'s rule, both read alike and without a trailing reason."""
-    incoming = content if entry.get("created_by") not in ("ai", "plan") else _first_sentence_of(content) or content
-    rule = _REASON_CLAUSE.sub("", incoming.strip())
-    statement = _REASON_CLAUSE.sub("", _decision_statement(entry).strip())
-    return _is_polarity_reversal(rule, statement)
+    """True when the leading rule of `content` reverses the leading rule of `entry`."""
+    return _is_polarity_reversal(_leading_rule(content), _leading_rule(revisions.current_content(entry)))
 
 
 def _decision_statement(entry: dict) -> str:
