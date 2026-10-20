@@ -750,6 +750,22 @@ def test_capture_guidance_names_the_local_scopes_prompt_capture_ignores():
         assert phrase in server._INSTRUCTIONS
 
 
+def test_capture_guidance_asks_for_rejected_options_after_the_decision():
+    text = " ".join(server._INSTRUCTIONS.split())
+    assert "state the decision and its why first, then name each option you weighed and rejected" in text
+    assert "never a brainstorm list" in text
+
+
+def test_capture_shaped_with_rejected_options_passes_capture_lint():
+    content = ("Use the injected fake_clock fixture for time in tests, because freezing system "
+               "time leaks between tests. Rejected: freezegun, because it patches time globally "
+               "and broke parallel runs; a sleep-based wait, because it made the suite slow and "
+               "flaky; a per-test monkeypatch of time.time, because modules that imported time "
+               "earlier keep the real clock. " + "Detail. " * 30)
+    assert len(content) > store._LINT_MIN_LEN
+    assert store.capture_lint(content) == ""
+
+
 def test_update_context_bounces_narrative(tmp_repo, monkeypatch):
     # The WRITE path resolves verbosely (it stamps repo_source onto the new entry), so the
     # double has to mirror that - patching _resolve_repo alone no longer intercepts it.

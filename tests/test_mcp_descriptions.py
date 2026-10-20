@@ -22,6 +22,7 @@ UPDATE_BUDGET = 3800
 # coverage map when rewording; a keyword alone cannot establish contract visibility.
 CONTRACT = {
     "capture": "Called when Claude Code makes a significant decision mid-task. The server filters before storing.",
+    "rejected_options": "Put the decision and its why first, then each option you weighed and rejected, with why.",
     "comprehension": "A synthesized understanding of how a subsystem works - produced by exploring or reading the codebase to answer a question - is also capture-worthy (subtype='architecture' for subsystem behaviour/structure, 'pattern' for recurring code organization); store it in the SAME turn as the exploration, since sessions often end right after the answer and there may be no next prompt to catch it.",
     "subtypes": "subtype: optional classification - architecture | constraint | pattern | convention.",
     "provenance": "'plan' (approved but unimplemented plan: PROVISIONAL/suggested until implementation validates it, then reconciled)",

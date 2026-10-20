@@ -1,6 +1,6 @@
 {
   "mcp-1.29.0": {
-    "instructions_sha256": "7b5518958e3ec1b46b9cd70f76a70d96bf6c781af09c3e30f109e979638dd765",
+    "instructions_sha256": "6d6424bbc9938aee9d0f215f35baf1cb505910d47f233adf1670465c37cc19c4",
     "tools": {
       "approve_decision": {
         "defaults_sha256": "3760fd54d2310e070a46847587b84a15cc1f65dacbfcc61a039e24e0085dcbe9",
@@ -109,7 +109,7 @@
     }
   },
   "mcp-1.9.4": {
-    "instructions_sha256": "7b5518958e3ec1b46b9cd70f76a70d96bf6c781af09c3e30f109e979638dd765",
+    "instructions_sha256": "6d6424bbc9938aee9d0f215f35baf1cb505910d47f233adf1670465c37cc19c4",
     "tools": {
       "approve_decision": {
         "defaults_sha256": "3760fd54d2310e070a46847587b84a15cc1f65dacbfcc61a039e24e0085dcbe9",

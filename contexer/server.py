@@ -49,7 +49,10 @@ _INSTRUCTIONS = (
     "would surprise a future session. A synthesized understanding of how a subsystem works, reached "
     "by exploring the codebase to answer a question, is capture-worthy too (subtype=architecture) - "
     "store it the same turn, since the session may end with the answer. Pass the full reasoning, not "
-    "just the conclusion, and always pass a concise, one-line, imperative title (<= 100 chars) "
+    "just the conclusion: state the decision and its why first, then name each option you weighed "
+    "and rejected, with why, so a later session does not re-propose it. Name only options actually "
+    "weighed for this decision, never a brainstorm list. Always pass a concise, one-line, "
+    "imperative title (<= 100 chars) "
     "summarizing the decision - e.g. 'Use Postgres for decision store' - omit it only if you truly "
     "can't summarize better than the store's own derivation from content. When the content has more than "
     f"{revisions.MAX_SUMMARY_SENTENCES} sentences, a sentence over {revisions.MAX_SUMMARY_SENTENCE_WORDS} "
@@ -86,6 +89,7 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
                    source_files: list[str] | None = None,
                    applies_when: list[str] | None = None, summary: str = "") -> str:
     """Called when Claude Code makes a significant decision mid-task. The server filters before storing.
+    Put the decision and its why first, then each option you weighed and rejected, with why.
 
     If this returns a 'pending review' notice, the decision is recorded but NOT yet trusted and
     does not block your work - keep going. Surface it to the developer for approval at a natural
@@ -103,27 +107,27 @@ def update_context(content: str, repo_path: str = "", subtype: str = "",
 
     subtype: optional classification - architecture | constraint | pattern | convention.
     created_by: 'ai' (default) | 'plan' (approved but unimplemented plan: PROVISIONAL/suggested
-                until implementation validates it, then reconciled) | 'bootstrap'/'scan'
-                (legacy provenance). New bootstrap findings use bootstrap_context's evidence/report workflow.
+        until implementation validates it, then reconciled) | 'bootstrap'/'scan'
+        (legacy provenance). New bootstrap findings use bootstrap_context's evidence/report workflow.
     replace_id: existing decision ID (full UUID or 8-char prefix); bypasses similarity filtering.
-                Decisions are versioned, never overwritten. A trivial change (typo/formatting,
-                pattern/convention) becomes a new revision in place, keeping history. A significant
-                change (architecture/constraint) becomes a Suggested Update attached to the live
-                decision; the current revision stays trusted until the developer approves.
+        Decisions are versioned, never overwritten. A trivial change (typo/formatting,
+        pattern/convention) becomes a new revision in place, keeping history. A significant
+        change (architecture/constraint) becomes a Suggested Update attached to the live
+        decision; the current revision stays trusted until the developer approves.
     source_files: repo-relative files or directory prefixes (max 10) described by this decision.
-                Use trailing slashes for prefixes, e.g. `contexer/`; existing directories are
-                normalized automatically. Include described files for comprehension summaries
-                so changed code can flag them as possibly stale. Anchors use fresh files + current
-                HEAD on new decisions and replace_id corrections once corrected text is live:
-                immediately for trivial corrections or re-capture of still-accurate content;
-                only on developer approval for significant corrections, while OLD content stays live.
-                Never re-anchor on recurrence. For "[may be stale: ...]", re-read the named files
-                and re-capture via replace_id with source_files again to refresh immediately or
-                on approval. Omitting source_files keeps the old anchor and stale warning.
+        Use trailing slashes for prefixes, e.g. `contexer/`; existing directories are
+        normalized automatically. Include described files for comprehension summaries
+        so changed code can flag them as possibly stale. Anchors use fresh files + current
+        HEAD on new decisions and replace_id corrections once corrected text is live:
+        immediately for trivial corrections or re-capture of still-accurate content;
+        only on developer approval for significant corrections, while OLD content stays live.
+        Never re-anchor on recurrence. For "[may be stale: ...]", re-read the named files
+        and re-capture via replace_id with source_files again to refresh immediately or
+        on approval. Omitting source_files keeps the old anchor and stale warning.
     title: concise, one-line, imperative summary (<=100 chars), e.g. 'Use Postgres for decision store'.
-           Omit only if you cannot summarize better than the store's derivation from content.
+        Omit only if you cannot summarize better than the store's derivation from content.
     summary: needed when content has >5 sentences, one >20 words, or >600 chars: 1-5 short
-           ASD-STE100 sentences for the reviewer, never models. Missing: restate notice, not stored.
+        ASD-STE100 sentences for the reviewer, never models. Missing: restate notice, not stored.
 
     applies_when: up to eight specific task phrases (2+ words, <=100 characters each)
     describing situations that need this decision, each with a situation-specific word (not
