@@ -843,7 +843,8 @@ def _find_statement_restatement(content: str, existing: list) -> dict | None:
             continue
         if not tokens <= _tokenize(entry.get("content", "")):
             continue
-        if _overlap_ratio(statement, _tokenize(_decision_statement(entry))) > 0.7:
+        decision = _tokenize(_decision_statement(entry))
+        if statement <= decision and _overlap_ratio(statement, decision) > 0.7:
             return entry
     return None
 
@@ -1099,11 +1100,12 @@ def _states_opposite_rule(content: str, entry: dict) -> bool:
     stored = [(rule, _tokenize(rule)) for rule in _rules(revisions.current_content(entry))]
     for rule in _rules(content):
         tokens = _tokenize(rule)
-        scored = [(_containment_ratio(tokens, old_tokens), old) for old, old_tokens in stored if old_tokens]
+        scored = [(_containment_ratio(tokens, old_tokens), _overlap_ratio(tokens, old_tokens), old)
+                  for old, old_tokens in stored if old_tokens]
         if not tokens or not scored:
             continue
-        overlap, old = max(scored, key=lambda pair: pair[0])
-        if overlap > 0.5 and _is_polarity_reversal(rule, old):
+        contained, _, old = max(scored, key=lambda scores: scores[:2])
+        if contained > 0.5 and _is_polarity_reversal(rule, old):
             return True
     return False
 

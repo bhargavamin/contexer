@@ -8001,6 +8001,8 @@ class TestDecisionStatementMatching:
          "Never use uv for Python dependencies. Rejected pip because it skips the lockfile and breaks "
          "reproducible builds.", True),
         ("narrowed reversal", "Use uv for Python dependencies in every service.", "Never use uv.", True),
+        ("exact repeat of two rules on one subject", "Use uv. Never use uv in production.",
+         "Use uv. Never use uv in production.", False),
         ("later rule repeated with a reason dropped", f"{FAKE}. Use freezegun for integration tests to avoid flakes.",
          f"{FAKE}. Use freezegun for integration tests.", False),
     ]
@@ -8019,6 +8021,18 @@ class TestDecisionStatementMatching:
         entries = [e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision"]
         assert len(entries) == (2 if is_new else 1)
         assert sorted(e.get("occurrence_count", 1) for e in entries) == ([1, 1] if is_new else [2])
+
+    def test_switch_to_a_rejected_option_is_not_a_terse_restatement(self, tmp_repo):
+        store.update_decision(
+            tmp_repo, "Always use the injected fake_clock fixture for time in tests. Rejected freezegun because "
+            "it patches time globally and broke parallel runs.", "s1", "convention", created_by="ai")
+        stored, _ = store.update_decision(
+            tmp_repo, "Always use the injected freezegun fixture for time in tests.", "s2", "convention",
+            created_by="ai")
+        assert stored
+        entries = [e for e in store.load(tmp_repo)["entries"] if e["type"] == "decision"]
+        assert len(entries) == 2
+        assert all(e.get("occurrence_count", 1) == 1 for e in entries)
 
     def test_exact_restatement_via_update_decision_is_still_a_recurrence(self, tmp_repo):
         store.update_decision(tmp_repo, self.RULE, "s1", "convention", created_by="ai")
