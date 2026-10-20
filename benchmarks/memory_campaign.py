@@ -41,7 +41,7 @@ from benchmarks.fixtures.generate import build_webapi
 from benchmarks.memory_home import memory_dir, memory_files
 from benchmarks.otel import OtelReceiver
 from benchmarks.run import (_MANAGED_SETTINGS, _append, _condition_b_setup, _fresh,
-                             _run_session, _session_env, _telemetry_check, _tool_calls)
+                             _run_session, _session_env, _telemetry_check, _tool_calls, _uv_env)
 
 TEACHING_FILE = Path(__file__).resolve().parent / "teaching.json"
 TASKS_FILE = Path(__file__).resolve().parent / "memory_tasks.json"
@@ -141,8 +141,8 @@ def _find_never_log_id(work: Path, home: Path) -> tuple[str | None, str | None]:
             "and store.entry_status(e) == 'approved'), None)\n"
             "import sys\n"
             "sys.exit(3) if hit is None else print(hit)\n")
-    proc = subprocess.run(["uv", "run", "python", "-c", code], cwd=_SRC,
-                          env=_session_env(home, 0), capture_output=True, text=True)
+    proc = subprocess.run(["uv", "run", "--frozen", "python", "-c", code], cwd=_SRC,
+                          env=_uv_env(home), capture_output=True, text=True)
     if proc.returncode == 0:
         return proc.stdout.strip(), None
     if proc.returncode == 3:
@@ -164,14 +164,14 @@ def _enf_commit_setup(work: Path, home: Path) -> tuple[bool, str]:
         return False, f"enf setup: {probe_err}"
     if not decision_id:
         return False, "enf setup: taught rule not captured/approved"
-    env = _session_env(home, 0)
-    arm = subprocess.run(["uv", "run", "--project", str(_SRC), "contexer", "guard", "arm",
+    env = _uv_env(home)
+    arm = subprocess.run(["uv", "run", "--frozen", "--project", str(_SRC), "contexer", "guard", "arm",
                          decision_id, "--regex", _ENF_REGEX, "--flags", "i"],
                         cwd=work, env=env, capture_output=True, text=True)
     if arm.returncode != 0:
         return False, f"enf setup: guard arm failed rc={arm.returncode}: {arm.stderr[-300:]}"
-    hook = subprocess.run(["uv", "run", "--project", str(_SRC), "contexer", "guard", "--install-hook"],
-                          cwd=work, env=env, capture_output=True, text=True)
+    hook = subprocess.run(["uv", "run", "--frozen", "--project", str(_SRC), "contexer", "guard",
+                           "--install-hook"], cwd=work, env=env, capture_output=True, text=True)
     if hook.returncode != 0:
         return False, f"enf setup: guard install-hook failed rc={hook.returncode}: {hook.stderr[-300:]}"
     return True, ""

@@ -269,7 +269,7 @@ class TestSeeding:
 
     def test_a_refused_seed_names_itself_in_the_row_error(self, tmp_path, monkeypatch):
         def fake_run(args, **kw):
-            if args[:3] == ["uv", "run", "python"]:
+            if args[:4] == ["uv", "run", "--frozen", "python"]:
                 raise subprocess.CalledProcessError(
                     1, args, stderr=b"Traceback ...\nAssertionError: seed not stored: Caches")
         monkeypatch.setattr(run.subprocess, "run", fake_run)

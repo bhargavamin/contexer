@@ -15,6 +15,25 @@ def _stub(tmp_path):
     p.chmod(p.stat().st_mode | stat.S_IEXEC)
     return str(p)
 
+def test_guard_setup_runs_uv_frozen_with_the_checkouts_uv_settings(tmp_path, monkeypatch):
+    """A uv call missing CI's UV_PYTHON picked another interpreter and rebuilt the shared venv."""
+    import subprocess
+
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 0, stdout="abc12345\n", stderr="")
+
+    monkeypatch.setenv("UV_PYTHON", "3.13")
+    monkeypatch.setattr(mc.subprocess, "run", fake_run)
+    assert mc._enf_commit_setup(tmp_path / "work", tmp_path / "home") == (True, "")
+    assert len(calls) == 3
+    for args, kwargs in calls:
+        assert args[:3] == ["uv", "run", "--frozen"]
+        assert kwargs["env"]["UV_PYTHON"] == "3.13"
+
+
 def test_rerun_into_existing_out_dir_fails_loud(tmp_path):
     """Greptile P1: _append is pure append-mode and campaign.json is unconditionally
     overwritten, so a second run into the same --out would silently mix this run's

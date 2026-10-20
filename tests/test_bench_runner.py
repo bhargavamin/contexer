@@ -5,7 +5,7 @@ import stat
 
 import pytest
 
-from benchmarks.run import run_campaign, _session_env
+from benchmarks.run import run_campaign, _session_env, _uv_env
 
 STUB = """#!/bin/sh
 mkdir -p app 2>/dev/null || true
@@ -57,6 +57,20 @@ def test_bootstrap_setup_uses_stable_tool_surface(tmp_path, monkeypatch):
     assert captures[1][1] == {"created_by": "human"}  # only explicit campaign seed is policy
 
 
+def test_setup_runs_uv_frozen_with_the_checkouts_uv_settings(tmp_path, monkeypatch):
+    """A uv call missing CI's UV_PYTHON picked another interpreter and rebuilt the shared venv."""
+    from benchmarks import run
+
+    calls = []
+    monkeypatch.setenv("UV_PYTHON", "3.13")
+    monkeypatch.setattr(run.subprocess, "run", lambda args, **kwargs: calls.append((args, kwargs)))
+    run._condition_b_setup(str(tmp_path), tmp_path / "isolated", "Keep billing idempotent.")
+    assert len(calls) == 2
+    for args, kwargs in calls:
+        assert args[:3] == ["uv", "run", "--frozen"]
+        assert kwargs["env"]["UV_PYTHON"] == "3.13"
+
+
 def _run_stubbed_campaign(*args, **kwargs):
     """Run the benchmark harness against a local test stub."""
     return run_campaign(*args, **kwargs, wait_for_otel=False)
@@ -92,6 +106,15 @@ class TestSessionEnv:
         assert "CLAUDE_CONFIG_DIR" not in env and "XDG_CONFIG_HOME" not in env
         assert env["HOME"] == str(tmp_path)
         assert env["ANTHROPIC_API_KEY"] == "sk-test"
+
+    def test_uv_env_keeps_uv_settings_and_still_strips_config_overrides(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("UV_PYTHON", "3.13")
+        monkeypatch.setenv("UV_PYTHON_INSTALL_DIR", "/opt/uv-python")
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/should/not/leak")
+        env = _uv_env(tmp_path)
+        assert env["UV_PYTHON"] == "3.13" and env["UV_PYTHON_INSTALL_DIR"] == "/opt/uv-python"
+        assert "CLAUDE_CONFIG_DIR" not in env and env["HOME"] == str(tmp_path)
+        assert "UV_PYTHON" not in _session_env(tmp_path, otel_port=0)
 
     def test_otel_vars_present_when_port_given(self, tmp_path):
         env = _session_env(tmp_path, otel_port=4318)
