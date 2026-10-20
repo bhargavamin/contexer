@@ -559,3 +559,34 @@ class TestApprovalPaths:
         assert eid2 == eid and status == "pending_approval" and "payment_endpoint" in content
         entry = _entry(tmp_repo, eid)
         assert "summary" not in entry and "summary" not in revisions.current_revision(entry)
+
+
+class TestApprovalMessage:
+    """Review surfaces show the approval message after moving to the next card, so it names the
+    approved decision by its title, not a cut of its full text."""
+
+    def test_approving_a_pending_decision_names_its_title(self, tmp_repo):
+        ok, eid = store.update_decision(tmp_repo, LONG, "s1", "constraint", summary=SUMMARY,
+                                        title="Reach the store directory through its helpers")
+        ok, message = store.approve_decision(tmp_repo, eid, "approve")
+        assert ok
+        assert message.endswith('"Reach the store directory through its helpers"')
+        assert "Production never touches" not in message
+
+    def test_approving_a_suggested_update_names_its_title(self, tmp_repo):
+        ok, eid = store.update_decision(tmp_repo, LONG, "s1", "architecture", created_by="human",
+                                        title="Reach the store directory through its helpers")
+        store.update_decision(tmp_repo, LONG + " Also for global rules.", "s2", "architecture",
+                              replace_id=eid, summary=SUMMARY, title="Reach every store path through helpers")
+        assert _entry(tmp_repo, eid).get("proposed_revision"), "a Suggested Update waits"
+        ok, message = store.approve_decision(tmp_repo, eid, "approve")
+        assert ok and message.startswith("Approved. Now revision 2")
+        assert message.endswith('"Reach every store path through helpers"')
+
+    def test_a_decision_with_no_stored_title_names_its_derived_one(self, tmp_repo):
+        ok, eid = store.update_decision(tmp_repo, LONG, "s1", "constraint", summary=SUMMARY)
+        data = store.load(tmp_repo)
+        next(e for e in data["entries"] if e.get("id") == eid).pop("title", None)
+        store.save(tmp_repo, data)
+        ok, message = store.approve_decision(tmp_repo, eid, "approve")
+        assert message.endswith(f'"{revisions.derive_title(LONG)}"')

@@ -4129,10 +4129,8 @@ def apply_approval(data: dict, entry_id: str, action: str, content: str,
             # mistake an unratified relationship for scope.
             entry.pop("anchor_candidates", None)
             entry.pop("anchor_candidates_confirmed", None)
-        stored = revisions.current_content(entry)
-        preview = stored[:80] + ("..." if len(stored) > 80 else "")
         verb = "Updated and approved" if action == "edit" else "Approved"
-        return True, f"{verb}. Now revision {entry['revision']}: \"{preview}\"", True
+        return True, f"{verb}. Now revision {entry['revision']}: \"{_approved_title(entry)}\"", True
 
     # Parsed configuration facts already speak for the checked-out source and are not policy
     # awaiting a signature.  Approving one creates a duplicate authoritative rule beside any
@@ -4216,10 +4214,15 @@ def apply_approval(data: dict, entry_id: str, action: str, content: str,
     elif entry.get("anchor_candidates"):
         entry.pop("anchor_candidates", None)
         entry.pop("anchor_candidates_confirmed", None)
-    stored_content = revisions.current_content(entry)
-    preview = stored_content[:80] + ("..." if len(stored_content) > 80 else "")
     verb = "Updated and approved" if action == "edit" else "Approved"
-    return True, f"{verb}. This decision is now trusted knowledge: \"{preview}\"", True
+    return True, f"{verb}. This decision is now trusted knowledge: \"{_approved_title(entry)}\"", True
+
+
+def _approved_title(entry: dict) -> str:
+    """The decision an approval message names: its title, else one derived from its content.
+    The review surfaces show this message after moving to the next card, so it names the
+    decision by the one line the reviewer saw on its card, not a cut of its full text."""
+    return entry.get("title") or revisions.derive_title(revisions.current_content(entry))
 
 
 def set_review_summary(repo_path: str, entry_id: str, summary: str, *,
