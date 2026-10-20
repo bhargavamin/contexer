@@ -11,7 +11,7 @@
 // It fails silent: no `contexer` answering, or a queue shape this mod does not know
 // (`protocol` mismatch after an upgrade mid-session), means no band and no pane content.
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, RenderChildren } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren, ThemeKey } from 'claude-code'
 
 import type { Applicability, ConflictAction, ConflictSide, CurrentConflict, ReviewAction, ReviewItem, ReviewItemKind, ReviewQueue } from '../types'
 
@@ -32,6 +32,8 @@ const editing = atom({ plugin: 'contexer-review', key: 'editing' } as const, nul
 const note = atom({ plugin: 'contexer-review', key: 'note' } as const, null)
 const cursor = atom({ plugin: 'contexer-review', key: 'cursor' } as const, null)
 const isPaneOpen = atom({ plugin: 'contexer-review', key: 'isPaneOpen' } as const, false)
+const showFull = atom({ plugin: 'contexer-review', key: 'showFull' } as const, null)
+const summarizing = atom({ plugin: 'contexer-review', key: 'summarizing' } as const, null)
 const isOtherSuggested = atom({ plugin: 'contexer-review', key: 'isOtherSuggested' } as const, false)
 
 // The `contexer` that installed this mod: the console script of the same tool venv
@@ -183,6 +185,10 @@ async function openPane($: EngineInterface, onSeated?: () => void): Promise<bool
   await update($, note, () => null)
   await update($, editing, () => null)
   await update($, cursor, () => null)
+  await update($, showFull, () => null)
+  // A write a reloaded module started can never clear its own mark, which would stop every
+  // later summary: a fresh open starts unmarked.
+  await update($, summarizing, () => null)
   const opened = await $.ui.open(OPEN)
   await update($, isPaneOpen, () => opened.isPlaced)
   if (opened.isPlaced) onSeated?.()
@@ -199,6 +205,77 @@ async function isPaneDrawn($: EngineInterface): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+// A card leads with its review summary: a few plain sentences for the developer, while the
+// full text (what the model reads and what Approve signs) stays one press away. A decision
+// with neither gets one written by a small model through the session (`$.model.complete`,
+// SUMMARY_MODEL) the first time its card shows, stored through `contexer review --json
+// summarize` so the terminal and the web console show it too. Once per card text in this
+// module's life: a refused or failed write is not retried until the mod reloads, and the card
+// meanwhile shows the full text.
+const SUMMARY_MODEL = 'haiku'
+const SUMMARY_SYSTEM = [
+  'You write review summaries of engineering decisions for the developer who approves them.',
+  'Use ASD-STE100 Simplified Technical English: 1 to 5 sentences, at most 20 words each,',
+  'active voice, one idea per sentence, common words. Say what the decision requires and why.',
+  'Leave out code detail, file paths and history. Reply with the summary text only.',
+].join(' ')
+const asked = new Set<string>()
+// Shown where a version's text goes while its summary is being written.
+const WRITING = 'Writing a summary…'
+// One write at a time: a card's two versions share one basis, and the first write changes it,
+// so a second sent beside it would always be refused. The redraw after a write lands asks for
+// the next version with the fresh basis. `isWriting` holds off a second call in the same tick;
+// `summarizing` in `$.state` holds off one a hot reload would let through, since a reload
+// resets this module's variables while the write it started is still in flight.
+let isWriting = false
+
+type SummaryTarget = { id: string; text: string; ofProposal: boolean; expect?: string }
+
+function summaryToken(target: SummaryTarget): string {
+  return `${target.id}:${target.ofProposal ? 'proposed' : 'current'}:${target.text.length}:${target.expect ?? ''}`
+}
+
+async function writeSummary($: EngineInterface, cardKey: string, wants: SummaryTarget[]): Promise<void> {
+  if (isWriting) return
+  const target = wants.find(want => !asked.has(summaryToken(want)))
+  if (!target) return
+  isWriting = true
+  // Every await sits inside the try, so a failed state call cannot leave `isWriting` set.
+  // Only a write that marked `summarizing` clears it: one held off by another's mark leaves it.
+  let isMarked = false
+  try {
+    if ((await read($, summarizing)) != null) return
+    asked.add(summaryToken(target))
+    isMarked = true
+    await update($, summarizing, () => cardKey)
+    const reply = await $.model.complete({
+      model: SUMMARY_MODEL, system: SUMMARY_SYSTEM, prompt: target.text, maxTokens: 400,
+    })
+    if (!reply.isAnswered) return
+    const args = ['summarize', target.id, '--summary', reply.text.trim()]
+    if (target.ofProposal) args.push('--proposal')
+    if (target.expect) args.push('--expect', target.expect)
+    const out = await contexer($, args)
+    const mine = await take($)
+    if (isQueue(out?.queue)) await land($, mine, out.queue as ReviewQueue)
+  } catch {
+    // fail silent: the card keeps showing the full text
+  } finally {
+    isWriting = false
+    if (isMarked) await update($, summarizing, current => (current === cardKey ? null : current))
+  }
+}
+
+// `summary_source` is the content with secrets scrubbed (console_api._add_summary_source): the
+// only text the summary model is sent, since that call leaves the machine.
+type Summarized = { content: string; summary?: string | null; needs_summary?: boolean; summary_source?: string }
+
+// What a card leads with for one version of a decision: its stored review summary, else the
+// full text (the queue sends `summary` only when one is stored).
+function isStandIn(record: Summarized): record is Summarized & { summary: string } {
+  return !!record.summary
 }
 
 // The engine refuses a pane's focus request while the band holds the keys, so a pane opened by
@@ -268,6 +345,23 @@ const ACTION_LABEL: Record<ReviewAction, string> = {
 }
 
 const ACTION_HOTKEY: Record<ReviewAction, string> = { approve: 'a', edit: 'e', ignore: 'i', dismiss: 'd' }
+
+// Each button's colour says what a press does, in the person's theme colours (ThemeKey, so a
+// misspelt one fails the type check), so it reads on light and dark terminals alike. Settling
+// and closing sit on a soft tint; the rest are coloured text only, quieter: blue edits, yellow
+// sets aside, subtle moves. The view in use is bold blue text; the other view is dim.
+type Tone = 'settle' | 'edit' | 'aside' | 'close' | 'move' | 'view' | 'idle'
+type ToneStyle = { color?: ThemeKey; backgroundColor?: ThemeKey; bold?: boolean; dimColor?: boolean }
+const TONE: Record<Tone, ToneStyle> = {
+  settle: { color: 'success', backgroundColor: 'diffAddedDimmed', bold: true },
+  close: { color: 'error', backgroundColor: 'diffRemovedDimmed' },
+  edit: { color: 'suggestion' },
+  aside: { color: 'warning' },
+  move: { color: 'subtle' },
+  view: { color: 'suggestion', bold: true },
+  idle: { dimColor: true },
+}
+const ACTION_TONE: Record<ReviewAction, Tone> = { approve: 'settle', edit: 'edit', ignore: 'aside', dismiss: 'aside' }
 
 // Whole text, trailing space trimmed per line; paragraph breaks kept.
 function full(text: string): string {
@@ -435,7 +529,18 @@ export const register: Register = on => {
     const q = await read($, queue)
     const message = await read($, note)
     const editingId = await read($, editing)
-    const close = <Button key="close" label="Close" role="dismiss" dimColor onPress={() => closePane($)} />
+    // A plain Button (its hotkey, then its label) whose label is drawn in its tone: one label
+    // names the control and is what it shows. The focus and the pointer still invert it.
+    type ChipButton = {
+      key: string; label: string; tone: Tone; onPress: () => unknown
+      hotkey?: string; variant?: 'primary'; role?: 'dismiss'
+    }
+    const chipButton = ({ key: id, label, tone, onPress, ...rest }: ChipButton) => (
+      <Button plain key={id} label={label} onPress={() => { void onPress() }} {...rest}>
+        <Text {...TONE[tone]}>{` ${label} `}</Text>
+      </Button>
+    )
+    const close = chipButton({ key: 'close', label: 'Close', tone: 'close', role: 'dismiss', onPress: () => closePane($) })
 
     if (!q) {
       return (
@@ -461,9 +566,41 @@ export const register: Register = on => {
     const at = cardAt(cards, await read($, cursor))
     const card = cards[at] as Card
     const key = cardKey(card)
+    // Every card starts on its summary: the toggle holds for the card it was pressed on only,
+    // and is cleared when the developer moves to another card or opens the pane again.
+    const [fullKey, summarizingKey] = await Promise.all([read($, showFull), read($, summarizing)])
+    const isFull = fullKey === key
+    const isSummarizing = summarizingKey === key
+    const wants: SummaryTarget[] = []
+    let hasStandIn = false
+    let lacksSummary = false
+    let isWritingShown = false
+    // One version's text as the card shows it: the summary; else, while the pane is writing one
+    // (or about to), a placeholder where the text goes rather than the long text it replaces;
+    // else the full text, tagged at the top when long. Only a target that carries the card's
+    // basis is backfilled: the write is then refused once the text it summarized changed. A
+    // conflict side or a basis-less item keeps its full text.
+    const reading = (record: Summarized, at: Omit<SummaryTarget, 'text'>): string => {
+      if (!isFull && isStandIn(record)) {
+        hasStandIn = true
+        return record.summary
+      }
+      if (record.needs_summary && at.expect && record.summary_source) {
+        const target = { ...at, text: record.summary_source }
+        wants.push(target)
+        if (!isFull && (isSummarizing || !asked.has(summaryToken(target)))) {
+          isWritingShown = true
+          return WRITING
+        }
+      }
+      if (record.needs_summary) lacksSummary = true
+      return full(record.content)
+    }
 
     const badge = ({ label, color }: Badge) => (
-      <Text key={`badge-${label}`} bold color="black" backgroundColor={color}>{` ${label} `}</Text>
+      <Box key={`badge-${label}`} flexShrink={0}>
+        <Text bold color="black" backgroundColor={color}>{` ${label} `}</Text>
+      </Box>
     )
     // A label column keeps the values aligned: NOW, PROPOSED, APPLIES.
     const field = (name: string, value: string, dim = false) => (
@@ -489,8 +626,11 @@ export const register: Register = on => {
         const after = applicability(item.proposed.applies_when ?? item.applies_when)
         body.push(
           <Box key={`fields-${key}`} flexDirection="column">
-            {field('NOW', full(item.content), true)}
-            {field('PROPOSED', full(item.proposed.content))}
+            {field('NOW', reading(item, { id: item.id, ofProposal: false, expect: item.basis }), true)}
+            {(() => {
+              const proposed = reading(item.proposed, { id: item.id, ofProposal: true, expect: item.basis })
+              return field('PROPOSED', proposed, proposed === WRITING)
+            })()}
             {field('APPLIES', before === after ? before : `${before} → ${after}`, true)}
           </Box>,
         )
@@ -498,7 +638,10 @@ export const register: Register = on => {
       } else {
         body.push(
           <Box key={`fields-${key}`} flexDirection="column">
-            <Text>{full(item.content)}</Text>
+            {(() => {
+              const text = reading(item, { id: item.id, ofProposal: false, expect: item.basis })
+              return <Text dimColor={text === WRITING}>{text}</Text>
+            })()}
             {field('APPLIES', applicability(item.applies_when), true)}
           </Box>,
         )
@@ -534,25 +677,24 @@ export const register: Register = on => {
                 ? act($, 'edit', item.id, { content: value.trim(), expect: item.basis })
                 : update($, note, () => 'Type the new wording, then press Enter.'))}
             />
-            <Button key={`cancel-${item.id}`} label="Cancel" dimColor onPress={() => update($, editing, () => null)} />
+            {chipButton({ key: `cancel-${item.id}`, label: 'Cancel', tone: 'move', onPress: () => update($, editing, () => null) })}
           </Box>
         )
       } else if (item.actions.length === 0) {
         actions = <Text key={`terminal-${key}`} dimColor>Decide this one with `contexer review` in a terminal.</Text>
       } else {
         actions = (
-          <Box key={`actions-${key}`} gap={1}>
+          <Box key={`actions-${key}`} columnGap={1} flexWrap="wrap">
             {item.actions
               .filter(action => action !== 'edit' || Input)
-              .map(action => (
-                <Button
-                  key={`${action}-${item.id}`}
-                  label={actionLabel(item, action)}
-                  variant={action === 'approve' ? 'primary' : undefined}
-                  hotkey={ACTION_HOTKEY[action]}
-                  onPress={() => (action === 'edit' ? update($, editing, () => item.id) : act($, action, item.id, { expect: item.basis }))}
-                />
-              ))}
+              .map(action => chipButton({
+                key: `${action}-${item.id}`,
+                label: actionLabel(item, action),
+                tone: ACTION_TONE[action],
+                hotkey: ACTION_HOTKEY[action],
+                ...(action === 'approve' ? { variant: 'primary' as const } : {}),
+                onPress: () => (action === 'edit' ? update($, editing, () => item.id) : act($, action, item.id, { expect: item.basis })),
+              }))}
           </Box>
         )
       }
@@ -571,7 +713,7 @@ export const register: Register = on => {
           {sides.map(([one]) => (
             <Box key={`side-${key}-${one.id}`} width="50%" flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
               <Text bold>{one.title}</Text>
-              <Text>{full(one.content)}</Text>
+              <Text>{reading(one, { id: one.id, ofProposal: false })}</Text>
               <Text dimColor>{`${one.status} · applies: ${applicability(one.applies_when)}`}</Text>
               {one.proposed
                 ? <Text color="yellow">{`Unreviewed update: ${full(one.proposed.content)}`}</Text>
@@ -593,45 +735,95 @@ export const register: Register = on => {
             {sides.filter(([one]) => one.can_keep).map(([one, other]) => (
               // Keyed by pair too: one decision can contradict two others, and presses are
               // resolved by key, so a side-only key would let one press run another pair's Keep.
-              <Button
-                key={`keep-${key}-${one.id}`}
-                label={`Keep ${clip(one.title, KEEP_TITLE_CHARS)}`}
-                variant="primary"
-                onPress={() => act($, 'keep', one.id, { over: other.id, expect: pair.basis })}
-              />
+              chipButton({
+                key: `keep-${key}-${one.id}`,
+                label: `Keep ${clip(one.title, KEEP_TITLE_CHARS)}`,
+                tone: 'settle',
+                variant: 'primary',
+                onPress: () => act($, 'keep', one.id, { over: other.id, expect: pair.basis }),
+              })
             ))}
           </Box>
         )
     }
 
+    // The full text is what the model reads (and, on a card with Approve, what Approve signs):
+    // `f` switches to it and back, `s` returns to the summary. The card names the view it shows
+    // under its title, and the switch above it marks the view in use, so a reviewer always knows
+    // which one they read. A card whose summary view still shows a version in full (no summary
+    // and none being written) says so, rather than calling that text a summary.
+    const hasViews = hasStandIn || isWritingShown || isFull
+    const signs = card.kind === 'item' && card.item.actions.includes('approve')
+      ? 'the text the model reads and Approve signs'
+      : 'the text the model reads'
+    const [viewName, viewHint] = isFull
+      ? ['FULL TEXT', `${signs} · f or s for the summary`]
+      : lacksSummary
+        ? ['SUMMARY WHERE ONE EXISTS', 'a version with no summary shows in full · f for all full text']
+        : ['SUMMARY', 'f for the full text']
+    // At the top, under the title: a reviewer reads down from there.
+    if (hasViews) {
+      body.splice(1, 0, (
+        <Box key={`view-${key}`} columnGap={2} flexWrap="wrap">
+          <Text {...TONE.view}>{viewName}</Text>
+          <Text dimColor>{viewHint}</Text>
+        </Box>
+      ))
+    } else if (lacksSummary) {
+      body.splice(1, 0, <Text key={`no-summary-${key}`} dimColor>No summary</Text>)
+    }
+    if (!isFull && wants.some(want => !asked.has(summaryToken(want)))) {
+      // Asked after the draw, never inside it; `writeSummary` asks once per card text, one
+      // version at a time. Not gated on `isWriting`: the redraw a landing write causes comes
+      // before that write lets go, and it is what schedules the next version.
+      $.clock.after(0, () => {
+        void writeSummary($, key, wants)
+      })
+    }
+    const views = hasViews
+      ? (
+        <Box key="views" columnGap={1} flexWrap="wrap">
+          <Text dimColor>VIEW</Text>
+          {chipButton({ key: 'summary', label: 'Summary', tone: isFull ? 'idle' : 'view', hotkey: 's', onPress: () => update($, showFull, () => null) })}
+          {chipButton({ key: 'full', label: 'Full text', tone: isFull ? 'view' : 'idle', hotkey: 'f', onPress: () => update($, showFull, () => (isFull ? null : key)) })}
+        </Box>
+      )
+      : null
     const subtitle = card.kind === 'item' ? meta(card.item) : 'two current decisions disagree'
     const many = cards.length > 1
     const go = async (to: number) => {
+      if (isFull) await update($, showFull, () => null)
       await update($, cursor, () => ({ key: cardKey(cards[to] as Card), at: to }))
       await showCardTop($)
     }
     return (
       <Box flexDirection="column" gap={1} paddingX={1}>
-        <Box key="top" flexDirection="row" justifyContent="space-between">
-          <Box gap={1}>
+        {/* A narrow pane moves the navigation to its own line, rather than squeezing the badges
+            or pushing buttons past the edge: each part keeps its width, and only the subtitle
+            wraps. */}
+        <Box key="top" flexDirection="row" flexWrap="wrap" justifyContent="space-between" columnGap={2}>
+          <Box columnGap={1} flexWrap="wrap" flexShrink={1}>
             {badges.map(badge)}
-            <Text dimColor>{subtitle}</Text>
+            <Box flexShrink={1}><Text dimColor>{subtitle}</Text></Box>
           </Box>
-          <Box gap={1}>
-            {many ? <Button key="prev" label="‹" hotkey="p" dimColor onPress={() => go((at + cards.length - 1) % cards.length)} /> : null}
+          <Box columnGap={1} flexWrap="wrap" flexShrink={0}>
+            {many ? chipButton({ key: 'prev', label: '‹', tone: 'move', hotkey: 'p', onPress: () => go((at + cards.length - 1) % cards.length) }) : null}
             <Text dimColor>{progress(at, cards.length)}</Text>
-            {many ? <Button key="next" label="›" hotkey="n" dimColor onPress={() => go((at + 1) % cards.length)} /> : null}
+            {many ? chipButton({ key: 'next', label: '›', tone: 'move', hotkey: 'n', onPress: () => go((at + 1) % cards.length) }) : null}
           </Box>
         </Box>
         {anchors}
         {actions}
         {message ? <Text key="note" color="green">{`› ${message}`}</Text> : null}
+        {views}
         <Box key={`card-${key}`} flexDirection="column" borderStyle="round" borderColor={frame} paddingX={1} gap={1}>
           {body}
         </Box>
-        <Box key="bottom" flexDirection="row" justifyContent="space-between">
-          <Text dimColor>{many ? 'tab move · enter press · ↑↓ scroll · n/p next/previous · esc close' : 'tab move · enter press · ↑↓ scroll · esc close'}</Text>
-          {close}
+        <Box key="bottom" flexDirection="row" flexWrap="wrap" justifyContent="space-between" columnGap={2}>
+          <Box flexShrink={1}>
+            <Text dimColor>{many ? 'tab move · enter press · ↑↓ scroll · n/p next/previous · esc close' : 'tab move · enter press · ↑↓ scroll · esc close'}</Text>
+          </Box>
+          <Box flexShrink={0}>{close}</Box>
         </Box>
       </Box>
     )

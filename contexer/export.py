@@ -61,7 +61,9 @@ def render(repo_path: str, *, format: str = "md", include_retired: bool = False,
             consequences = entry.get("consequences") or "Consequences were not recorded separately."
             documents[filename(entry["id"])] = (
                 f"# {text(entry.get('title') or revisions.derive_title(revisions.current_content(entry)))}\n\n"
-                + "\n\n".join(metadata(entry)) + "\n\n## Context\n\n" + text(context)
+                + "\n\n".join(metadata(entry))
+                + (f"\n\n## Summary\n\n{text(entry['summary'])}" if entry.get("summary") else "")
+                + "\n\n## Context\n\n" + text(context)
                 + "\n\n## Decision\n\n" + text(revisions.current_content(entry))
                 + "\n\n## Consequences\n\n" + text(consequences) + "\n")
         return documents
@@ -73,7 +75,10 @@ def render(repo_path: str, *, format: str = "md", include_retired: bool = False,
             lines.extend([f"## {text(subtype or 'Unclassified')}", ""])
         lines.extend([f'<a id="decision-{entry["id"]}"></a>',
                       f"### {text(entry.get('title') or revisions.derive_title(revisions.current_content(entry)))}", "",
-                      *metadata(entry), "", text(revisions.current_content(entry)), ""])
+                      *metadata(entry), "",
+                      # The review summary, when one is stored, beside (never instead of) the text.
+                      *([f"_Summary: {text(entry['summary'])}_", ""] if entry.get("summary") else []),
+                      text(revisions.current_content(entry)), ""])
     return {"decisions.md": "\n".join(lines)}
 
 

@@ -126,7 +126,8 @@ def can_keep(entry: dict) -> bool:
 
 def pair_basis(left: dict, right: dict) -> str:
     """A short fingerprint of a contradiction as the review pane shows it: each side's wording,
-    title, applicability, status, whether it may be kept, and any pending Suggested Update.
+    title, applicability, review summary, status, whether it may be kept, and any pending
+    Suggested Update.
     `keep_current_side` recomputes it inside the retirement's lock, so a Keep pressed on a card
     whose sides another session has since changed is refused instead of retiring a decision in
     favour of wording the developer never saw. Order-independent: the pair is the same pair
@@ -136,6 +137,7 @@ def pair_basis(left: dict, right: dict) -> str:
                 "title": entry.get("title") or "", "status": store.entry_status(entry),
                 "applies_when": list(entry.get("applies_when") or []),
                 "can_keep": can_keep(entry),
+                "summary": revisions.normalize_summary(entry.get("summary") or ""),
                 "proposed": (entry.get("proposed_revision") or {}).get("content")}
     shown = sorted((side(left), side(right)), key=lambda one: str(one["id"]))
     blob = json.dumps(shown, sort_keys=True, ensure_ascii=False, default=str)

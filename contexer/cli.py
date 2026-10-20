@@ -29,9 +29,11 @@ Commands:
   review        Interactively approve, edit, ignore, or retire pending engineering
                 decisions; also surfaces possibly-overlapping rules for consolidation.
                 review --json [approve|edit|ignore|dismiss <id> [--content TEXT]
-                [--expect BASIS] | keep <id> --over <id> [--expect BASIS]] prints the
-                queue (or settles one item) as JSON for the Claude Code mod; --expect
-                refuses unless the item or pair still has the queue's `basis`.
+                [--expect BASIS] | keep <id> --over <id> [--expect BASIS]
+                | summarize <id> --summary TEXT [--proposal] [--expect BASIS]] prints
+                the queue (or settles one item, or stores a review summary) as JSON for the
+                Claude Code mod; --expect refuses unless the item or pair still has the
+                queue's `basis`.
   retire        Retire one decision - it leaves active context, keeping its history:
                 retire <id> --reason <text> [--replaced-by <id>].
   restore       Bring one retired decision back: restore <id> [--reason <text>].
@@ -490,6 +492,10 @@ def _review_json(rest: list) -> None:
     refusals and store failures included, and a refusal exits 1: the caller is a program, so it
     must never see a prompt or a traceback.
 
+    `summarize <id> --summary TEXT [--proposal]` stores a review summary for a decision's
+    current revision (or its Suggested Update) through `store.set_review_summary`; it settles
+    nothing and is checked against the same `--expect` basis when given.
+
     `keep <id> --over <id>` settles a pair of contradicting current decisions and is checked
     against that pair (`conflicts.keep_current_side`, with `--expect` the pair's `basis` from
     `conflicts.pair_basis`), not a pending item. Otherwise only the
@@ -525,6 +531,32 @@ def _review_json(rest: list) -> None:
             return
 
         action, args = rest[0], rest[1:]
+
+        def flag(name: str) -> str:
+            at = args.index(name) if name in args else -1
+            return args[at + 1].strip() if 0 <= at < len(args) - 1 else ""
+
+        if action == "summarize":
+            # A review summary written for a decision that has none (the pane's backfill). It
+            # settles nothing: content, approval state and what the model reads are untouched.
+            if not args or args[0].startswith("-"):
+                answer(False, "`review --json summarize` needs a decision id.")
+                return
+            summary, expect = flag("--summary"), flag("--expect")
+            if not summary:
+                answer(False, "`review --json summarize` needs the text: --summary TEXT.")
+                return
+
+            def still_shown(live: dict) -> str | None:
+                if expect and console_api.review_basis(live) != expect:
+                    return ("That decision changed since it was shown, so the summary was not "
+                            "saved.")
+                return None
+
+            answer(*store.set_review_summary(repo_path, args[0], summary,
+                                             of_proposal="--proposal" in args,
+                                             precondition=still_shown), repo_path)
+            return
         if action not in review.known_actions():
             answer(False, f"Unknown review action {action!r}: use one of "
                           f"{', '.join(sorted(review.known_actions()))}.")
@@ -532,10 +564,6 @@ def _review_json(rest: list) -> None:
         if not args or args[0].startswith("-"):
             answer(False, f"`review --json {action}` needs a decision id.")
             return
-
-        def flag(name: str) -> str:
-            at = args.index(name) if name in args else -1
-            return args[at + 1].strip() if 0 <= at < len(args) - 1 else ""
 
         entry_id, content, expect = args[0], flag("--content"), flag("--expect")
         if action in review.item_actions("current_conflict"):
@@ -634,9 +662,9 @@ def review() -> None:
             rev = entry.get("revision", 1)
             print(f"[{subtype}]  suggested update\n")
             print(f"Current (revision {rev}):")
-            _print_wrapped(revisions.current_content(entry))
+            has_full = _print_review_text(revisions.current_content(entry), entry)
             print("\nDetected:")
-            _print_wrapped(prop.get("content", ""))
+            has_full = _print_review_text(prop.get("content", ""), prop) or has_full
             steer = conflicts.memo_steer_line(entry)
             if steer:
                 print(f"\n{steer[:1].upper()}{steer[1:]}")
@@ -649,9 +677,11 @@ def review() -> None:
                       else store.entry_status(entry).replace("_", " "))
             print(f"[{subtype}]  {status}\n")
             print(title)
+            # A stored review summary stands in for the body; the full text is one key away.
+            has_full = False
             if body is not None:
                 print()
-                _print_wrapped(body)
+                has_full = _print_review_text(body, entry, judged=revisions.current_content(entry))
             print()
             if life:
                 _print_lifecycle_proposal(entry, life)
@@ -667,17 +697,30 @@ def review() -> None:
                 review_impact.review_impact(repo_path, entry, impact_context)):
             _print_wrapped(line, indent="", width=76)
         print()
+        full_key = "  [F] Full text" if has_full else ""
         if recon:
-            print("[Y] Restore  [E] Restore with edits  [D] Dismiss  [S] Skip  [Q] Quit")
+            print("[Y] Restore  [E] Restore with edits  [D] Dismiss  [S] Skip  [Q] Quit" + full_key)
         elif life:
-            print("[R] Retire  [D] Dismiss  [S] Skip  [Q] Quit")
+            print("[R] Retire  [D] Dismiss  [S] Skip  [Q] Quit" + full_key)
         elif prop:
-            print("[Y] Approve  [E] Edit  [D] Dismiss  [S] Skip  [Q] Quit")
+            print("[Y] Approve  [E] Edit  [D] Dismiss  [S] Skip  [Q] Quit" + full_key)
         else:
-            print("[Y] Approve  [E] Edit  [N] Ignore  [S] Skip  [Q] Quit")
+            print("[Y] Approve  [E] Edit  [N] Ignore  [S] Skip  [Q] Quit" + full_key)
 
         try:
             choice = input("> ").strip().upper()
+            # The full text is what an approval signs: [F] prints it, then asks again.
+            while has_full and choice in ("F", "FULL"):
+                print()
+                if prop:
+                    print(f"Current (revision {entry.get('revision', 1)}), full text:")
+                    _print_wrapped(revisions.current_content(entry))
+                    print("\nDetected, full text:")
+                    _print_wrapped(prop.get("content", ""))
+                else:
+                    _print_wrapped(revisions.current_content(entry))
+                print()
+                choice = input("> ").strip().upper()
         except (KeyboardInterrupt, EOFError):
             print("\nAborted.")
             break
@@ -694,7 +737,7 @@ def review() -> None:
             action = {"Y": "restore", "YES": "restore", "E": "restore_edit",
                       "EDIT": "restore_edit", "D": "dismiss",
                       "DISMISS": "dismiss"}.get(choice, "skip")
-            wording = ""
+            wording = summary = ""
             if action == "restore_edit":
                 print(f'Current: "{revisions.current_content(entry)}"')
                 try:
@@ -705,11 +748,17 @@ def review() -> None:
                     print("\nNo changes made, skipping.")
                     skipped += 1
                     continue
+                summary = _ask_review_summary(wording)
+                if summary is None:
+                    print("\nSkipped - the reconsideration stays pending.")
+                    skipped += 1
+                    continue
             if action == "skip":
                 skipped += 1
                 print("Skipped - the reconsideration stays pending.")
                 continue
-            ok, msg = lifecycle.reconsider_decision(repo_path, entry["id"], action, wording)
+            ok, msg = lifecycle.reconsider_decision(repo_path, entry["id"], action, wording,
+                                                    summary=summary)
             if not ok:
                 skipped += 1
             elif action == "dismiss":
@@ -777,8 +826,14 @@ def review() -> None:
                 skipped += 1
                 continue
             if new_content:
+                summary = _ask_review_summary(new_content)
+                if summary is None:
+                    print("\nSkipped.")
+                    skipped += 1
+                    continue
                 print(review_impact.anchor_confirmation(entry))
-                ok, msg = store.approve_decision(repo_path, entry["id"], "edit", new_content)
+                ok, msg = store.approve_decision(repo_path, entry["id"], "edit", new_content,
+                                                 summary=summary)
                 if ok:
                     edited += 1
                     share_policy.enqueue_after_local_mutation(repo_path, entry["id"])
@@ -811,6 +866,40 @@ def review() -> None:
         parts.append(f"{skipped} skipped")
     print(f"Review complete: {', '.join(parts) if parts else 'nothing changed'}.")
     _print_overlap_section(repo_path)
+
+
+def _print_review_text(content: str, record: dict, judged: str | None = None) -> bool:
+    """Print what a review card leads with for one version of a decision: its stored review
+    summary when it has one, else `content` (tagged when the text, `judged` if given, is long
+    enough to want one). Returns True when a summary stood in, so the card offers [F]."""
+    from contexer import revisions
+    summary = (record.get("summary") or "").strip()
+    if summary:
+        _print_wrapped(summary)
+        return True
+    _print_wrapped(content)
+    if revisions.needs_summary(content if judged is None else judged):
+        print("  (no summary)")
+    return False
+
+
+def _ask_review_summary(content: str) -> str | None:
+    """Ask for an optional review summary of edited text that is too long to be its own. An
+    edit never keeps the old summary; Enter skips, and the review then shows the full text.
+    A summary that does not fit `revisions.summary_problem` is asked for again. None means
+    Ctrl+C or EOF: the caller cancels the edit, as the Edit prompt does, instead of saving it."""
+    from contexer import revisions
+    if not revisions.needs_summary(content):
+        return ""
+    while True:
+        try:
+            summary = input("Summary (optional, 1-5 short sentences, Enter to skip): ").strip()
+        except (KeyboardInterrupt, EOFError):
+            return None
+        problem = revisions.summary_problem(summary) if summary else None
+        if not problem:
+            return summary
+        print(f"That summary does not fit: {problem}.")
 
 
 def _print_overlap_section(repo_path: str) -> None:

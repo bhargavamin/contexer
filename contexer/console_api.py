@@ -51,6 +51,7 @@ from pathlib import Path
 from contexer import conflicts      # pure stdlib leaf (no cycle): open-conflict predicate
 from contexer import decision_impact
 from contexer import review         # pure leaf: which question a pending item asks, and its actions
+from contexer import redact         # pure leaf: scrubs the text the pane sends to a model
 from contexer import review_impact  # the shared review block; reads store, never console_api
 from contexer import revisions      # pure stdlib leaf (no cycle): revision lifecycle
 from contexer import store          # module object, not `from`-imports: see docstring above
@@ -169,7 +170,30 @@ def _console_summary(entry: dict) -> dict:
         "has_proposal": bool(entry.get("proposed_revision")),
         "source_files": list(entry.get("source_files") or []),
         "applies_when": list(entry.get("applies_when") or []),
+        **_review_summary_fields(entry),
+        **_basis_field(entry),
     }
+
+
+def _basis_field(entry: dict) -> dict:
+    """`basis`: the `review_basis` of an entry that waits on the developer, which the console
+    sends back with Approve or Reject so a card replaced while it was on screen is refused
+    instead of signed unseen. Absent on a trusted entry, and on a kind only the terminal
+    review can settle: the poll reads every decision and a trusted one has nothing to ratify."""
+    if store.entry_status(entry) != "pending_approval" and not entry.get("proposed_revision"):
+        return {}
+    basis = review_basis(entry)
+    return {} if basis is None else {"basis": basis}
+
+
+def _review_summary_fields(record: dict) -> dict:
+    """`summary`: the stored review summary a review leads with, or None. `needs_summary`: true
+    when there is none and the content is too long to be its own, so a review shows the full
+    text and the pane may write one. Short content with no summary is neither: it is shown as
+    it is."""
+    stored = revisions.normalize_summary(record.get("summary") or "")
+    return {"summary": stored or None,
+            "needs_summary": not stored and revisions.needs_summary(record.get("content", ""))}
 
 
 def _console_proposed(prop: dict) -> dict:
@@ -183,6 +207,7 @@ def _console_proposed(prop: dict) -> dict:
         "created_at": prop.get("created_at"),
         "confidence": prop.get("confidence"),
         "confidence_factors": list(prop.get("confidence_factors") or []),
+        **_review_summary_fields(prop),
     }
 
 
@@ -197,8 +222,9 @@ def _console_proposal(entry: dict) -> dict:
         "status": store.entry_status(entry),
         "revision": version,
         "current": {"content": revisions.current_content(entry), "applies_when": list(entry.get("applies_when") or []), "title": rev.get("title", ""),
-                    "version_number": version},
+                    "version_number": version, **_review_summary_fields(entry)},
         "proposed": _console_proposed(entry.get("proposed_revision") or {}),
+        **_basis_field(entry),
     }
 
 
@@ -421,8 +447,8 @@ def review_basis(entry: dict) -> str | None:
     with one of the same kind (`review.claim_proposal_slot`) is never approved unseen.
 
     Covers the kind, the wording that would become current (a Suggested Update's proposal, else
-    the decision itself) with its title and applicability, the current wording beside it, and
-    the files approval would anchor. Taken from the STORED text, before `_printable`, so the
+    the decision itself) with its title, applicability and review summary, the current wording
+    and summary beside it, and the files approval would anchor. Taken from the STORED text, before `_printable`, so the
     queue and the action read the same bytes."""
     kind = review.item_kind(entry)
     if not review.item_actions(kind):
@@ -430,18 +456,30 @@ def review_basis(entry: dict) -> str | None:
     current = revisions.current_content(entry)
     # The current scope too: an update that inherits it (`applies_when` absent on the proposal)
     # shows it on the card and adopts it on approval, so a change to it alone must not pass.
+    # The review summaries the card leads with are part of what it shows: one swapped while
+    # the developer reads it refuses the click, like a swapped wording would.
     shown = {"kind": kind, "current": current,
              "current_applies_when": list(entry.get("applies_when") or []),
+             "current_summary": revisions.normalize_summary(entry.get("summary") or ""),
              "anchors": review_impact.confirmed_anchors(entry)}
     if kind == "update":
         prop = entry.get("proposed_revision") or {}
         shown.update(content=prop.get("content", ""), title=prop.get("title", ""),
-                     applies_when=prop.get("applies_when"))
+                     applies_when=prop.get("applies_when"),
+                     summary=revisions.normalize_summary(prop.get("summary") or ""))
     else:
         shown.update(title=entry.get("title") or revisions.derive_title(current),
                      applies_when=list(entry.get("applies_when") or []))
     blob = json.dumps(shown, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def _add_summary_source(version: dict | None) -> None:
+    """Give a version that needs a review summary the text the pane sends to a small model to
+    write one: its content with secrets scrubbed (`redact.scrub_text`). The model call leaves
+    the machine, so it gets this egress copy and never the verbatim `content`."""
+    if version and version.get("needs_summary"):
+        version["summary_source"] = redact.scrub_text(version.get("content") or "")
 
 
 def review_queue(repo_path: str) -> dict:
@@ -481,6 +519,8 @@ def review_queue(repo_path: str) -> dict:
         # The files approving would anchor, in full: the developer signs them by pressing
         # Approve, so the pane names them as the terminal review does (`anchor_confirmation`).
         item["anchors"] = review_impact.confirmed_anchors(entry)
+        for version in (item, item.get("proposed")):
+            _add_summary_source(version)
         items.append(item)
     return _printable({"protocol": REVIEW_PROTOCOL, "repo": repo_path, "count": len(items),
                        "items": items, "conflicts": current_conflicts(repo_path)})

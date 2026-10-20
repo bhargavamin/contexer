@@ -824,3 +824,135 @@ console.log(JSON.stringify({ left: side(node.kids[0]), right: side(node.kids[1])
     assert [c for c, _ in out["left"]] == ["diff-del"], out["left"]
     assert [c for c, _ in out["right"]] == ["diff-ins"], out["right"]
     assert out["left"][0][1].strip() == "alpha" and out["right"][0][1].strip() == "beta", out
+
+
+# --- Review summaries --------------------------------------------------------------------
+
+# A reviewer reads a decision's short review summary first; the full text, which is what the
+# model reads and what an approval signs, stays one click away behind "Show full text".
+
+_SUMMARY_FUNCTIONS = ("realSummary", "noSummaryTag", "fullTextExpander", "reviewText",
+                      "updateReview", "num")
+
+
+def test_review_cards_lead_with_the_summary_behind_a_show_full_text_expander(script):
+    review = _function_body(script, "reviewText")
+    assert "realSummary(d)" in review and "fullTextExpander(" in review, review
+    expander = _function_body(script, "fullTextExpander")
+    assert 'h("details"' in expander and '"Show full text"' in expander, expander
+    assert "open" not in _code(expander).replace("summary", ""), (
+        "every card starts collapsed; nothing may open the expander by default"
+    )
+    # Every review surface goes through the helpers, not a bare content paragraph.
+    pending = script[script.index("const pendingCards ="):script.index("const proposalCards =")]
+    assert "reviewText(d)" in pending, pending
+    proposals = script[script.index("const proposalCards ="):]
+    proposals = proposals[:proposals.index("return frag(")]
+    assert "updateReview(cur, prop" in proposals, proposals
+    assert "reviewText(d)" in _function_body(script, "readBody")
+    assert "updateReview(d, d.proposed_revision" in script
+
+
+@needs_node
+def test_a_short_decisions_content_is_not_treated_as_a_separate_summary(script):
+    out = _run_js(script, _js_declaration(script, "realSummary") + """
+console.log(JSON.stringify({
+  none: realSummary({ content: "Use uv.", summary: null }),
+  stored: realSummary({ content: "Use uv.", summary: "Use uv." }),
+  real: realSummary({ content: "Use uv for every install.", summary: "Use uv." }),
+}));
+""")
+    assert out == {"none": "", "stored": "Use uv.", "real": "Use uv."}, out
+
+
+def test_needs_summary_renders_a_no_summary_tag(script):
+    body = _function_body(script, "noSummaryTag")
+    assert "d.needs_summary === true" in body and '"no summary"' in body, body
+    assert not re.search(r"written by (ai|claude|the model)", script, re.IGNORECASE), "no AI-authorship label"
+
+
+def test_a_poll_never_closes_an_open_full_text(script):
+    body = _function_body(script, "pollTick")
+    guard = body.index('details.fulltext[open]')
+    assert guard < body.index("render({ poll: true })"), body
+
+
+def test_the_edit_form_posts_the_summary_and_prefills_only_a_real_one(script):
+    form = _function_body(script, "editForm")
+    assert '"Summary"' in form, form
+    assert "1 to 5 short sentences, plain words, for reviewers. Leave empty to drop it." in form
+    # An edit never keeps the old summary: a typed (or cleared) summary is sent as is, and a
+    # reworded save with the prefilled summary untouched sends "" so the store drops it.
+    assert "if (summary !== draft.storedSummary) payload.summary = summary;" in form, form
+    assert 'else if (reworded && draft.storedSummary) payload.summary = "";' in form, form
+    assert "summary: realSummary(d)," in script, "prefill must skip content standing in as summary"
+
+
+def test_the_edit_save_toasts_the_stores_message_not_a_new_revision_claim(script):
+    """A summary-only save is applied in place, so a fixed "Saved as a new revision." toast
+    was untrue for it. `act` must prefer the reply's own message, and the Save fallback must
+    not claim a revision."""
+    act = _code(_function_body(script, "act"))
+    assert act.index("if (out && out.message) toast(out.message);") \
+        < act.index("else if (okMessage) toast(okMessage);"), act
+    form = _function_body(script, "editForm")
+    assert "Saved as a new revision." not in form, form
+    assert '"Saved.",' in form, form
+
+
+def test_the_summary_classes_are_styled():
+    css = STYLES.read_text()
+    for selector in (".fulltext-toggle", ".badge-dim", ".summary-side", ".summary-missing"):
+        assert selector in css, selector
+
+
+@needs_node
+def test_review_text_renders_summary_full_text_and_missing_shapes(script):
+    src_fns = "\n".join(_js_declaration(script, n) for n in _SUMMARY_FUNCTIONS)
+    out = _run_js(script, src_fns + """
+const tree = (n) => Array.isArray(n) ? n.filter(Boolean).map(tree)
+  : { tag: n.tag, cls: n.className, text: n.textContent, kids: (n.kids || []).map(tree) };
+const flat = (n, acc) => { if (Array.isArray(n)) { n.forEach((k) => k && flat(k, acc)); return acc; }
+  acc.push({ tag: n.tag, cls: n.className, text: n.textContent }); (n.kids || []).forEach((k) => flat(k, acc)); return acc; };
+const long = "Use the store facade for every write because the lock covers it. ".repeat(10).trim();
+const withSummary = flat(reviewText({ content: long, summary: "Write through the store.", needs_summary: false }), []);
+const short = flat(reviewText({ content: "Use uv.", summary: null, needs_summary: false }), []);
+const missing = flat(reviewText({ content: long, summary: null, needs_summary: true }), []);
+const upd = flat(updateReview(
+  { content: long, summary: "Old plain text.", needs_summary: false },
+  { content: long + " More.", summary: null, needs_summary: true }, 3), []);
+const updPlain = flat(updateReview({ content: "A.", summary: null }, { content: "B.", summary: null }, 2), []);
+console.log(JSON.stringify({ withSummary, short, missing, upd, updPlain }));
+""")
+    def tags(nodes):
+        return [n["tag"] for n in nodes]
+
+    def texts(nodes):
+        return [n["text"] for n in nodes]
+
+    ws = out["withSummary"]
+    assert ws[0]["text"] == "Write through the store." and "review-summary" in ws[0]["cls"]
+    assert "details" in tags(ws) and "Show full text" in texts(ws)
+    details = next(n for n in ws if n["tag"] == "details")
+    assert "Use the store facade" in details["text"], "the full text sits in the expander"
+
+    assert "details" not in tags(out["short"]), "a short decision renders as today"
+    assert out["short"][0]["text"] == "Use uv."
+    assert "no summary" not in texts(out["short"])
+
+    assert "details" not in tags(out["missing"]) and "no summary" in texts(out["missing"])
+    assert out["missing"][0]["text"].startswith("Use the store facade")
+
+    upd = out["upd"]
+    labels = [n["text"] for n in upd if n["cls"] == "diff-col-label"]
+    assert labels[:2] == ["Stored now", "Proposed"], labels
+    assert "Old plain text." in texts(upd) and "no summary" in texts(upd)
+    side = [n for n in upd if n["cls"] == "summary-side"][1]
+    assert side["text"].startswith("ProposedUse the store facade"), "the summary-less side shows its full text"
+    assert upd.index(next(n for n in upd if n["text"] == "no summary")) < upd.index(
+        next(n for n in upd if n["tag"] == "details")), "its text is not behind the expander"
+    assert "details" in tags(upd) and "Change against v3" in texts(upd)
+    assert upd.index(next(n for n in upd if n["tag"] == "details")) > texts(upd).index("Old plain text.")
+
+    assert "details" not in tags(out["updPlain"]), "no separate summary: the diff renders directly"
+    assert "Change against v2" in texts(out["updPlain"])

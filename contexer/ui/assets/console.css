@@ -1215,6 +1215,39 @@ a.stat-card:hover {
   margin-bottom: 5px;
 }
 
+/* Review summary first; the full text (what the model reads) behind a native <details>. */
+.summary-side + .summary-side {
+  margin-top: 10px;
+}
+.summary-missing {
+  margin-top: 6px;
+}
+.badge-dim {
+  opacity: 0.7;
+  border-style: dashed;
+}
+.fulltext {
+  margin-top: 8px;
+}
+.fulltext-toggle {
+  width: fit-content;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--muted-foreground);
+}
+.fulltext-toggle:hover,
+.fulltext[open] > .fulltext-toggle {
+  color: var(--foreground);
+}
+.fulltext-body {
+  margin-top: 8px;
+}
+.textarea-summary {
+  min-height: 72px;
+}
+
 /* ── Key/value rows (config, team) ─────────────────────────────────────── */
 
 .kv {

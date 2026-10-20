@@ -890,7 +890,7 @@ def _fail_toward_review(entry: dict) -> None:
 
 
 def reconsider_decision(repo_path: str, entry_id: str, action: str,
-                        content: str = "") -> tuple[bool, str]:
+                        content: str = "", summary: str = "") -> tuple[bool, str]:
     """The developer's answer to a reconsideration. Returns (ok, message).
 
     * `restore` - the same decision, the same id, the same revision history, back in the live
@@ -898,7 +898,8 @@ def reconsider_decision(repo_path: str, entry_id: str, action: str,
       `_fail_toward_review`), so restoring can never fabricate a ratification.
     * `restore_edit` - the same identity, plus the developer's own wording appended as a new
       human-approved revision. This is the way back for a decision whose point still stands
-      but whose text does not.
+      but whose text does not. `summary` is that revision's review summary, if the developer
+      gave one; the new revision never inherits the old one.
     * `skip` - keep the question pending. Writes nothing.
     * `dismiss` - the decision stays inactive and the question is answered, durably. A LATER
       human directive may raise it again; repeated agent evidence may not.
@@ -952,7 +953,7 @@ def reconsider_decision(repo_path: str, entry_id: str, action: str,
             _fail_toward_review(target)
             if action == "restore_edit":
                 revisions.append_revision(target, content.strip(), source="human",
-                                          approved_at=now)
+                                          approved_at=now, summary=summary)
                 target["status"] = "approved"
                 target["approved_by"] = "human"
             _reconsider_receipt(target, prop, "approved", action, now)
