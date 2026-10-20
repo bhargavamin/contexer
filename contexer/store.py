@@ -789,7 +789,8 @@ def _containment_ratio(a: set[str], b: set[str]) -> float:
     """|a∩b| / min(|a|,|b|) - 1.0 when the smaller token set is fully inside the larger.
     Complements _overlap_ratio (max-denominator), which a superset restatement evades:
     "Always commit automatically" inside "Always commit automatically after approvals …"
-    scores 0.30 on max but 1.0 on min. Used ONLY for capture_user_constraint routing -
+    scores 0.30 on max but 1.0 on min. Used ONLY for capture_user_constraint routing and
+    _states_opposite_rule's rule pairing -
     bootstrap idempotence, memory sync, and team dedup depend on the max-denominator
     metric exactly as-is, so _overlap_ratio/_find_match stay untouched."""
     if not a or not b:
@@ -1094,11 +1095,11 @@ def _rules(text: str) -> list[str]:
 
 
 def _states_opposite_rule(content: str, entry: dict) -> bool:
-    """True when a rule in `content` reverses the rule in `entry` that covers the same subject."""
+    """True when a rule in `content` reverses the rule in `entry` that most contains its subject."""
     stored = [(rule, _tokenize(rule)) for rule in _rules(revisions.current_content(entry))]
     for rule in _rules(content):
         tokens = _tokenize(rule)
-        scored = [(_overlap_ratio(tokens, old_tokens), old) for old, old_tokens in stored if old_tokens]
+        scored = [(_containment_ratio(tokens, old_tokens), old) for old, old_tokens in stored if old_tokens]
         if not tokens or not scored:
             continue
         overlap, old = max(scored, key=lambda pair: pair[0])

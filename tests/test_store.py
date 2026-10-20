@@ -7997,6 +7997,10 @@ class TestDecisionStatementMatching:
         ("multi-sentence reversal", f"{FAKE}.", f"Never u{FAKE[1:]}. Always use freezegun.", True),
         ("later rule reversed", f"{FAKE}. Use freezegun for integration tests.",
          f"{FAKE}. Never use freezegun for integration tests.", True),
+        ("expanded reversal", "Use uv. Rejected pip because it skips the lockfile and breaks reproducible builds.",
+         "Never use uv for Python dependencies. Rejected pip because it skips the lockfile and breaks "
+         "reproducible builds.", True),
+        ("narrowed reversal", "Use uv for Python dependencies in every service.", "Never use uv.", True),
         ("later rule repeated with a reason dropped", f"{FAKE}. Use freezegun for integration tests to avoid flakes.",
          f"{FAKE}. Use freezegun for integration tests.", False),
     ]
