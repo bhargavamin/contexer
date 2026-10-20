@@ -48,6 +48,16 @@ def _session_env(home: Path, otel_port: int) -> dict:
     return env
 
 
+def _uv_env(home: Path) -> dict:
+    """`_session_env` plus uv's own `UV_*` settings, for `uv run` against a contexer checkout.
+
+    Without them uv can pick a different interpreter than the one the checkout's venv was
+    built with (CI sets `UV_PYTHON`) and rebuild that shared venv under concurrent tests."""
+    env = _session_env(home, otel_port=0)
+    env.update({k: v for k, v in os.environ.items() if k.startswith("UV_")})
+    return env
+
+
 def _load_tasks(task_ids, tasks_file: Path = None):
     tasks = json.loads((tasks_file or TASKS_FILE).read_text())
     if task_ids is None:
@@ -73,9 +83,9 @@ def _condition_b_setup(repo: str, home: Path, seed_decision: str, source: Path =
     pass it see no behavior change. With `steady`, bootstrap is driven to completion and the
     setup fails unless the bootstrap prompt is silent afterwards (see `seeding.bootstrap_script`).
     Returns the stored ids of `seed_decisions`, in order."""
-    env = _session_env(home, otel_port=0)
+    env = _uv_env(home)
     src = source or Path(__file__).resolve().parent.parent
-    subprocess.run(["uv", "run", "contexer", "install"], env=env, check=True,
+    subprocess.run(["uv", "run", "--frozen", "contexer", "install"], env=env, check=True,
                    capture_output=True, cwd=src)
     # Use the stable tool surface so campaigns can also target pre-redesign versions.
     code = "from contexer import server, store\n" + seeding.bootstrap_script(repo, steady)
@@ -91,7 +101,7 @@ def _condition_b_setup(repo: str, home: Path, seed_decision: str, source: Path =
     if steady:
         code += seeding.steady_check_script(repo)
     try:
-        proc = subprocess.run(["uv", "run", "python", "-c", code], env=env, check=True,
+        proc = subprocess.run(["uv", "run", "--frozen", "python", "-c", code], env=env, check=True,
                               capture_output=True, cwd=src)
     except subprocess.CalledProcessError as exc:
         # The row records this message: name the refused seed (or the real exception), not
