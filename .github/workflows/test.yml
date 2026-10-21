@@ -112,3 +112,8 @@ jobs:
       # caches are already out, and a new top-level module is linted the day it lands.
       - name: Run ruff
         run: uvx ruff@0.15.4 check .
+
+      # A release bumps pyproject.toml; release-please's extra-files entry bumps uv.lock to
+      # match. If that ever stops working, every unfrozen `uv run` rewrites the lock locally.
+      - name: Check uv.lock matches pyproject.toml
+        run: uv lock --check
