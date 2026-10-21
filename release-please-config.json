@@ -2,5 +2,17 @@
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
   "release-type": "python",
   "pull-request-header": "## Release",
-  "pull-request-footer": "Merge this PR to publish the release to PyPI."
+  "pull-request-footer": "Merge this PR to publish the release to PyPI.",
+  "include-component-in-tag": false,
+  "packages": {
+    ".": {
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "uv.lock",
+          "jsonpath": "$.package[?(@.name.value=='contexer')].version"
+        }
+      ]
+    }
+  }
 }
