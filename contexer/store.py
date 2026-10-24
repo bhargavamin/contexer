@@ -1670,6 +1670,8 @@ _DURABILITY_SIGNAL = re.compile(r"\b(?:not|every|each)\b", re.IGNORECASE)
 # Anything longer is a pasted blob (a README, an issue dump, a multi-step task) that
 # merely *contains* a directive word - storing the whole thing pollutes the store.
 _MAX_DIRECTIVE_LEN = 300
+_MAX_MIXED_PROMPT_LEN = 600
+_MAX_MIXED_PROMPT_SENTENCES = 6
 # Hook/tool-injected text is never a user directive. The constraint hook fires on
 # whatever lands in UserPromptSubmit, including agent-framework notifications and
 # Contexer's own injected context - guard against capturing those as constraints.
@@ -2122,7 +2124,7 @@ def _directive_policy_candidate(text: str) -> tuple[str, bool]:
     # Keep the existing pasted-blob refusal load-bearing: task-clause filtering must not
     # shorten an over-limit document into something that suddenly looks authoritative.
     if len(candidate) > _MAX_DIRECTIVE_LEN:
-        return candidate, False
+        return candidate, bool(_long_prompt_rule(candidate))
     fragments = [part.strip(" ,;") for part in re.split(
         r"(?<=[.!?])\s+|;\s*|\n+|,\s+(?:but|and)\s+|\s+but\s+", candidate,
         flags=re.IGNORECASE) if part.strip(" ,")]
@@ -2354,14 +2356,27 @@ def _is_deictic(content: str) -> bool:
                 or _DEICTIC_ENUMERATION.search(content))
 
 
+def _long_prompt_rule(candidate: str) -> str:
+    if len(candidate) > _MAX_MIXED_PROMPT_LEN or "\n" in candidate:
+        return ""
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+", candidate) if s.strip()]
+    if len(sentences) > _MAX_MIXED_PROMPT_SENTENCES:
+        return ""
+    return next((s for s in sentences
+                 if len(s) <= _MAX_DIRECTIVE_LEN and _is_prescriptive_constraint(s)[0]), "")
+
+
 def _is_prescriptive_constraint(text: str) -> tuple[bool, str]:
     """Returns (is_constraint, subtype). Detects user-stated directives.
     Excludes descriptive first-person/it uses ('I always get this error', 'it always worked')
     and ironic/sarcastic statements ('love always use pip', 'yeah right /s')."""
     t = _directive_policy_text(text).strip()
     # Pasted blobs and tool/system-injected text are never clean user directives.
-    if not t or len(t) > _MAX_DIRECTIVE_LEN:
+    if not t:
         return False, ""
+    if len(t) > _MAX_DIRECTIVE_LEN:
+        rule = _long_prompt_rule(t)
+        return _is_prescriptive_constraint(rule) if rule else (False, "")
     if _DIRECTIVE_WRAPPER_ONLY.fullmatch(t):
         return False, ""
     if t.lower().startswith(_SYSTEM_TEXT_PREFIXES) or "```" in t:
