@@ -2803,7 +2803,8 @@ def _route_containment(repo_path: str, data: dict, hit: dict, content: str, subt
             "confirmation_required" if confirmation_required else "revision_proposed"), {}
 
     if pending_twin and not review_required:
-        if _TASK_SCOPE_MARKER.search(revisions.current_content(hit)):
+        draft = revisions.current_content(hit)
+        if _TASK_SCOPE_MARKER.search(draft) or _directive_policy_candidate(draft)[1]:
             # A shorter, unambiguous restatement must not bless the fuller draft
             # when that draft still contains a possible temporary authorization.
             revisions.append_revision(hit, content, source="human", approved_at=now)
