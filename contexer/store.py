@@ -2567,7 +2567,8 @@ def capture_user_constraint_with_meta(
         _is_prescriptive_constraint(without_weak_signals)[0]
         or _EXPLICIT_AUTHORITY_LABEL.search(content)
     )
-    bare_decision_label = (bool(_DECISION_LABEL_TRIGGER.search(content))
+    bare_decision_label = (bool(_DECISION_LABEL_TRIGGER.search(content)
+                                or _DECISION_LABEL_TRIGGER.search(policy_content))
                            and not _CAN_ONLY_TRIGGER.search(content)
                            and not _is_prescriptive_constraint(without_weak_signals)[0])
     status = ("confirmation_required" if confirmation_required else
