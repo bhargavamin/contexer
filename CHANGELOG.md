@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.54.1](https://github.com/bhargavamin/contexer/compare/v0.54.0...v0.54.1) (2026-10-24)
+
+
+### Bug Fixes
+
+* **capture:** approve the restated rule, not a held task-plus-rule draft ([e17d071](https://github.com/bhargavamin/contexer/commit/e17d071ea266ec5d8351cd741a7c867d866746dd))
+* **capture:** read each sentence of a task-plus-rule prompt over 300 characters ([0be94e1](https://github.com/bhargavamin/contexer/commit/0be94e14aaf261dae7a415267de0a14a71ddb3df))
+* **capture:** read each sentence of a task-plus-rule prompt over 300 characters ([71deb54](https://github.com/bhargavamin/contexer/commit/71deb54d0a0d08079138f0cc50cc3ad6dc159623)), closes [#385](https://github.com/bhargavamin/contexer/issues/385)
+
 ## [0.54.0](https://github.com/bhargavamin/contexer/compare/v0.53.0...v0.54.0) (2026-10-20)
 
 
