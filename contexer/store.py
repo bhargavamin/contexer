@@ -1407,10 +1407,15 @@ _DIRECTIVE_OPERATION_VERBS = (
     r"approve|grant|allow|authorize|execute|apply|restart|start|stop|rerun|rebuild|"
     r"revert|reset|sync|migrate|provision|destroy|scale|configure|validate|verify"
 )
-_DECISION_LABEL = (
-    r"^(?:(?!(?:the|a|an|my|your|his|her|their|its|this|that|these|those|what|which|whose"
+_DECISION_LABEL_BODY = (
+    r"(?:(?!(?:the|a|an|my|your|his|her|their|its|this|that|these|those|what|which|whose"
     r"|any|some|no|store)\b)[a-z][\w-]*\s+){0,2}"
     r"(?:decision|convention|constraint|policy)(?:\s+(?:for|on|about|in)\s+[^:\n]{1,60})?"
+)
+_DECISION_LABEL = r"^" + _DECISION_LABEL_BODY
+_MID_DECISION_LABEL = (
+    r"(?<=[.!?]\s)" + _DECISION_LABEL_BODY
+    + r"(?=\s*:[^.!?\n]*\b(?:because|so\s+that)\b)"
 )
 _RESTRICTIVE_ONLY = (
     r"can\s+only"
@@ -1442,6 +1447,7 @@ _CONSTRAINT_TRIGGER = re.compile(
     r"|(?:make|create|add|set|establish)\s+(?:a\s+|the\s+)?rule"  # "create a rule …"
     r"|^\s*rule(?=\s*[:\-])"        # "rule: never X" / "rule - …" at the start
     rf"|{_DECISION_LABEL}(?=\s*:\s*\S)"
+    rf"|{_MID_DECISION_LABEL}(?=\s*:\s*\S)"
     r"|do\s*n['’]?t"                # don't (prohibition)
     r"|do\s+not"                    # do not
     r"|avoid"                       # avoid
@@ -1451,7 +1457,8 @@ _CONSTRAINT_TRIGGER = re.compile(
     re.IGNORECASE,
 )
 _CAN_ONLY_TRIGGER = re.compile(rf"\b(?:{_RESTRICTIVE_ONLY})\b", re.IGNORECASE)
-_DECISION_LABEL_TRIGGER = re.compile(_DECISION_LABEL + r"\s*:(?=\s*\S)", re.IGNORECASE)
+_DECISION_LABEL_TRIGGER = re.compile(
+    rf"(?:{_DECISION_LABEL}|{_MID_DECISION_LABEL})\s*:(?=\s*\S)", re.IGNORECASE)
 _POSITIVE_POLARITY = re.compile(
     r"\b(?:al+w(?:ay|ya)s|must(?!\s+(?:not|never)\b|n['’]t))\b", re.IGNORECASE)
 _NEGATIVE_POLARITY = re.compile(
@@ -2560,7 +2567,8 @@ def capture_user_constraint_with_meta(
         _is_prescriptive_constraint(without_weak_signals)[0]
         or _EXPLICIT_AUTHORITY_LABEL.search(content)
     )
-    bare_decision_label = (bool(_DECISION_LABEL_TRIGGER.search(content))
+    bare_decision_label = (bool(_DECISION_LABEL_TRIGGER.search(content)
+                                or _DECISION_LABEL_TRIGGER.search(policy_content))
                            and not _CAN_ONLY_TRIGGER.search(content)
                            and not _is_prescriptive_constraint(without_weak_signals)[0])
     status = ("confirmation_required" if confirmation_required else
