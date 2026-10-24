@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.54.1](https://github.com/bhargavamin/contexer/compare/v0.54.0...v0.54.1) (2026-10-24)
+
+
+### Bug Fixes
+
+* **capture:** approve the restated rule, not a held task-plus-rule draft ([e17d071](https://github.com/bhargavamin/contexer/commit/e17d071ea266ec5d8351cd741a7c867d866746dd))
+* **capture:** keep a mid-prompt label pending when its "so that" reason is sanitized ([aaee122](https://github.com/bhargavamin/contexer/commit/aaee122f82a72d4fefb744c90568adf566d17a23))
+* **capture:** read each sentence of a task-plus-rule prompt over 300 characters ([0be94e1](https://github.com/bhargavamin/contexer/commit/0be94e14aaf261dae7a415267de0a14a71ddb3df))
+* **capture:** read each sentence of a task-plus-rule prompt over 300 characters ([71deb54](https://github.com/bhargavamin/contexer/commit/71deb54d0a0d08079138f0cc50cc3ad6dc159623)), closes [#385](https://github.com/bhargavamin/contexer/issues/385)
+* **capture:** recognize a decision label that starts a later sentence ([1eccac0](https://github.com/bhargavamin/contexer/commit/1eccac035ee9fe22139ef6260579925e3bd688e2))
+* **capture:** recognize a decision label that starts a later sentence ([56ec30a](https://github.com/bhargavamin/contexer/commit/56ec30adb4e89a30f18b14e210af6b2914ebb26e)), closes [#385](https://github.com/bhargavamin/contexer/issues/385)
+
 ## [0.54.0](https://github.com/bhargavamin/contexer/compare/v0.53.0...v0.54.0) (2026-10-20)
 
 
