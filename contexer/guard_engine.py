@@ -16,6 +16,7 @@ import math
 import os
 import re
 import subprocess
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -622,35 +623,134 @@ _GUARD_RANK_DIFF_BYTES = 1_000_000
 _GUARD_ANCHOR_REASON = "source_files match"
 
 
-def _staged_diff_tokens(repo_path: str, files: list[str]) -> dict[str, set[str]]:
+_GIT_C_ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13,
+                  '"': 34, "\\": 92}
+
+
+def _git_header_path(raw: str, prefix: str) -> str | None:
+    r"""The path a `--- `/`+++ ` patch header names, spelled like `_staged_files` spells it.
+
+    Git C-quotes a name holding a quote, backslash or control character even with
+    core.quotePath=false (`"b/we\"ird.py"`), escaping bytes as `\NNN` octal. Unquoting goes
+    through bytes and back with surrogateescape, the same decoding `_staged_files` applies to
+    `-z` output, so the result is a lookup key for the staged list. None for /dev/null or a
+    header without the forced prefix."""
+    # Git ends a header naming a path with a space in a TAB, for patch(1), quoted or not.
+    raw = raw.rstrip("\t")
+    if raw == "/dev/null":
+        return None
+    if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2:
+        out = bytearray()
+        body = raw[1:-1]
+        i = 0
+        while i < len(body):
+            ch = body[i]
+            if ch == "\\" and i + 1 < len(body):
+                nxt = body[i + 1]
+                if nxt in _GIT_C_ESCAPES:
+                    out.append(_GIT_C_ESCAPES[nxt])
+                    i += 2
+                    continue
+                octal = body[i + 1:i + 4]
+                if len(octal) == 3 and all(c in "01234567" for c in octal):
+                    out.append(int(octal, 8) & 0xFF)
+                    i += 4
+                    continue
+            out += ch.encode("utf-8", "surrogateescape")
+            i += 1
+        raw = out.decode("utf-8", "surrogateescape")
+    return raw[len(prefix):] if raw.startswith(prefix) else None
+
+
+def _read_capped(cmd: list[str], cap: int, timeout: float) -> tuple[bytes, bool] | None:
+    """Run `cmd` and keep at most `cap` bytes of its stdout, stopping it once that is read.
+
+    Returns (data, complete), or None when it failed or ran past `timeout`. Reading happens
+    on a helper thread so the timeout holds even while git is still writing; git is killed
+    as soon as the cap is reached instead of buffering a diff ranking will never read."""
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                stdin=subprocess.DEVNULL)
+    except (OSError, ValueError):
+        return None
+    chunks: list[bytes] = []
+    state = {"size": 0, "full": False}
+
+    def pump() -> None:
+        try:
+            while state["size"] < cap:
+                chunk = proc.stdout.read(min(65536, cap - state["size"]))
+                if not chunk:
+                    return
+                chunks.append(chunk)
+                state["size"] += len(chunk)
+            state["full"] = True
+        except (OSError, ValueError):
+            pass
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
+    reader.join(max(0.0, timeout))
+    timed_out = reader.is_alive()
+    if timed_out or state["full"]:
+        proc.kill()
+    try:
+        proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        return None
+    finally:
+        if proc.stdout:
+            proc.stdout.close()
+    if timed_out:
+        return None
+    if not state["full"] and proc.returncode != 0:
+        return None
+    return b"".join(chunks), not state["full"]
+
+
+def _staged_diff_tokens(repo_path: str, files: list[str],
+                        timeout: float | None = None) -> dict[str, set[str]]:
     """Index tokens of the added and removed lines, per staged relpath. {} on any failure.
 
     `-U0` keeps context lines out, so a decision is credited only for words the change
-    itself adds or removes. Paths come from the `+++ b/` header (`--- a/` for a deletion);
-    `core.quotePath=false` keeps non-ASCII names unquoted so they match the staged list."""
+    itself adds or removes. The reader is a small state machine over each `diff --git`
+    section: `--- `/`+++ ` lines name the file only in the section header, before its first
+    `@@` hunk, so an added `++ separator` or a removed `-- note` line (which the patch
+    prints as `+++ separator` / `--- note`) is content, not a new file. The source and
+    destination prefixes are forced, so `diff.noprefix` or `diff.mnemonicPrefix` cannot
+    hide the paths, and output past `_GUARD_RANK_DIFF_BYTES` is never read: the last,
+    possibly cut, line is dropped and ranking uses what came before it."""
     if not files:
         return {}
-    try:
-        out = subprocess.run(
-            ["git", "-C", repo_path, "-c", "core.quotePath=false", "diff", "--cached",
-             "--unified=0", "--no-color", "--no-ext-diff", "--no-renames", "--", *files],
-            capture_output=True, timeout=store.GIT_FAST_TIMEOUT,
-        )
-    except (OSError, subprocess.SubprocessError):
+    budget = store.GIT_FAST_TIMEOUT if timeout is None else min(store.GIT_FAST_TIMEOUT, timeout)
+    if budget <= 0:
         return {}
-    if out.returncode != 0:
+    read = _read_capped(
+        ["git", "-C", repo_path, "-c", "core.quotePath=false", "diff", "--cached",
+         "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames",
+         "--src-prefix=a/", "--dst-prefix=b/", "--", *files],
+        _GUARD_RANK_DIFF_BYTES, budget)
+    if read is None:
         return {}
-    text = out.stdout[:_GUARD_RANK_DIFF_BYTES].decode("utf-8", errors="replace")
+    data, complete = read
+    if not complete:
+        data = data[:data.rfind(b"\n") + 1]
     changed: dict[str, list[str]] = {}
-    current = ""
-    old_path = ""
-    for line in text.splitlines():
+    current: str | None = None
+    old_path: str | None = None
+    new_path: str | None = None
+    in_header = False
+    for line in data.decode("utf-8", "surrogateescape").splitlines():
         if line.startswith("diff --git "):
-            current = old_path = ""
-        elif line.startswith("--- "):
-            old_path = line[6:].rstrip("\t") if line.startswith("--- a/") else ""
-        elif line.startswith("+++ "):
-            current = line[6:].rstrip("\t") if line.startswith("+++ b/") else old_path
+            in_header, current, old_path, new_path = True, None, None, None
+        elif in_header:
+            if line.startswith("--- "):
+                old_path = _git_header_path(line[4:], "a/")
+            elif line.startswith("+++ "):
+                new_path = _git_header_path(line[4:], "b/")
+            elif line.startswith("@@"):
+                in_header = False
+                current = new_path or old_path
         elif current and line[:1] in "+-":
             changed.setdefault(current, []).append(line[1:])
     return {path: set(retrieval.index_tokens("\n".join(lines)))
@@ -672,7 +772,8 @@ def _decision_tokens(repo_path: str, ids: set[tuple[str, str]]) -> dict[tuple[st
     return out
 
 
-def _rank_advisories(repo_path: str, surfaced: list[dict]) -> list[dict]:
+def _rank_advisories(repo_path: str, surfaced: list[dict],
+                     deadline: float | None = None) -> list[dict]:
     """Order surfaced advisories by how much of each decision the staged change touches (#439).
 
     Before this, the cap kept whichever pairs came first in store order, so a wording-only
@@ -682,15 +783,29 @@ def _rank_advisories(repo_path: str, surfaced: list[dict]) -> list[dict]:
     of it share "store"). Ties keep an explicit `source_files` anchor ahead of an artifact
     mention, then the original order. Ranking only reorders what the cap shows; it never
     drops a pair, and any failure keeps the original order, because Tier 1 is advisory and a
-    ranking error must not cost the developer an advisory."""
+    ranking error must not cost the developer an advisory.
+
+    `deadline` is guard_staged's: the git read gets only the time left, and ranking gives up
+    (keeping the original order) once it passes, so this optional step can never push a
+    commit past the guard's own budget."""
     if len(surfaced) < 2:
         return surfaced
+
+    def expired() -> bool:
+        return deadline is not None and time.time() >= deadline
+
     try:
-        diff_tokens = _staged_diff_tokens(repo_path, sorted({p["file"] for p in surfaced}))
-        if not diff_tokens:
+        if expired():
+            return surfaced
+        remaining = None if deadline is None else deadline - time.time()
+        diff_tokens = _staged_diff_tokens(
+            repo_path, sorted({p["file"] for p in surfaced}), timeout=remaining)
+        if not diff_tokens or expired():
             return surfaced
         keys = {(p["scope"], p["decision_id"]) for p in surfaced}
         tokens = _decision_tokens(repo_path, keys)
+        if expired():
+            return surfaced
         df: dict[str, int] = {}
         for toks in tokens.values():
             for t in toks:
@@ -1183,8 +1298,8 @@ def guard_staged(repo_path: str, paths: list[str] | None = None) -> dict:
 
         evaluated = _guard_evaluate(repo, staged, deadline=deadline)
         surfaced = [p for p in evaluated if p["emitted"]]
-        if len(surfaced) > _GUARD_MAX_ADVISORIES and time.time() < deadline:
-            surfaced = _rank_advisories(repo, surfaced)
+        if len(surfaced) > _GUARD_MAX_ADVISORIES:
+            surfaced = _rank_advisories(repo, surfaced, deadline)
         capped = surfaced[:_GUARD_MAX_ADVISORIES]
         result = {"advisories": capped, "violations": violations}
         if unchecked:

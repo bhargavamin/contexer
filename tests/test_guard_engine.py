@@ -2800,3 +2800,100 @@ class TestAdvisoryRanking:
 
     def test_diff_tokens_fail_soft_outside_a_repo(self, tmp_path):
         assert guard_engine._staged_diff_tokens(str(tmp_path), ["a.py"]) == {}
+
+    # Review findings on #444: each case below failed on the first version of the reader.
+
+    def test_content_lines_that_look_like_headers_stay_content(self, git_repo):
+        # An added "++ x" prints as "+++ x" and a removed "-- y" as "--- y". Inside a hunk
+        # they are content: their words count, and the lines after them still belong to
+        # the same file.
+        _write(git_repo, "old.py", "-- legacy marker\nkeep = 1\n")
+        _git(git_repo, "add", "old.py")
+        _commit(git_repo)
+        _write(git_repo, "old.py", "keep = 1\n")
+        _write(git_repo, "new.py", "++ separator\nafterwards = 1\n")
+        _git(git_repo, "add", "old.py", "new.py")
+        tokens = guard_engine._staged_diff_tokens(str(git_repo), ["new.py", "old.py"])
+        assert {"separator", "afterwards"} <= tokens["new.py"]
+        assert {"legacy", "marker"} <= tokens["old.py"]
+        assert set(tokens) == {"new.py", "old.py"}
+
+    def test_prefix_settings_do_not_hide_paths(self, git_repo):
+        for key, value in (("diff.noprefix", "true"), ("diff.mnemonicPrefix", "true")):
+            _git(git_repo, "config", key, value)
+            _write(git_repo, "a.py", f"marker_{key.split('.')[1].lower()} = 1\n")
+            _git(git_repo, "add", "a.py")
+            tokens = guard_engine._staged_diff_tokens(str(git_repo), ["a.py"])
+            assert "a.py" in tokens, key
+            _git(git_repo, "config", "--unset", key)
+
+    def test_quoted_filenames_key_like_the_staged_list(self, git_repo):
+        names = ['we"ird.py', "tab\tname.py", "back\\slash.py", "caf\u00e9 \"x\".py",
+                 "with space.py"]
+        for i, name in enumerate(names):
+            _write(git_repo, name, f"word{i} = 1\n")
+        _git(git_repo, "add", "-A")
+        staged = guard_engine._staged_files(str(git_repo))
+        assert set(staged) == set(names)
+        tokens = guard_engine._staged_diff_tokens(str(git_repo), staged)
+        assert set(tokens) == set(names)
+        for i, name in enumerate(names):
+            assert f"word{i}" in tokens[name], name
+
+    def test_header_path_unquoting(self):
+        path = guard_engine._git_header_path
+        assert path('"b/we\\"ird.py"', "b/") == 'we"ird.py'
+        assert path('"b/caf\\303\\251.py"', "b/") == "caf\u00e9.py"   # octal UTF-8 bytes
+        assert path('"b/bad\\377.py"', "b/") == "bad\udcff.py"          # surrogateescape byte
+        assert path("b/with space.py\t", "b/") == "with space.py"
+        assert path('"b/caf\u00e9 \\"x\\".py"\t', "b/") == 'caf\u00e9 "x".py'
+        assert path("/dev/null", "a/") is None
+        assert path("new.py", "b/") is None                              # prefix not forced
+
+    def test_reading_stops_at_the_byte_cap(self, git_repo, monkeypatch):
+        _write(git_repo, "big.py", "".join(f"w{i:05d} = 1\n" for i in range(5000)))
+        _git(git_repo, "add", "big.py")
+        monkeypatch.setattr(guard_engine, "_GUARD_RANK_DIFF_BYTES", 4096)
+        seen = []
+        real = guard_engine._read_capped
+
+        def spy(cmd, cap, timeout):
+            out = real(cmd, cap, timeout)
+            seen.append(out)
+            return out
+
+        monkeypatch.setattr(guard_engine, "_read_capped", spy)
+        tokens = guard_engine._staged_diff_tokens(str(git_repo), ["big.py"])
+        data, complete = seen[0]
+        assert len(data) <= 4096 and complete is False
+        assert "w00000" in tokens["big.py"] and "w04999" not in tokens["big.py"]
+
+    def test_capped_reader_reports_failure_and_timeout(self, tmp_path):
+        assert guard_engine._read_capped(["git", "-C", str(tmp_path), "diff", "--cached"],
+                                         1024, 2.0) is None          # not a repo: rc != 0
+        assert guard_engine._read_capped(["sleep", "5"], 1024, 0.2) is None
+        assert guard_engine._read_capped(["definitely-not-a-binary-xyz"], 1024, 1.0) is None
+
+    def test_expired_deadline_skips_ranking_and_git(self, repo, monkeypatch):
+        filler = self._hub(repo)
+        _write(repo, "svc/core.py", "def fetch():\n    return 'filler rule layout'\n")
+        _git(repo, "add", "svc/core.py")
+        monkeypatch.setattr(guard_engine, "_read_capped",
+                            lambda *_: pytest.fail("ran git after the deadline"))
+        evaluated = [p for p in guard_engine._guard_evaluate(str(repo), ["svc/core.py"])
+                     if p["emitted"]]
+        ranked = guard_engine._rank_advisories(str(repo), evaluated, deadline=0.0)
+        assert [p["decision_id"] for p in ranked] == [p["decision_id"] for p in evaluated]
+        assert [p["decision_id"] for p in ranked][:5] == filler[:5]
+
+    def test_git_gets_only_the_time_left(self, repo, monkeypatch):
+        self._hub(repo)
+        _write(repo, "svc/core.py", "x = 2\n")
+        _git(repo, "add", "svc/core.py")
+        budgets = []
+        monkeypatch.setattr(guard_engine, "_read_capped",
+                            lambda cmd, cap, timeout: budgets.append(timeout) or None)
+        evaluated = [p for p in guard_engine._guard_evaluate(str(repo), ["svc/core.py"])
+                     if p["emitted"]]
+        guard_engine._rank_advisories(str(repo), evaluated, deadline=time.time() + 0.5)
+        assert budgets and 0 < budgets[0] <= 0.5
