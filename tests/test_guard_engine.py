@@ -2696,3 +2696,204 @@ class TestWireSafety:
         assert "anchor_commit" not in projected
 
 
+
+
+# ── Tier-1 advisory ranking (#439) ──────────────────────────────────────────
+
+class TestAdvisoryRanking:
+    """When more decisions pair with a commit than the cap shows, the ones the staged change
+    actually touches come first, instead of the first five in store order."""
+
+    def _hub(self, repo, n=7):
+        # n decisions all anchored to one file, seeded before the one that matters, so
+        # store order alone would never surface the last one.
+        ids = [_seed_entry(repo, f"Filler rule number {i} about module layout",
+                           source_files=["svc/core.py"])["id"] for i in range(n)]
+        _write(repo, "svc/core.py", "def fetch():\n    return 1\n")
+        _git(repo, "add", "svc/core.py")
+        _commit(repo)
+        return ids
+
+    def test_decision_named_by_the_diff_ranks_first(self, repo):
+        self._hub(repo)
+        needed = _seed_entry(repo, "Retries use exponential backoff with jitter",
+                             source_files=["svc/core.py"])
+        _write(repo, "svc/core.py",
+               "def fetch():\n    # exponential backoff with jitter between retries\n"
+               "    return 1\n")
+        _git(repo, "add", "svc/core.py")
+        result = guard_engine.guard_staged(str(repo))
+        assert result["total_advisories"] == 8
+        assert result["advisories"][0]["decision_id"] == needed["id"]
+
+    def test_rare_shared_word_outranks_one_every_decision_shares(self, repo):
+        # "rule" sits in every filler decision, so sharing it is weak evidence; the needed
+        # decision's own rare word must win even though the filler also overlaps the diff.
+        self._hub(repo)
+        needed = _seed_entry(repo, "Idempotency keys guard every write rule",
+                             source_files=["svc/core.py"])
+        _write(repo, "svc/core.py", "def fetch():\n    rule = 'idempotency'\n    return 1\n")
+        _git(repo, "add", "svc/core.py")
+        result = guard_engine.guard_staged(str(repo))
+        assert result["advisories"][0]["decision_id"] == needed["id"]
+
+    def test_path_words_earn_no_credit(self, repo):
+        # Every decision anchored to svc/core.py and every diff of it share "core";
+        # that must not lift a decision whose only overlap is the file's own name.
+        filler = self._hub(repo)
+        _seed_entry(repo, "The core module stays importable without the network",
+                    source_files=["svc/core.py"])
+        _write(repo, "svc/core.py", "def fetch():\n    return 2  # core\n")
+        _git(repo, "add", "svc/core.py")
+        result = guard_engine.guard_staged(str(repo))
+        assert [a["decision_id"] for a in result["advisories"]] == filler[:5]
+
+    def test_ties_keep_explicit_anchor_ahead_of_artifact_mention(self, repo):
+        mentions = [_seed_entry(repo, f"See svc/core.py for helper {i}")["id"] for i in range(5)]
+        anchored = _seed_entry(repo, "Keep helpers small", source_files=["svc/core.py"])
+        _write(repo, "svc/core.py", "x = 1\n")
+        _git(repo, "add", "svc/core.py")
+        result = guard_engine.guard_staged(str(repo))
+        ids = [a["decision_id"] for a in result["advisories"]]
+        assert ids[0] == anchored["id"]
+        assert ids[1:] == mentions[:4]
+
+    def test_no_shared_words_keeps_store_order(self, repo):
+        filler = self._hub(repo)
+        _write(repo, "svc/core.py", "def fetch():\n    return 3\n")
+        _git(repo, "add", "svc/core.py")
+        result = guard_engine.guard_staged(str(repo))
+        assert [a["decision_id"] for a in result["advisories"]] == filler[:5]
+
+    def test_under_the_cap_runs_no_diff(self, repo, monkeypatch):
+        _seed_entry(repo, "Retries use exponential backoff", source_files=["svc/core.py"])
+        _write(repo, "svc/core.py", "x = 1\n")
+        _git(repo, "add", "svc/core.py")
+        monkeypatch.setattr(guard_engine, "_rank_advisories",
+                            lambda *_: pytest.fail("ranked a list the cap does not cut"))
+        assert len(guard_engine.guard_staged(str(repo))["advisories"]) == 1
+
+    def test_ranking_failure_keeps_original_order(self, repo, monkeypatch):
+        filler = self._hub(repo)
+        _write(repo, "svc/core.py", "def fetch():\n    return 'filler rule layout'\n")
+        _git(repo, "add", "svc/core.py")
+
+        def boom(*_):
+            raise RuntimeError("git exploded")
+
+        monkeypatch.setattr(guard_engine, "_staged_diff_tokens", boom)
+        result = guard_engine.guard_staged(str(repo))
+        assert "error" not in result
+        assert [a["decision_id"] for a in result["advisories"]] == filler[:5]
+
+    def test_diff_tokens_cover_added_removed_and_deleted_files(self, git_repo):
+        _write(git_repo, "a.py", "alpha = 1\n")
+        _write(git_repo, "gone.py", "omega = 1\n")
+        _git(git_repo, "add", "a.py", "gone.py")
+        _commit(git_repo)
+        _write(git_repo, "a.py", "beta = 1\n")
+        _git(git_repo, "rm", "-q", "gone.py")
+        _git(git_repo, "add", "a.py")
+        tokens = guard_engine._staged_diff_tokens(str(git_repo), ["a.py", "gone.py"])
+        assert {"alpha", "beta"} <= tokens["a.py"]
+        assert "omega" in tokens["gone.py"]
+
+    def test_diff_tokens_fail_soft_outside_a_repo(self, tmp_path):
+        assert guard_engine._staged_diff_tokens(str(tmp_path), ["a.py"]) == {}
+
+    # Review findings on #444: each case below failed on the first version of the reader.
+
+    def test_content_lines_that_look_like_headers_stay_content(self, git_repo):
+        # An added "++ x" prints as "+++ x" and a removed "-- y" as "--- y". Inside a hunk
+        # they are content: their words count, and the lines after them still belong to
+        # the same file.
+        _write(git_repo, "old.py", "-- legacy marker\nkeep = 1\n")
+        _git(git_repo, "add", "old.py")
+        _commit(git_repo)
+        _write(git_repo, "old.py", "keep = 1\n")
+        _write(git_repo, "new.py", "++ separator\nafterwards = 1\n")
+        _git(git_repo, "add", "old.py", "new.py")
+        tokens = guard_engine._staged_diff_tokens(str(git_repo), ["new.py", "old.py"])
+        assert {"separator", "afterwards"} <= tokens["new.py"]
+        assert {"legacy", "marker"} <= tokens["old.py"]
+        assert set(tokens) == {"new.py", "old.py"}
+
+    def test_prefix_settings_do_not_hide_paths(self, git_repo):
+        for key, value in (("diff.noprefix", "true"), ("diff.mnemonicPrefix", "true")):
+            _git(git_repo, "config", key, value)
+            _write(git_repo, "a.py", f"marker_{key.split('.')[1].lower()} = 1\n")
+            _git(git_repo, "add", "a.py")
+            tokens = guard_engine._staged_diff_tokens(str(git_repo), ["a.py"])
+            assert "a.py" in tokens, key
+            _git(git_repo, "config", "--unset", key)
+
+    def test_quoted_filenames_key_like_the_staged_list(self, git_repo):
+        names = ['we"ird.py', "tab\tname.py", "back\\slash.py", "caf\u00e9 \"x\".py",
+                 "with space.py"]
+        for i, name in enumerate(names):
+            _write(git_repo, name, f"word{i} = 1\n")
+        _git(git_repo, "add", "-A")
+        staged = guard_engine._staged_files(str(git_repo))
+        assert set(staged) == set(names)
+        tokens = guard_engine._staged_diff_tokens(str(git_repo), staged)
+        assert set(tokens) == set(names)
+        for i, name in enumerate(names):
+            assert f"word{i}" in tokens[name], name
+
+    def test_header_path_unquoting(self):
+        path = guard_engine._git_header_path
+        assert path('"b/we\\"ird.py"', "b/") == 'we"ird.py'
+        assert path('"b/caf\\303\\251.py"', "b/") == "caf\u00e9.py"   # octal UTF-8 bytes
+        assert path('"b/bad\\377.py"', "b/") == "bad\udcff.py"          # surrogateescape byte
+        assert path("b/with space.py\t", "b/") == "with space.py"
+        assert path('"b/caf\u00e9 \\"x\\".py"\t', "b/") == 'caf\u00e9 "x".py'
+        assert path("/dev/null", "a/") is None
+        assert path("new.py", "b/") is None                              # prefix not forced
+
+    def test_reading_stops_at_the_byte_cap(self, git_repo, monkeypatch):
+        _write(git_repo, "big.py", "".join(f"w{i:05d} = 1\n" for i in range(5000)))
+        _git(git_repo, "add", "big.py")
+        monkeypatch.setattr(guard_engine, "_GUARD_RANK_DIFF_BYTES", 4096)
+        seen = []
+        real = guard_engine._read_capped
+
+        def spy(cmd, cap, timeout):
+            out = real(cmd, cap, timeout)
+            seen.append(out)
+            return out
+
+        monkeypatch.setattr(guard_engine, "_read_capped", spy)
+        tokens = guard_engine._staged_diff_tokens(str(git_repo), ["big.py"])
+        data, complete = seen[0]
+        assert len(data) <= 4096 and complete is False
+        assert "w00000" in tokens["big.py"] and "w04999" not in tokens["big.py"]
+
+    def test_capped_reader_reports_failure_and_timeout(self, tmp_path):
+        assert guard_engine._read_capped(["git", "-C", str(tmp_path), "diff", "--cached"],
+                                         1024, 2.0) is None          # not a repo: rc != 0
+        assert guard_engine._read_capped(["sleep", "5"], 1024, 0.2) is None
+        assert guard_engine._read_capped(["definitely-not-a-binary-xyz"], 1024, 1.0) is None
+
+    def test_expired_deadline_skips_ranking_and_git(self, repo, monkeypatch):
+        filler = self._hub(repo)
+        _write(repo, "svc/core.py", "def fetch():\n    return 'filler rule layout'\n")
+        _git(repo, "add", "svc/core.py")
+        monkeypatch.setattr(guard_engine, "_read_capped",
+                            lambda *_: pytest.fail("ran git after the deadline"))
+        evaluated = [p for p in guard_engine._guard_evaluate(str(repo), ["svc/core.py"])
+                     if p["emitted"]]
+        ranked = guard_engine._rank_advisories(str(repo), evaluated, deadline=0.0)
+        assert [p["decision_id"] for p in ranked] == [p["decision_id"] for p in evaluated]
+        assert [p["decision_id"] for p in ranked][:5] == filler[:5]
+
+    def test_git_gets_only_the_time_left(self, repo, monkeypatch):
+        self._hub(repo)
+        _write(repo, "svc/core.py", "x = 2\n")
+        _git(repo, "add", "svc/core.py")
+        budgets = []
+        monkeypatch.setattr(guard_engine, "_read_capped",
+                            lambda cmd, cap, timeout: budgets.append(timeout) or None)
+        evaluated = [p for p in guard_engine._guard_evaluate(str(repo), ["svc/core.py"])
+                     if p["emitted"]]
+        guard_engine._rank_advisories(str(repo), evaluated, deadline=time.time() + 0.5)
+        assert budgets and 0 < budgets[0] <= 0.5
