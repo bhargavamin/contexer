@@ -12,6 +12,7 @@ and stays in store.py.
 
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -615,6 +616,99 @@ def _guard_evaluate(repo_path: str, staged: list[str], decisions: list[dict] | N
     return out
 
 
+# Ranking reads one bounded `git diff --cached -U0` for the whole commit. Over this, the
+# rest of the diff is ignored: ranking is an ordering hint, never a reason to stall a commit.
+_GUARD_RANK_DIFF_BYTES = 1_000_000
+_GUARD_ANCHOR_REASON = "source_files match"
+
+
+def _staged_diff_tokens(repo_path: str, files: list[str]) -> dict[str, set[str]]:
+    """Index tokens of the added and removed lines, per staged relpath. {} on any failure.
+
+    `-U0` keeps context lines out, so a decision is credited only for words the change
+    itself adds or removes. Paths come from the `+++ b/` header (`--- a/` for a deletion);
+    `core.quotePath=false` keeps non-ASCII names unquoted so they match the staged list."""
+    if not files:
+        return {}
+    try:
+        out = subprocess.run(
+            ["git", "-C", repo_path, "-c", "core.quotePath=false", "diff", "--cached",
+             "--unified=0", "--no-color", "--no-ext-diff", "--no-renames", "--", *files],
+            capture_output=True, timeout=store.GIT_FAST_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if out.returncode != 0:
+        return {}
+    text = out.stdout[:_GUARD_RANK_DIFF_BYTES].decode("utf-8", errors="replace")
+    changed: dict[str, list[str]] = {}
+    current = ""
+    old_path = ""
+    for line in text.splitlines():
+        if line.startswith("diff --git "):
+            current = old_path = ""
+        elif line.startswith("--- "):
+            old_path = line[6:].rstrip("\t") if line.startswith("--- a/") else ""
+        elif line.startswith("+++ "):
+            current = line[6:].rstrip("\t") if line.startswith("+++ b/") else old_path
+        elif current and line[:1] in "+-":
+            changed.setdefault(current, []).append(line[1:])
+    return {path: set(retrieval.index_tokens("\n".join(lines)))
+            for path, lines in changed.items()}
+
+
+def _decision_tokens(repo_path: str, ids: set[tuple[str, str]]) -> dict[tuple[str, str], set[str]]:
+    """Index tokens of each (scope, id) decision's current title and content."""
+    out: dict[tuple[str, str], set[str]] = {}
+    for scope, data in (("personal", store.load(repo_path)), ("global", store.load_global())):
+        for entry in data.get("entries") or []:
+            key = (scope, entry.get("id", ""))
+            if key not in ids:
+                continue
+            rev = revisions.current_revision(entry)
+            content = rev.get("content", "") if rev else entry.get("content", "")
+            title = entry.get("title") or ""
+            out[key] = set(retrieval.index_tokens(f"{title} {content}"))
+    return out
+
+
+def _rank_advisories(repo_path: str, surfaced: list[dict]) -> list[dict]:
+    """Order surfaced advisories by how much of each decision the staged change touches (#439).
+
+    Before this, the cap kept whichever pairs came first in store order, so a wording-only
+    commit to a file many decisions are anchored to showed five arbitrary ones. Each pair is
+    now scored by the decisions-rarity-weighted words it shares with that file's added and
+    removed lines (path words excluded: every decision anchored to `store.py` and every diff
+    of it share "store"). Ties keep an explicit `source_files` anchor ahead of an artifact
+    mention, then the original order. Ranking only reorders what the cap shows; it never
+    drops a pair, and any failure keeps the original order, because Tier 1 is advisory and a
+    ranking error must not cost the developer an advisory."""
+    if len(surfaced) < 2:
+        return surfaced
+    try:
+        diff_tokens = _staged_diff_tokens(repo_path, sorted({p["file"] for p in surfaced}))
+        if not diff_tokens:
+            return surfaced
+        keys = {(p["scope"], p["decision_id"]) for p in surfaced}
+        tokens = _decision_tokens(repo_path, keys)
+        df: dict[str, int] = {}
+        for toks in tokens.values():
+            for t in toks:
+                df[t] = df.get(t, 0) + 1
+        n = len(tokens) or 1
+
+        def score(pair: dict) -> tuple[float, int]:
+            path_words = set(retrieval.index_tokens(pair["file"]))
+            shared = (tokens.get((pair["scope"], pair["decision_id"]), set())
+                      & diff_tokens.get(pair["file"], set())) - path_words
+            weight = sum(math.log(1 + n / df.get(t, 1)) for t in shared)
+            return weight, 1 if pair["reason"] == _GUARD_ANCHOR_REASON else 0
+
+        return sorted(surfaced, key=score, reverse=True)
+    except Exception:
+        return surfaced
+
+
 def _guard_staged_paths(repo_path: str, paths: list[str] | None) -> list[str]:
     """Canonicalized staged-file list: `paths` (canonicalized) when explicitly
     given, else the real `git diff --cached` staged set. Shared by guard_staged
@@ -1054,7 +1148,8 @@ def guard_staged(repo_path: str, paths: list[str] | None = None) -> dict:
     never half-block; then the merge-in-progress check (Tier-1's advisory pairing is
     skipped during a merge, but Tier-2's violations already ran above and are
     still reported — a merge conflict is not a license to skip a blocking
-    rule); then pairing -> drop dismissed -> drop throttled -> cap at
+    rule); then pairing -> drop dismissed -> drop throttled -> rank by how much of
+    each decision the staged change touches (only when the cap would cut) -> cap at
     _GUARD_MAX_ADVISORIES (the true count is reported as "total_advisories"
     only when capping actually happened) -> best-effort stamp the throttle for
     exactly the advisories that surfaced (a pair pushed past the cap is NOT
@@ -1088,6 +1183,8 @@ def guard_staged(repo_path: str, paths: list[str] | None = None) -> dict:
 
         evaluated = _guard_evaluate(repo, staged, deadline=deadline)
         surfaced = [p for p in evaluated if p["emitted"]]
+        if len(surfaced) > _GUARD_MAX_ADVISORIES and time.time() < deadline:
+            surfaced = _rank_advisories(repo, surfaced)
         capped = surfaced[:_GUARD_MAX_ADVISORIES]
         result = {"advisories": capped, "violations": violations}
         if unchecked:

@@ -2696,3 +2696,107 @@ class TestWireSafety:
         assert "anchor_commit" not in projected
 
 
+
+
+# ── Tier-1 advisory ranking (#439) ──────────────────────────────────────────
+
+class TestAdvisoryRanking:
+    """When more decisions pair with a commit than the cap shows, the ones the staged change
+    actually touches come first, instead of the first five in store order."""
+
+    def _hub(self, repo, n=7):
+        # n decisions all anchored to one file, seeded before the one that matters, so
+        # store order alone would never surface the last one.
+        ids = [_seed_entry(repo, f"Filler rule number {i} about module layout",
+                           source_files=["svc/core.py"])["id"] for i in range(n)]
+        _write(repo, "svc/core.py", "def fetch():\n    return 1\n")
+        _git(repo, "add", "svc/core.py")
+        _commit(repo)
+        return ids
+
+    def test_decision_named_by_the_diff_ranks_first(self, repo):
+        self._hub(repo)
+        needed = _seed_entry(repo, "Retries use exponential backoff with jitter",
+                             source_files=["svc/core.py"])
+        _write(repo, "svc/core.py",
+               "def fetch():\n    # exponential backoff with jitter between retries\n"
+               "    return 1\n")
+        _git(repo, "add", "svc/core.py")
+        result = guard_engine.guard_staged(str(repo))
+        assert result["total_advisories"] == 8
+        assert result["advisories"][0]["decision_id"] == needed["id"]
+
+    def test_rare_shared_word_outranks_one_every_decision_shares(self, repo):
+        # "rule" sits in every filler decision, so sharing it is weak evidence; the needed
+        # decision's own rare word must win even though the filler also overlaps the diff.
+        self._hub(repo)
+        needed = _seed_entry(repo, "Idempotency keys guard every write rule",
+                             source_files=["svc/core.py"])
+        _write(repo, "svc/core.py", "def fetch():\n    rule = 'idempotency'\n    return 1\n")
+        _git(repo, "add", "svc/core.py")
+        result = guard_engine.guard_staged(str(repo))
+        assert result["advisories"][0]["decision_id"] == needed["id"]
+
+    def test_path_words_earn_no_credit(self, repo):
+        # Every decision anchored to svc/core.py and every diff of it share "core";
+        # that must not lift a decision whose only overlap is the file's own name.
+        filler = self._hub(repo)
+        _seed_entry(repo, "The core module stays importable without the network",
+                    source_files=["svc/core.py"])
+        _write(repo, "svc/core.py", "def fetch():\n    return 2  # core\n")
+        _git(repo, "add", "svc/core.py")
+        result = guard_engine.guard_staged(str(repo))
+        assert [a["decision_id"] for a in result["advisories"]] == filler[:5]
+
+    def test_ties_keep_explicit_anchor_ahead_of_artifact_mention(self, repo):
+        mentions = [_seed_entry(repo, f"See svc/core.py for helper {i}")["id"] for i in range(5)]
+        anchored = _seed_entry(repo, "Keep helpers small", source_files=["svc/core.py"])
+        _write(repo, "svc/core.py", "x = 1\n")
+        _git(repo, "add", "svc/core.py")
+        result = guard_engine.guard_staged(str(repo))
+        ids = [a["decision_id"] for a in result["advisories"]]
+        assert ids[0] == anchored["id"]
+        assert ids[1:] == mentions[:4]
+
+    def test_no_shared_words_keeps_store_order(self, repo):
+        filler = self._hub(repo)
+        _write(repo, "svc/core.py", "def fetch():\n    return 3\n")
+        _git(repo, "add", "svc/core.py")
+        result = guard_engine.guard_staged(str(repo))
+        assert [a["decision_id"] for a in result["advisories"]] == filler[:5]
+
+    def test_under_the_cap_runs_no_diff(self, repo, monkeypatch):
+        _seed_entry(repo, "Retries use exponential backoff", source_files=["svc/core.py"])
+        _write(repo, "svc/core.py", "x = 1\n")
+        _git(repo, "add", "svc/core.py")
+        monkeypatch.setattr(guard_engine, "_rank_advisories",
+                            lambda *_: pytest.fail("ranked a list the cap does not cut"))
+        assert len(guard_engine.guard_staged(str(repo))["advisories"]) == 1
+
+    def test_ranking_failure_keeps_original_order(self, repo, monkeypatch):
+        filler = self._hub(repo)
+        _write(repo, "svc/core.py", "def fetch():\n    return 'filler rule layout'\n")
+        _git(repo, "add", "svc/core.py")
+
+        def boom(*_):
+            raise RuntimeError("git exploded")
+
+        monkeypatch.setattr(guard_engine, "_staged_diff_tokens", boom)
+        result = guard_engine.guard_staged(str(repo))
+        assert "error" not in result
+        assert [a["decision_id"] for a in result["advisories"]] == filler[:5]
+
+    def test_diff_tokens_cover_added_removed_and_deleted_files(self, git_repo):
+        _write(git_repo, "a.py", "alpha = 1\n")
+        _write(git_repo, "gone.py", "omega = 1\n")
+        _git(git_repo, "add", "a.py", "gone.py")
+        _commit(git_repo)
+        _write(git_repo, "a.py", "beta = 1\n")
+        _git(git_repo, "rm", "-q", "gone.py")
+        _git(git_repo, "add", "a.py")
+        tokens = guard_engine._staged_diff_tokens(str(git_repo), ["a.py", "gone.py"])
+        assert {"alpha", "beta"} <= tokens["a.py"]
+        assert "omega" in tokens["gone.py"]
+
+    def test_diff_tokens_fail_soft_outside_a_repo(self, tmp_path):
+        assert guard_engine._staged_diff_tokens(str(tmp_path), ["a.py"]) == {}
