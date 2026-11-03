@@ -573,7 +573,10 @@ async function run() {
 }
 run().catch((err) => { console.error(err); process.exitCode = 1; });
 """
-    proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=10)
+    # The script finishes in well under a second; the timeout only catches a hang. 60s, as in
+    # _run_js: on a loaded CI runner with every xdist worker busy, Node startup alone has
+    # exceeded 10s (Python 3.13 job on #443), failing a test whose logic never ran.
+    proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout.strip())
     assert result == {

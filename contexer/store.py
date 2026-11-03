@@ -6983,6 +6983,35 @@ def _render_prompt_decisions_with_records(
 # router hands it over directly). "" kind means no injection.
 _EMPTY_META = {"kind": "", "count": 0, "topics": []}
 
+# Host-injected blocks that reach UserPromptSubmit as if they were the developer's prompt.
+# A background-task completion arrives as a <task-notification> turn with no developer
+# question in it; ranking its task description or command output injects unrelated
+# decisions (#439). A complete block is removed and the rest of the prompt still routes;
+# an unclosed block runs to the end of the prompt, because nothing after it can be
+# attributed back to the developer. The capture side has its own, stricter parser
+# (`_directive_candidate_text`); retrieval deliberately keeps pasted output and logs,
+# since a pasted stack trace is exactly the signal-rich prompt the router serves.
+_HOST_INJECTED_BLOCK = re.compile(
+    r"<(task-notification|system-reminder|persisted-output)\b[^>]*>.*?(?:</\1\s*>|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+# Host and Contexer text with no closing delimiter: a prompt that starts with one carries no
+# developer question at all. A subset of the prefixes the capture path refuses: a bare
+# "contexer:" is left out, because a developer can open a real question that way.
+_HOST_TURN_PREFIXES = ("[contexer", "your claude.ai usage limit")
+
+
+def _prompt_without_host_text(prompt: str) -> str:
+    """The developer-authored part of a hook prompt, for retrieval: '' for a host turn.
+
+    Removes complete or trailing unclosed host-injected blocks, and returns '' for a prompt
+    that starts with an unterminated host/Contexer prefix. Text the developer wrote around a
+    block is kept unchanged, so an ordinary prompt is returned as is."""
+    text = _HOST_INJECTED_BLOCK.sub(" ", prompt)
+    if text.strip().lower().startswith(_HOST_TURN_PREFIXES):
+        return ""
+    return text
+
 
 def _rendered_meta(kind: str, text: str) -> dict:
     """Count of rendered '- ' lines + derived topics, computed from the SAME text that gets
@@ -7231,6 +7260,11 @@ def _get_context_for_prompt(repo_path: str, prompt: str, session_id: str = "",
     if experiment_variant not in (None, retrieval._ORDINARY_TASK_VARIANT):
         raise ValueError(f"unknown prompt experiment variant: {experiment_variant}")
     if experiment_variant is not None and not isinstance(prompt, str):
+        return "", dict(_EMPTY_META)
+    # A host-generated turn (task notification, system reminder) is not a question: route
+    # only what the developer wrote, and nothing when they wrote nothing (#439).
+    prompt = _prompt_without_host_text(prompt)
+    if not prompt.strip():
         return "", dict(_EMPTY_META)
 
     words_raw = [w.strip("?,./!;:\"'()[]") for w in prompt.lower().split()]

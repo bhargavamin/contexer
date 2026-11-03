@@ -4777,6 +4777,59 @@ class TestIndexSelfHeal:
         assert "JWT" in healed and "cookies" in healed
 
 
+class TestHostTurnsSkipRetrieval:
+    """#439: host-generated turns carry no developer question, so they never route."""
+
+    QUESTION = "why do jwt refresh tokens live in cookies?"
+
+    def test_task_notification_turn_injects_nothing(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        # The notification's own words would match the JWT decision if it were ranked.
+        notification = (
+            "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n"
+            "<summary>Background command \"why do jwt refresh tokens live in cookies?\" "
+            "completed</summary>\n</task-notification>"
+        )
+        assert store.get_context_for_prompt(tmp_repo, notification) == ""
+        assert store.get_context_for_prompt_with_meta(tmp_repo, notification)[1]["kind"] == ""
+
+    def test_system_reminder_and_persisted_output_turns_inject_nothing(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        for tag in ("system-reminder", "persisted-output", "SYSTEM-REMINDER"):
+            turn = f"<{tag}>{self.QUESTION}</{tag}>"
+            assert store.get_context_for_prompt(tmp_repo, turn) == "", tag
+
+    def test_unclosed_block_swallows_the_rest_of_the_prompt(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        turn = f"<task-notification>\n<status>completed</status>\n{self.QUESTION}"
+        assert store.get_context_for_prompt(tmp_repo, turn) == ""
+
+    def test_unterminated_host_prefixes_inject_nothing(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        for turn in (f"[Contexer: auto-fetched for this question] {self.QUESTION}",
+                     f"Your claude.ai usage limit has reset. {self.QUESTION}"):
+            assert store.get_context_for_prompt(tmp_repo, turn) == "", turn
+
+    def test_developer_text_around_a_block_still_routes(self, tmp_repo):
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        plain = store.get_context_for_prompt(tmp_repo, self.QUESTION)
+        assert "JWT" in plain
+        wrapped = (f"<system-reminder>orders route, docker images, helm charts</system-reminder>"
+                   f"\n{self.QUESTION}")
+        assert store.get_context_for_prompt(tmp_repo, wrapped) == plain
+
+    def test_a_question_that_opens_with_contexer_still_routes(self, tmp_repo):
+        # Only the bracketed injected header is a host prefix; a developer may address
+        # Contexer by name.
+        _seed_rv1(tmp_repo, RV1_CORPUS)
+        result = store.get_context_for_prompt(tmp_repo, f"Contexer: {self.QUESTION}")
+        assert "JWT" in result
+
+    def test_ordinary_prompts_are_unchanged(self):
+        for prompt in ("fix the login bug", "why <b>bold</b>?", "a < b > c", ""):
+            assert store._prompt_without_host_text(prompt) == prompt
+
+
 class TestBM25Router:
     def _id_by(self, ids, needle):
         return next(v for k, v in ids.items() if needle in k)
