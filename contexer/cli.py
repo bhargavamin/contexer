@@ -1232,6 +1232,22 @@ def _status_impact(rest: list) -> None:
           if as_json else decision_impact.format_report(result))
 
 
+def _unlinked_named_count(repo: str) -> int:
+    """Trusted decisions in `repo` that name existing files but carry no `source_files` (#439).
+
+    The count `contexer guard anchors` would offer. A decision captured without an anchor is
+    invisible to staleness, and an approved one never passes review again, so this diagnostic
+    is where it surfaces. 0 when there is no repo or anything fails: a status line must never
+    cost the rest of the report."""
+    if not repo:
+        return 0
+    try:
+        from contexer import guard_engine
+        return len(guard_engine.anchor_candidates_for_backfill(repo))
+    except Exception:
+        return 0
+
+
 def status(rest: list | None = None) -> None:
     if "--impact" in (rest or []):
         _status_impact(list(rest or []))
@@ -1324,6 +1340,12 @@ def status(rest: list | None = None) -> None:
             print(f"  current repo: {current_repo}")
         except (OSError, UnicodeDecodeError):
             print("  current repo: (unreadable)")
+    unlinked = _unlinked_named_count(current_repo)
+    if unlinked:
+        noun = "decision names" if unlinked == 1 else "decisions name"
+        print(f"  unlinked:     {unlinked} {noun} repo files without linking them, so edits "
+              f"there never mark {'it' if unlinked == 1 else 'them'} stale - "
+              f"run `contexer guard anchors`")
 
     # Every repo status already knows about, plus the one this shell is in: a repo can carry
     # evidence with no decisions stored yet, and a spool records loss the stores never see.
