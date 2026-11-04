@@ -2897,3 +2897,41 @@ class TestAdvisoryRanking:
                      if p["emitted"]]
         guard_engine._rank_advisories(str(repo), evaluated, deadline=time.time() + 0.5)
         assert budgets and 0 < budgets[0] <= 0.5
+
+
+# ── #439 part 3: anchor candidates from file names the text mentions ────────
+
+class TestFilesNamedIn:
+    def _tree(self, repo):
+        for rel in (".github/workflows/test.yml", "docker-compose.yml", "app/settings.yaml",
+                    "app/core.py", "pyproject.toml", ".pre-commit-config.yaml"):
+            _write(repo, rel, "")
+
+    def test_yml_and_dot_directories_are_found_whole(self, git_repo):
+        self._tree(git_repo)
+        named = guard_engine.files_named_in
+        assert named(str(git_repo), "CI is in .github/workflows/test.yml.") == \
+            [".github/workflows/test.yml"]
+        assert named(str(git_repo), "Start docker-compose.yml, then app/settings.yaml") == \
+            ["app/settings.yaml", "docker-compose.yml"]
+        assert named(str(git_repo), "Hooks: `.pre-commit-config.yaml` (see app/core.py).") == \
+            ["app/core.py", ".pre-commit-config.yaml"]
+
+    def test_only_existing_files_inside_the_repo(self, git_repo):
+        self._tree(git_repo)
+        text = ("See https://example.com/app/core.py, ../outside.py, missing.yml, "
+                "v1.2, e.g. 3.14 and /etc/hosts.conf")
+        assert guard_engine.files_named_in(str(git_repo), text) == []
+
+    def test_fails_soft(self, tmp_path, monkeypatch):
+        assert guard_engine.files_named_in(str(tmp_path), "") == []
+        monkeypatch.setattr(guard_engine, "_candidate_paths_for_entry",
+                            lambda *_: (_ for _ in ()).throw(RuntimeError("boom")))
+        assert guard_engine.files_named_in(str(tmp_path), "app/core.py") == []
+
+    def test_backfill_now_offers_a_yml_file(self, repo):
+        self._tree(repo)
+        entry = _seed_entry(repo, "CI runs two Python versions in .github/workflows/test.yml")
+        rows = guard_engine.anchor_candidates_for_backfill(str(repo))
+        assert rows == [{"decision_id": entry["id"], "title": rows[0]["title"],
+                         "candidates": [".github/workflows/test.yml"]}]

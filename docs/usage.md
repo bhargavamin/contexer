@@ -206,7 +206,7 @@ It never turns a decision into something that stops a commit; only `contexer gua
 
 ### Linking existing decisions to files (`guard anchors`)
 
-Decisions you approved before this linking existed aren't connected to specific files yet. Run this once to catch them up:
+Decisions approved without a link aren't connected to specific files, so editing those files never flags them as possibly outdated. `contexer status` counts the ones in the current repo whose text names a file that exists (the `unlinked:` line). Run this to catch them up:
 
 ```bash
 contexer guard anchors --list   # preview only — nothing changes

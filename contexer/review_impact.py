@@ -270,18 +270,44 @@ def _evidence_files(entry: dict) -> list[str]:
     return [str(f) for f in prop.get("source_files") or []]
 
 
-def _possible_files(entry: dict, meta: dict) -> list[str]:
-    """The non-authoritative paths, from the candidate manifest ONLY.
+def _possible_files(entry: dict, meta: dict, named: list[str] | None = None) -> list[str]:
+    """The non-authoritative paths: the candidate manifest's, the capture-time guesses, and the
+    existing files the decision's own text names (`named`, see `_named_files`).
 
     They are deliberately absent from every proposal: neither a backward temporal guess nor a
-    supporting forward-only edit proves scope, so nothing that could become an anchor carries
-    them. Anything already CONFIRMED is filtered out by either label."""
+    supporting forward-only edit proves scope, and a path the text mentions may be an example
+    rather than the subject, so nothing that could become an anchor carries them. Anything
+    already CONFIRMED is filtered out by either label."""
     confirmed = (set(confirmed_anchors(entry)) | set(_evidence_files(entry))
                  | set(entry.get("source_files") or []))
     possible = list((meta.get("candidate") or {}).get("possible_source_files") or [])
     if entry.get("anchor_candidates_confirmed") is not True:
         possible.extend(entry.get("anchor_candidates") or [])
+    possible.extend(named or [])
     return [str(f) for f in dict.fromkeys(possible) if str(f) not in confirmed]
+
+
+def _named_files(repo_path: str, entry: dict) -> list[str]:
+    """Existing repo files the text under review names, for a decision with no anchor (#439).
+
+    A decision that describes `.github/workflows/test.yml` but was captured without
+    `source_files` never goes stale when that file changes. Review is the one moment a human
+    reads it, so the link is offered there, as a possible file: approval still anchors only
+    what the reviewer passes as `source_files`. Skipped for an anchored decision (its scope is
+    already chosen) and for a retirement or restoration, whose answer writes no anchor."""
+    if entry.get("source_files"):
+        return []
+    prop = _pending_proposal(entry)
+    if prop.get("slot") in _NON_ANCHORING_SLOTS:
+        return []
+    from contexer import guard_engine, revisions
+
+    if prop.get("slot") == "proposed_revision" and prop.get("content"):
+        text = str(prop["content"])
+    else:
+        rev = revisions.current_revision(entry)
+        text = str((rev or {}).get("content") or entry.get("content") or "")
+    return guard_engine.files_named_in(repo_path, text)
 
 
 def _inactive_history(entry: dict) -> dict:
@@ -403,7 +429,7 @@ def review_impact(repo_path: str, entry: dict, context: dict | None = None) -> d
     meta = _live_manifest(entry, context)
     candidate = meta.get("candidate") or {}
     prop = _pending_proposal(entry)
-    possible = _possible_files(entry, meta)
+    possible = _possible_files(entry, meta, _named_files(repo_path, entry))
     # The thing under review is the PROPOSAL when one is sitting, so its provenance is the
     # proposal's own `source`. Reading the entry's `created_by` told a developer that an
     # ai-written rewrite of their own decision came from "your prompt" - the standing entry's

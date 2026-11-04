@@ -861,6 +861,14 @@ def _artifact_path_spellings(artifact: str) -> list[str]:
     return candidates
 
 
+# File names an anchor CANDIDATE may come from, wider than the shared path artifact
+# (`retrieval.raw_path_artifacts`): any extension, and a leading-dot directory or name, so
+# `.github/workflows/test.yml` and `docker-compose.yml` are found whole (#439). Safe only
+# because every candidate is then checked to exist in the working tree and a human ratifies it;
+# the shared pattern stays narrower because it also gates prompt routing and guard pairing.
+_NAMED_FILE_RE = re.compile(r"(?<![\w/.-])\.?[\w-][\w./-]*\.[A-Za-z0-9]{1,10}(?![\w/-])")
+
+
 def _candidate_paths_for_entry(repo: str, repo_root: Path, content: str) -> list[str]:
     """Existing-file anchor candidates for one decision's content: every
     path-like artifact it mentions (_guard_content_artifacts), expanded to its
@@ -875,7 +883,8 @@ def _candidate_paths_for_entry(repo: str, repo_root: Path, content: str) -> list
     marks the decision stale on any change below it (#305)."""
     seen: set[str] = set()
     results: list[str] = []
-    for artifact in _guard_content_artifacts(content):
+    named = [m.rstrip(".") for m in _NAMED_FILE_RE.findall(content or "")]
+    for artifact in dict.fromkeys([*_guard_content_artifacts(content), *named]):
         for raw_path in _artifact_path_spellings(artifact):
             resolved = _guard_relpath(repo, raw_path)
             if resolved in seen or _escapes_repo(resolved):
@@ -906,6 +915,23 @@ def _candidate_paths_for_entry(repo: str, repo_root: Path, content: str) -> list
         else:
             collapsed.append(path)
     return collapsed[:store.MAX_SOURCE_FILES]
+
+
+def files_named_in(repo_path: str, content: str) -> list[str]:
+    """Repo files `content` names that exist in the working tree: the same candidates
+    `contexer guard anchors` offers, for one text. Read-only, fail-soft ([] on any failure).
+
+    These are suggestions for a human to ratify, never an anchor: the review surface shows them
+    as possible files (NOT anchored on approval), so a decision that names
+    `.github/workflows/test.yml` but was captured without `source_files` (#439) is offered the
+    link at the moment someone is reading it, rather than only by a backfill nobody runs."""
+    try:
+        repo = store.resolve_repo(repo_path)
+        if not repo or not content:
+            return []
+        return _candidate_paths_for_entry(repo, Path(repo), content)
+    except Exception:
+        return []
 
 
 def anchor_candidates_for_backfill(repo_path: str) -> list[dict]:
