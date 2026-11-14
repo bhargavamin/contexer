@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.55.0](https://github.com/bhargavamin/contexer/compare/v0.54.1...v0.55.0) (2026-11-14)
+
+
+### Features
+
+* **review:** offer the files a decision names as possible anchors ([0884609](https://github.com/bhargavamin/contexer/commit/08846098bb7c2bf74a061ceabd0db68c8aaaa46c))
+* **review:** offer the files a decision names as possible anchors ([23e16da](https://github.com/bhargavamin/contexer/commit/23e16dadec7e7129a8dd566d7b2a1fd18194afd2)), closes [#439](https://github.com/bhargavamin/contexer/issues/439)
+
 ## [0.54.1](https://github.com/bhargavamin/contexer/compare/v0.54.0...v0.54.1) (2026-11-03)
 
 
