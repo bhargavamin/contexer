@@ -123,8 +123,8 @@ Most of the time this means a short warning naming the decisions related to what
 
 A decision's warnings get sharper once it's linked to the files it's about, and that link is what lets Contexer flag it as possibly outdated when those files change. Links come from two places:
 
-- **A one-time pass** (`contexer guard anchors`) over decisions you approved before this existed — it suggests files from the decision's own text and you confirm, edit, or skip each one.
-- **From confirmed evidence or explicit selection.** A file named by the decision and observed in the evidence is proposed as `would anchor: …`; approving accepts that structural link. Files that were merely edited nearby appear separately as possible and are not anchored by plain approval. To anchor one, select it explicitly with `approve_decision(source_files=[...])`.
+- **A catch-up pass** (`contexer guard anchors`) over decisions that are already approved but not linked — it suggests files from the decision's own text and you confirm, edit, or skip each one. `contexer status` shows an `unlinked:` line with how many such decisions name files in the current repo, so you know when it's worth running.
+- **From confirmed evidence or explicit selection.** A file named by the decision and observed in the evidence is proposed as `would anchor: …`; approving accepts that structural link. Files that were merely edited nearby, and existing files the decision's text names when it isn't linked to anything yet, appear separately as possible and are not anchored by plain approval. To anchor one, select it explicitly with `approve_decision(source_files=[...])`.
 
 Either way, you always see the files before they're linked — nothing is linked to a decision you haven't reviewed.
 

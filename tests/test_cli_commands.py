@@ -2704,3 +2704,40 @@ class TestCommandTable:
         monkeypatch.setattr(cli, "_print_update_backstop", lambda: None)
         cli.dispatch(["ui", "--open"])
         assert seen == [["--open"]]
+
+
+class TestStatusUnlinkedDecisions:
+    """#439 part 3: approved decisions that name repo files without linking them."""
+
+    def _status_with(self, installed_home, monkeypatch, rows):
+        from contexer import guard_engine
+        (installed_home / ".contexer" / ".current_repo").write_text("/tmp/some/repo")
+        monkeypatch.setattr(guard_engine, "anchor_candidates_for_backfill", lambda repo: rows)
+        status()
+
+    def test_reports_the_count_and_the_command(self, installed_home, monkeypatch, capsys):
+        self._status_with(installed_home, monkeypatch, [{"decision_id": "a"}, {"decision_id": "b"}])
+        out = capsys.readouterr().out
+        assert ("  unlinked:     2 decisions name repo files without linking them, so edits "
+                "there never mark them stale - run `contexer guard anchors`") in out
+
+    def test_singular(self, installed_home, monkeypatch, capsys):
+        self._status_with(installed_home, monkeypatch, [{"decision_id": "a"}])
+        assert "1 decision names repo files without linking them, so edits there never " \
+               "mark it stale" in capsys.readouterr().out
+
+    def test_silent_when_nothing_is_unlinked(self, installed_home, monkeypatch, capsys):
+        self._status_with(installed_home, monkeypatch, [])
+        assert "unlinked:" not in capsys.readouterr().out
+
+    def test_a_failing_count_never_breaks_status(self, installed_home, monkeypatch, capsys):
+        from contexer import guard_engine
+
+        def boom(repo):
+            raise RuntimeError("store exploded")
+
+        (installed_home / ".contexer" / ".current_repo").write_text("/tmp/some/repo")
+        monkeypatch.setattr(guard_engine, "anchor_candidates_for_backfill", boom)
+        status()
+        out = capsys.readouterr().out
+        assert "unlinked:" not in out and "current repo: /tmp/some/repo" in out

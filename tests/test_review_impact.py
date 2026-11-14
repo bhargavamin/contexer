@@ -852,3 +852,75 @@ def test_the_environment_is_not_read_by_the_block(tmp_repo, coverage):
         assert block(tmp_repo, only_entry(tmp_repo)) == before
     finally:
         del os.environ["CONTEXER_TEST_NOISE"]
+
+
+# ── #439 part 3: files the decision's own text names ────────────────────────
+
+class TestNamedFiles:
+    """An unanchored decision that names a repo file is offered that file at review, as a
+    POSSIBLE file: shown, never anchored by a plain approval."""
+
+    CI = ("CI runs on two Python versions in .github/workflows/test.yml, "
+          "with no lint or benchmark job.")
+
+    def _pending(self, repo, content=CI, **kw):
+        from tests.conftest import _seed_entry
+        return _seed_entry(repo, content, created_by="ai", status="pending_approval", **kw)
+
+    def test_named_file_is_offered_as_possible_and_not_anchored(self, repo, coverage):
+        _write(repo, ".github/workflows/test.yml", "on: push\n")
+        entry = self._pending(repo)
+        impact = review_impact.review_impact(str(repo), entry)
+        assert impact["files"]["possible_source_files"] == [".github/workflows/test.yml"]
+        assert impact["files"]["confirmed"] == []
+        assert ("Possible files: .github/workflows/test.yml - NOT anchored on approval; "
+                "the relationship is non-authoritative") in review_impact.impact_lines(impact)
+        assert review_impact.anchor_confirmation(entry) == \
+            "No files will be anchored by this approval."
+
+        assert store.approve_decision(str(repo), entry["id"], "approve")[0]
+        approved = next(e for e in store.load(str(repo))["entries"] if e["id"] == entry["id"])
+        assert approved.get("source_files", []) == []
+
+    def test_reviewer_can_link_the_offered_file_explicitly(self, repo, coverage):
+        _write(repo, ".github/workflows/test.yml", "on: push\n")
+        entry = self._pending(repo)
+        assert store.approve_decision(str(repo), entry["id"], "approve",
+                                      source_files=[".github/workflows/test.yml"])[0]
+        approved = next(e for e in store.load(str(repo))["entries"] if e["id"] == entry["id"])
+        assert approved["source_files"] == [".github/workflows/test.yml"]
+
+    def test_a_missing_file_is_not_offered(self, repo, coverage):
+        entry = self._pending(repo)
+        assert review_impact.review_impact(str(repo), entry)["files"][
+            "possible_source_files"] == []
+
+    def test_an_anchored_decision_is_not_offered_more_files(self, repo, coverage):
+        _write(repo, ".github/workflows/test.yml", "on: push\n")
+        _write(repo, "pyproject.toml", "[project]\n")
+        entry = self._pending(repo, self.CI + " Versions come from pyproject.toml.",
+                              source_files=["pyproject.toml"])
+        assert review_impact.review_impact(str(repo), entry)["files"][
+            "possible_source_files"] == []
+
+    def test_a_retirement_lane_offers_no_files(self, repo, coverage):
+        _write(repo, ".github/workflows/test.yml", "on: push\n")
+        entry = self._pending(repo)
+        entry["proposed_lifecycle"] = {"action": "retire", "reason": "anchor lost"}
+        assert review_impact.review_impact(str(repo), entry)["files"][
+            "possible_source_files"] == []
+
+    def test_a_suggested_update_offers_the_files_its_own_text_names(self, repo, coverage):
+        _write(repo, ".github/workflows/test.yml", "on: push\n")
+        _write(repo, "noxfile.py", "")
+        entry = self._pending(repo)
+        entry["proposed_revision"] = {"content": "Sessions are defined in noxfile.py."}
+        assert review_impact.review_impact(str(repo), entry)["files"][
+            "possible_source_files"] == ["noxfile.py"]
+
+    def test_named_files_never_duplicate_another_possible_file(self, repo, coverage):
+        _write(repo, ".github/workflows/test.yml", "on: push\n")
+        entry = self._pending(repo)
+        entry["anchor_candidates"] = [".github/workflows/test.yml"]
+        assert review_impact.review_impact(str(repo), entry)["files"][
+            "possible_source_files"] == [".github/workflows/test.yml"]
